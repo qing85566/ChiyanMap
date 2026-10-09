@@ -27,6 +27,8 @@ namespace MapCacheManager {
         uint8_t biomeCells[BIOME_CELLS_PER_REGION * BIOME_CELLS_PER_REGION] = {0}; // 生物群系索引
         bool dirty = false;
         bool textureDirty = true;
+        int dimId = -1;                                         // 所属维度 ID (0=Overworld, 1=Nether, 2=End)
+        std::string saveDir = "";                               // 所属持久化目录 (带尾部分隔符)
 
         RegionData() {
             std::fill(std::begin(heights), std::end(heights), HEIGHT_UNKNOWN);
@@ -113,7 +115,11 @@ namespace MapCacheManager {
     void MarkTextureDirty(uint64_t hash);
 
     // [新增] 跨界热重载引擎
-    void SwitchWorld(const std::string& worldId, int dimensionId);
+    void SwitchWorld(const std::string& worldId, int dimensionId, const std::string& targetMapId = "");
+
+    // [新增] 多世界/子世界地图实例管理切换
+    void SwitchMap(const std::string& mapId);
+    std::string GetCurrentLoadedMapId();
 
     // [新增] 获取当前正在加载/浏览的维度 ID
     int GetLoadedDimensionId();

@@ -20,9 +20,10 @@ struct Waypoint {
     std::string folder = ""; // 所属文件夹（空表示未分类）
     uint64_t createdAt = 0;  // 创建时间戳（毫秒）
     int order = 0;           // 手动排序次序
+    mutable int8_t isCave = -1; // 主世界层级: -1=自动判定, 0=地表之上, 1=洞穴内
 
     // 构造函数
-    Waypoint() : x(0), y(0), z(0), r(1.f), g(1.f), b(1.f), enabled(true), dimId(0), pinned(false), isTemporary(false), folder(""), createdAt(0), order(0) {}
+    Waypoint() : x(0), y(0), z(0), r(1.f), g(1.f), b(1.f), enabled(true), dimId(0), pinned(false), isTemporary(false), folder(""), createdAt(0), order(0), isCave(-1) {}
 };
 
 namespace WaypointManager {
@@ -37,16 +38,16 @@ namespace WaypointManager {
     void LoadWaypoints();
 
     // 增删查改接口
-    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId = -1, bool pinned = false, const std::string& folder = "");
+    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId = -1, bool pinned = false, const std::string& folder = "", int8_t isCave = -1);
     void RemoveWaypoint(const std::string& id);
     void RemoveWaypoints(const std::set<std::string>& ids);
     void ToggleWaypoint(const std::string& id);
     void ToggleWaypointPin(const std::string& id);
-    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "");
+    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1);
     bool RestoreLastDeletedWaypoint();
 
     // 临时路径点接口 (单例临时路径点，重复设置自动更新)
-    std::string SetTemporaryWaypoint(int x, int y, int z, int dimId = -1);
+    std::string SetTemporaryWaypoint(int x, int y, int z, int dimId = -1, int8_t isCave = -1);
     void ClearTemporaryWaypoint();
     bool HasTemporaryWaypoint();
 
@@ -62,5 +63,8 @@ namespace WaypointManager {
 
     // [新增] 跨界热重载引擎
     void SwitchWorld(const std::string& worldId, int dimensionId);
+    // [新增] 多世界地图实例切换
+    void SwitchMap(const std::string& mapId);
+    std::string GetCurrentMapId();
 }
 

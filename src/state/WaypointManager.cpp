@@ -1,4 +1,5 @@
 #include "state/WaypointManager.h"
+#include "state/MultiworldManager.h"
 #include "state/LanguageManager.h"
 #include <fstream>
 #include <filesystem>
@@ -17,6 +18,7 @@ namespace WaypointManager {
     bool g_hasDeletedWaypoint = false;
     
     std::string g_worldId = "";
+    std::string g_currentMapId = "default";
     int g_currentDim = -999; // 玩家当前所处维度 (0=主世界 1=下界 2=末地)
 
     std::string GenerateID() {
@@ -33,12 +35,18 @@ namespace WaypointManager {
 
     // 生成某维度的路径点存档文件名
     std::string DimensionFile(int dim) {
-        return "mods/ChiyanMap/waypoints/" + g_worldId + "_dim" + std::to_string(dim) + ".json";
+        if (g_currentMapId.empty() || g_currentMapId == "default") {
+            return "mods/ChiyanMap/waypoints/" + g_worldId + "_dim" + std::to_string(dim) + ".json";
+        }
+        return "mods/ChiyanMap/waypoints/" + g_worldId + "_" + g_currentMapId + "_dim" + std::to_string(dim) + ".json";
     }
 
     // 生成自定义文件夹集合存档文件名
     std::string FoldersFile() {
-        return "mods/ChiyanMap/waypoints/" + g_worldId + "_folders.json";
+        if (g_currentMapId.empty() || g_currentMapId == "default") {
+            return "mods/ChiyanMap/waypoints/" + g_worldId + "_folders.json";
+        }
+        return "mods/ChiyanMap/waypoints/" + g_worldId + "_" + g_currentMapId + "_folders.json";
     }
 
     // 读取单个维度的路径点并标记所属维度
@@ -85,6 +93,7 @@ namespace WaypointManager {
                 wp.folder = item.value("folder", "");
                 wp.createdAt = item.value("createdAt", (uint64_t)0);
                 wp.order = item.value("order", (int)g_waypoints.size());
+                wp.isCave = item.value("isCave", (int8_t)-1);
                 if (!wp.folder.empty()) {
                     g_customFolders.insert(wp.folder);
                 }
@@ -118,6 +127,7 @@ namespace WaypointManager {
             obj["folder"] = wp.folder;
             obj["createdAt"] = wp.createdAt;
             obj["order"] = wp.order;
+            obj["isCave"] = (int)wp.isCave;
             int d = (wp.dimId >= 0 && wp.dimId < 3) ? wp.dimId : g_currentDim;
             if (d >= 0 && d < 3) {
                 groups[d].push_back(obj);
@@ -202,12 +212,27 @@ namespace WaypointManager {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             std::filesystem::create_directories("mods/ChiyanMap/waypoints");
             g_worldId = worldId;
+            g_currentMapId = MultiworldManager::GetActiveMapId();
             g_currentDim = dimensionId; // 记录“玩家当前所处维度”，用于新路径点归属
         }
         LoadWaypoints();
     }
 
-    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId, bool pinned, const std::string& folder) {
+    void SwitchMap(const std::string& mapId) {
+        SaveWaypoints();
+        {
+            std::lock_guard<std::mutex> lock(g_wpMutex);
+            g_currentMapId = mapId;
+        }
+        LoadWaypoints();
+    }
+
+    std::string GetCurrentMapId() {
+        std::lock_guard<std::mutex> lock(g_wpMutex);
+        return g_currentMapId.empty() ? "default" : g_currentMapId;
+    }
+
+    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId, bool pinned, const std::string& folder, int8_t isCave) {
         Waypoint wp;
         wp.id = GenerateID();
         wp.name = name;
@@ -217,6 +242,7 @@ namespace WaypointManager {
         wp.dimId = (dimId >= 0 && dimId < 3) ? dimId : g_currentDim; // 默认归属玩家当前维度
         wp.pinned = pinned;
         wp.folder = folder;
+        wp.isCave = isCave;
         wp.createdAt = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -289,7 +315,7 @@ namespace WaypointManager {
         if (changed) SaveWaypoints();
     }
 
-    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned, const std::string& folder) {
+    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned, const std::string& folder, int8_t isCave) {
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             auto it = std::find_if(g_waypoints.begin(), g_waypoints.end(),
@@ -301,6 +327,7 @@ namespace WaypointManager {
             it->enabled = enabled;
             it->pinned = pinned;
             it->folder = folder;
+            it->isCave = isCave;
             if (!folder.empty()) g_customFolders.insert(folder);
         }
         SaveWaypoints();
@@ -317,7 +344,7 @@ namespace WaypointManager {
         return true;
     }
 
-    std::string SetTemporaryWaypoint(int x, int y, int z, int dimId) {
+    std::string SetTemporaryWaypoint(int x, int y, int z, int dimId, int8_t isCave) {
         int targetDim = (dimId >= 0 && dimId < 3) ? dimId : g_currentDim;
         std::string resId;
         bool found = false;
@@ -329,6 +356,7 @@ namespace WaypointManager {
                     wp.y = y;
                     wp.z = z;
                     wp.dimId = targetDim;
+                    wp.isCave = isCave;
                     wp.enabled = true;
                     wp.name = LanguageManager::GetText("TEMP_WAYPOINT_NAME");
                     wp.createdAt = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -347,6 +375,7 @@ namespace WaypointManager {
             wp.r = 0.0f; wp.g = 0.9f; wp.b = 1.0f; // 鲜明醒目的天青色
             wp.enabled = true;
             wp.dimId = targetDim;
+            wp.isCave = isCave;
             wp.pinned = false;
             wp.isTemporary = true;
             wp.folder = "";

@@ -39,6 +39,231 @@ namespace LanguageManager {
             {"uk",    "Глобальний масштаб інтерфейсу"},
             {"vi",    "Tỷ lệ giao diện người dùng chung"}
         }},
+        {"MAP_SELECTION_TITLE", {
+            {"zh_CN", "地图实例管理"},
+            {"zh_TW", "地圖實例管理"},
+            {"en_US", "Map Selection & Multiworld"}
+        }},
+        {"MAP_SELECTION_MODE", {
+            {"zh_CN", "地图选择模式"},
+            {"zh_TW", "地圖選擇模式"},
+            {"en_US", "Map Selection Mode"}
+        }},
+        {"MAP_MODE_SINGLE", {
+            {"zh_CN", "单张地图"},
+            {"zh_TW", "單張地圖"},
+            {"en_US", "Single Map"}
+        }},
+        {"MAP_MODE_MANUAL", {
+            {"zh_CN", "手动选择"},
+            {"zh_TW", "手動選擇"},
+            {"en_US", "Manual Selection"}
+        }},
+        {"MAP_MODE_WORLD_SPAWN", {
+            {"zh_CN", "出生点自动"},
+            {"zh_TW", "出生點自動"},
+            {"en_US", "World Spawn Auto"}
+        }},
+        {"MAP_MODE_SINGLE_DESC", {
+            {"zh_CN", "每个维度仅使用唯一的默认地图实例，适合单人或纯净服。"},
+            {"zh_TW", "每個維度僅使用唯一的預設地圖實例，適合單人或純淨服。"},
+            {"en_US", "Each dimension uses a single default map instance, suitable for vanilla worlds."}
+        }},
+        {"MAP_MODE_MANUAL_DESC", {
+            {"zh_CN", "自由创建、重命名和切换地图实例，适合子服多世界。"},
+            {"zh_TW", "自由建立、重新命名和切換地圖實例，適合子服多世界。"},
+            {"en_US", "Manually create, rename, and switch map instances for multiworld servers."}
+        }},
+        {"MAP_MODE_WORLD_SPAWN_DESC", {
+            {"zh_CN", "根据世界出生点坐标变动自动切分/切换地图实例。"},
+            {"zh_TW", "根據世界出生點座標變動自動切分/切換地圖實例。"},
+            {"en_US", "Automatically split and switch map based on world spawn point changes."}
+        }},
+        {"MAP_DEFAULT_NAME", {
+            {"zh_CN", "默认地图"},
+            {"zh_TW", "預設地圖"},
+            {"en_US", "Default Map"}
+        }},
+        {"CREATE_NEW_MAP", {
+            {"zh_CN", "新建地图实例"},
+            {"zh_TW", "建立新地圖實例"},
+            {"en_US", "Create New Map"}
+        }},
+        {"MAP_NAME_INPUT", {
+            {"zh_CN", "地图名称"},
+            {"zh_TW", "地圖名稱"},
+            {"en_US", "Map Name"}
+        }},
+        {"MAP_ID_LABEL", {
+            {"zh_CN", "唯一标识 (ID)"},
+            {"zh_TW", "唯一識別 (ID)"},
+            {"en_US", "Identifier (ID)"}
+        }},
+        {"ACTIVE_MAP", {
+            {"zh_CN", "当前活动"},
+            {"zh_TW", "目前活動"},
+            {"en_US", "Active"}
+        }},
+        {"SELECT_MAP", {
+            {"zh_CN", "切换至此"},
+            {"zh_TW", "切換至此"},
+            {"en_US", "Select"}
+        }},
+        {"RENAME_MAP", {
+            {"zh_CN", "重命名"},
+            {"zh_TW", "重新命名"},
+            {"en_US", "Rename"}
+        }},
+        {"DELETE_MAP", {
+            {"zh_CN", "删除地图"},
+            {"zh_TW", "刪除地圖"},
+            {"en_US", "Delete Map"}
+        }},
+        {"DELETE_MAP_CONFIRM", {
+            {"zh_CN", "确定要删除此地图实例吗？其数据将备份移至 maps_backup 目录。"},
+            {"zh_TW", "確定要刪除此地圖實例嗎？其資料將備份移至 maps_backup 目錄。"},
+            {"en_US", "Are you sure you want to delete this map instance? Data will be moved to maps_backup."}
+        }},
+        {"CONNECT_MAP", {
+            {"zh_CN", "互联设置"},
+            {"zh_TW", "互聯設定"},
+            {"en_US", "Connections"}
+        }},
+        {"CONNECT_MAP_MODAL_TITLE", {
+            {"zh_CN", "地图互联管理"},
+            {"zh_TW", "地圖互聯管理"},
+            {"en_US", "Map Connections Management"}
+        }},
+        {"CONNECTED_MAPS_DESC", {
+            {"zh_CN", "已互联的地图实例之间允许跨图进行坐标交互与传送。"},
+            {"zh_TW", "已互聯的地圖實例之間允許跨圖進行座標互動與傳送。"},
+            {"en_US", "Connected map instances allow cross-map coordinate interaction and teleportation."}
+        }},
+        {"DISCONNECTED_MAP_WARN", {
+            {"zh_CN", "当前地图尚未与活动地图建立互联！跨未互联地图传送可能导致窒息或坠落虚空。"},
+            {"zh_TW", "目前地圖尚未與活動地圖建立互聯！跨未互聯地圖傳送可能導致窒息或墜落虛空。"},
+            {"en_US", "This map is not connected to the current active map! Cross-teleportation may cause suffocation."}
+        }},
+        {"CURRENT_MAP_LABEL", {
+            {"zh_CN", "地图: %s"},
+            {"zh_TW", "地圖: %s"},
+            {"en_US", "Map: %s"}
+        }},
+        {"MANAGE_MAPS", {
+            {"zh_CN", "管理地图实例与互联..."},
+            {"zh_TW", "管理地圖實例與互聯..."},
+            {"en_US", "Manage Maps & Connections..."}
+        }},
+        {"MAP_REGIONS_COUNT", {
+            {"zh_CN", "%d 个区域"},
+            {"zh_TW", "%d 個區域"},
+            {"en_US", "%d regions"}
+        }},
+        {"MAP_SPAWN_COORDS", {
+            {"zh_CN", "绑定出生点: (%d, %d)"},
+            {"zh_TW", "綁定出生點: (%d, %d)"},
+            {"en_US", "Bound Spawn: (%d, %d)"}
+        }},
+        {"NEW_MAP_NAME_EMPTY", {
+            {"zh_CN", "地图名称不能为空！"},
+            {"zh_TW", "地圖名稱不能為空！"},
+            {"en_US", "Map name cannot be empty!"}
+        }},
+        {"NEW_MAP_NAME_EXISTS", {
+            {"zh_CN", "已存在同名或同标识的地图实例！"},
+            {"zh_TW", "已存在同名或同識別的地圖實例！"},
+            {"en_US", "A map instance with this name or ID already exists!"}
+        }},
+        {"CANNOT_DELETE_ACTIVE_MAP", {
+            {"zh_CN", "无法删除当前正在活动的地图实例！"},
+            {"zh_TW", "無法刪除目前正在活動的地圖實例！"},
+            {"en_US", "Cannot delete the currently active map instance!"}
+        }},
+        {"CANNOT_DELETE_DEFAULT_MAP", {
+            {"zh_CN", "默认地图受系统保护，不可删除！"},
+            {"zh_TW", "預設地圖受系統保護，不可刪除！"},
+            {"en_US", "Default map is protected and cannot be deleted!"}
+        }},
+        {"CONFIRM_DELETE_MAP", {
+            {"zh_CN", "确认删除"},
+            {"zh_TW", "確認刪除"},
+            {"en_US", "Confirm Delete"}
+        }},
+        {"MAP_INSTANCE_COL_STATUS", {
+            {"zh_CN", "状态"},
+            {"zh_TW", "狀態"},
+            {"en_US", "Status"}
+        }},
+        {"MAP_INSTANCE_COL_NAME", {
+            {"zh_CN", "地图名称"},
+            {"zh_TW", "地圖名稱"},
+            {"en_US", "Name"}
+        }},
+        {"MAP_INSTANCE_COL_ID", {
+            {"zh_CN", "标识ID"},
+            {"zh_TW", "識別ID"},
+            {"en_US", "ID"}
+        }},
+        {"MAP_INSTANCE_COL_REGIONS", {
+            {"zh_CN", "已缓存区域"},
+            {"zh_TW", "已快取區域"},
+            {"en_US", "Cached Regions"}
+        }},
+        {"MAP_INSTANCE_COL_CONNECTIONS", {
+            {"zh_CN", "已互联"},
+            {"zh_TW", "已互聯"},
+            {"en_US", "Connected"}
+        }},
+        {"MAP_INSTANCE_COL_ACTIONS", {
+            {"zh_CN", "操作"},
+            {"zh_TW", "操作"},
+            {"en_US", "Actions"}
+        }},
+        {"STANDBY_MAP", {
+            {"zh_CN", "备用"},
+            {"zh_TW", "備用"},
+            {"en_US", "Standby"}
+        }},
+        {"MAP_TOTAL_INFO", {
+            {"zh_CN", "总计 %d 个地图 (当前活动: %s)"},
+            {"zh_TW", "總計 %d 個地圖 (目前活動: %s)"},
+            {"en_US", "Total %d maps (Active: %s)"}
+        }},
+        {"MAP_INSTANCES_COUNT", {
+            {"zh_CN", "%d 实例"},
+            {"zh_TW", "%d 實例"},
+            {"en_US", "%d instances"}
+        }},
+        {"CONFIRM", {
+            {"zh_CN", "确认"},
+            {"zh_TW", "確認"},
+            {"en_US", "Confirm"}
+        }},
+        {"CANCEL", {
+            {"zh_CN", "取消"},
+            {"zh_TW", "取消"},
+            {"en_US", "Cancel"}
+        }},
+        {"SAVE", {
+            {"zh_CN", "保存"},
+            {"zh_TW", "儲存"},
+            {"en_US", "Save"}
+        }},
+        {"CLOSE", {
+            {"zh_CN", "关闭"},
+            {"zh_TW", "關閉"},
+            {"en_US", "Close"}
+        }},
+        {"DELETE", {
+            {"zh_CN", "删除"},
+            {"zh_TW", "刪除"},
+            {"en_US", "Delete"}
+        }},
+        {"WARNING", {
+            {"zh_CN", "警告"},
+            {"zh_TW", "警告"},
+            {"en_US", "Warning"}
+        }},
         {"RESET_OPTIMAL_SCALE", {
             {"zh_CN", "重置为默认最佳缩放"},
             {"zh_TW", "重設為預設最佳縮放"},

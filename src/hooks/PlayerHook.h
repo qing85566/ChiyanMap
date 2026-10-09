@@ -35,6 +35,7 @@ using ChiyanMapMaterialType = ::SharedTypes::v1_26_20::MaterialType;
 #endif
 #include "state/WaypointManager.h"
 #include "state/DeathPointManager.h"
+#include "state/MultiworldManager.h"
 #include <mc/world/level/BlockPos.h>
 #include <mc/deps/core/math/Vec3.h>
 #include <mc/world/level/Level.h>
@@ -1876,10 +1877,12 @@ inline mce::Color getBlockColor(std::string const& rawName, mce::Color grassCol,
         {"packed_ice", mce::Color(0.553f, 0.702f, 0.980f, 1.00f)},
         {"packed_mud", mce::Color(0.557f, 0.420f, 0.310f, 1.00f)},
         {"pale_hanging_moss", mce::Color(0.376f, 0.392f, 0.369f, 1.00f)},
+        {"pale_leaves", mce::Color(0.431f, 0.451f, 0.420f, 1.00f)},
         {"pale_moss_block", mce::Color(0.408f, 0.431f, 0.404f, 1.00f)},
         {"pale_moss_carpet", mce::Color(0.408f, 0.431f, 0.404f, 1.00f)},
         {"pale_oak_button", mce::Color(0.945f, 0.914f, 0.906f, 1.00f)},
         {"pale_oak_door", mce::Color(0.848f, 0.816f, 0.811f, 1.00f)},
+        {"pale_oak_leaves", mce::Color(0.431f, 0.451f, 0.420f, 1.00f)},
         {"pale_oak_fence", mce::Color(0.859f, 0.820f, 0.816f, 1.00f)},
         {"pale_oak_fence_gate", mce::Color(0.859f, 0.820f, 0.816f, 1.00f)},
         {"pale_oak_hanging_sign", mce::Color(0.859f, 0.820f, 0.816f, 1.00f)},
@@ -2409,7 +2412,7 @@ inline mce::Color getBlockColor(std::string const& rawName, mce::Color grassCol,
 
     // [苍白橡木全套 (Pale Oak)] 原版冷调银灰白系列 - 优先于通用木材规则
     if (name.find("pale_oak") != std::string::npos) {
-        if (name.find("leaves") != std::string::npos) return mce::Color(0.50f, 0.53f, 0.44f, 1.0f);
+        if (name.find("leaves") != std::string::npos) return mce::Color(0.431f, 0.451f, 0.420f, 1.0f);
         if (name.find("sapling") != std::string::npos) return mce::Color(0.45f, 0.52f, 0.38f, 1.0f);
         if (name.find("stripped") != std::string::npos) return mce::Color(0.87f, 0.84f, 0.84f, 1.0f); // 去皮苍白橡木 #DFD7D6
         if (name.find("log") != std::string::npos || name.find("wood") != std::string::npos) {
@@ -3253,19 +3256,22 @@ inline bool IsStoneLikeBlock(std::string const& name) noexcept {
 }
 
 // ==========================================
-// [安全方块查询] SEH 包装的 getBlock 查询
-// 与 SafeGetSurfaceY 同模式：__try/__except 仅用 POD + out 参数
-// 避免 std::string 析构与 SEH 冲突（v1-v6 教训：部分加载 chunk 的 NULL subchunk 指针引发 0xC0000005）
+// [安全方块查询] try/catch 包装的 getBlock 查询
+// 与 SafeGetBiomeName 同模式：在 /EHa 模式下 catch(...) 可捕获 SEH AV 并保证 C++ 栈正确展开，
+// 避免 std::string 析构与 SEH 冲突（防止部分加载 chunk 的 NULL subchunk 引发堆损坏 0xC0000374）
 // ==========================================
 inline bool SafeGetBlockName(BlockSource& region, int x, int y, int z, std::string& outName) noexcept {
-    __try {
+    try {
         auto const& block = region.getBlock(BlockPos(x, y, z));
-        outName = block.getTypeName();
-        return !outName.empty();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        outName.clear();
-        return false;
+        std::string name = block.getTypeName();
+        if (!name.empty()) {
+            outName = std::move(name);
+            return true;
+        }
+    } catch (...) {
     }
+    outName.clear();
+    return false;
 }
 
 // ==================== 洞穴材质判定 (汲取 0.3.4 优势: Material枚举精准识别通道/水体) ====================
@@ -3841,6 +3847,39 @@ inline bool IsValidGroundName(std::string const& name, int dimId = 0) noexcept {
     return true; // 主世界与下界：非危险方块即可站立
 }
 
+// [无法承重的非实体/装饰方块判定]
+// 仅判定确实无法作为脚下站立支撑的虚体/细长植物/附着物
+// 注意：water(水体)、leaves(树叶)、snow(雪层)、carpet(地毯)、lily(荷叶)、sculk_vein(幽匿脉络)等均允许站立
+inline bool IsNonSupportingPassable(std::string const& name) noexcept {
+    if (name.empty()) return true;
+    if (IsAirLikeName(name)) return true;
+    if (name.find("torch") != std::string::npos) return true;
+    if (name.find("short_grass") != std::string::npos || 
+        name.find("tallgrass") != std::string::npos || 
+        name.find("tall_grass") != std::string::npos ||
+        (name.find("grass") != std::string::npos && name.find("grass_block") == std::string::npos && name.find("path") == std::string::npos && name.find("seagrass") == std::string::npos)) {
+        return true;
+    }
+    if (name.find("flower") != std::string::npos && name.find("chorus_flower") == std::string::npos) return true;
+    if (name.find("tulip") != std::string::npos || name.find("rose") != std::string::npos || name.find("dandelion") != std::string::npos ||
+        name.find("orchid") != std::string::npos || name.find("allium") != std::string::npos || name.find("bluet") != std::string::npos ||
+        name.find("poppy") != std::string::npos || name.find("daisy") != std::string::npos || name.find("cornflower") != std::string::npos ||
+        name.find("sunflower") != std::string::npos || name.find("lilac") != std::string::npos || name.find("peony") != std::string::npos) {
+        return true;
+    }
+    if (name.find("fern") != std::string::npos) return true;
+    if (name.find("deadbush") != std::string::npos || name.find("dead_bush") != std::string::npos) return true;
+    if (name.find("sapling") != std::string::npos) return true;
+    if (name.find("rail") != std::string::npos) return true;
+    if (name.find("button") != std::string::npos || name.find("lever") != std::string::npos || name.find("tripwire") != std::string::npos) return true;
+    if (name.find("pressure_plate") != std::string::npos) return true;
+    if (name.find("sign") != std::string::npos || name.find("banner") != std::string::npos) return true;
+    if (name.find("firefly") != std::string::npos) return true;
+    if (name.find("crop") != std::string::npos || name.find("wheat") != std::string::npos || name.find("carrots") != std::string::npos ||
+        name.find("potatoes") != std::string::npos || name.find("beetroot") != std::string::npos) return true;
+    return false;
+}
+
 // [安全站立空间判定] 判断玩家脚部/头部所处空间是否通畅且安全（非窒息、非岩浆）
 // 严禁将草方块(grass_block)、巨型蘑菇方块(mushroom_block)等实体方块判定为可站立空间
 inline bool IsBreathableSpaceName(std::string const& name, int dimId = 0) noexcept {
@@ -3912,6 +3951,7 @@ inline bool IsTeleportSpotSafe(BlockSource& region, int blockX, int blockY, int 
         if (!IsBreathableSpaceName(feetName, dimId)) return false;
         if (!IsBreathableSpaceName(headName, dimId)) return false;
         if (!IsValidGroundName(groundName, dimId)) return false;
+        if (IsNonSupportingPassable(groundName)) return false;
 
         // [水域安全强化] 传送到水域时必须落在水面，头部不能浸没在水中（水底），确保呼吸与安全
         if (dimId == 0) {
@@ -3950,17 +3990,35 @@ inline bool HasAdjacentHazard(BlockSource& region, int x, int y, int z, int radi
 // [地表露天验证] 验证目标落脚点之上无实心岩石/深板岩/地底天花板阻挡
 // 杜绝两阶段探测传送到地下洞穴天花板下方或未加载完整的下层岩石中窒息
 inline bool HasOpenSkyAbove(BlockSource& region, int x, short standY, int z, int dimId = 0) noexcept {
-    if (dimId == 1) return true; // 下界为封闭洞穴结构，不适用露天检查
+    if (dimId == 1) return true; // 下界为封闭洞穴结构，由专用洞穴净空逻辑检测
     try {
-        // 主世界全量向上巡检至建筑高度上限 319；末地巡检至 256
-        short scanLimit = (dimId == 2) ? 256 : 319;
-        for (short y = standY + 2; y <= scanLimit; ++y) {
-            std::string name;
-            if (!SafeGetBlockName(region, x, y, z, name)) {
-                // 上方有 subchunk 尚未加载到达客户端 (AV/空指针) → 视为未就绪
+        short surfY = SafeGetSurfaceY(region, x, z);
+        // 1. 如果 standY 远低于 surfY (如落差超过 3 格)，说明在洞穴或天花板下方，绝对不是露天！
+        if (surfY > -64 && surfY < 319 && standY < surfY - 3) {
+            return false;
+        }
+
+        // 2. 主世界海平面保护：如果 standY < 62 且不是水体，拒绝露天判定（防止未加载完高层 subchunk 的地底假象）
+        if (dimId == 0 && standY < 62) {
+            std::string ground;
+            if (!SafeGetBlockName(region, x, standY - 1, z, ground) || ground.find("water") == std::string::npos) {
                 return false;
             }
-            if (name.empty()) return false;
+        }
+
+        // 3. 向上真实露天扫描：从 standY + 2 扫描到 standY + 32 (且至少达到 Y=128)
+        short scanLimit = (dimId == 2) ? 256 : 319;
+        short maxCheck = std::min((short)scanLimit, (short)std::max((short)128, (short)(standY + 32)));
+        for (short y = standY + 2; y <= maxCheck; ++y) {
+            std::string name;
+            if (!SafeGetBlockName(region, x, y, z, name)) {
+                // 读取失败：如果在 128 以下读取失败，说明 subchunk 尚未下发完成，绝不能当作露天空气！
+                if (y <= 128) return false;
+                // 128 以上若无 subchunk，且 standY 已高于海平面，视为高空虚空
+                if (standY >= 62) continue;
+                return false;
+            }
+            if (name.empty()) continue;
             if (IsAirLikeName(name)) continue;
             // 允许树木枝叶、树冠、雪层、藤蔓等自然地表覆盖物
             if (name.find("leaf") != std::string::npos || name.find("leaves") != std::string::npos) continue;
@@ -3972,6 +4030,22 @@ inline bool HasOpenSkyAbove(BlockSource& region, int x, short standY, int z, int
             // 遇到任何其他非透气实体方块（岩石/深板岩/泥土/矿石/砂岩等天花板）→ 绝对不是露天！
             return false;
         }
+
+        // 4. 高空抽样检查（Y=160, 220, 280），防止高空悬浮实心结构或未下发的巨型山体
+        static const short kHighSamples[] = { 160, 220, 280 };
+        for (short hy : kHighSamples) {
+            if (hy > standY + 2 && hy <= scanLimit) {
+                std::string hName;
+                if (SafeGetBlockName(region, x, hy, z, hName) && !hName.empty()) {
+                    if (!IsAirLikeName(hName) && !IsBreathableSpaceName(hName, dimId) &&
+                        hName.find("leaf") == std::string::npos && hName.find("leaves") == std::string::npos &&
+                        hName.find("vine") == std::string::npos && hName.find("snow") == std::string::npos) {
+                        return false; // 高空存在实心方块，不是真正露天
+                    }
+                }
+            }
+        }
+
         return true;
     } catch (...) {
         return false;
@@ -3983,9 +4057,9 @@ inline bool HasOpenSkyAbove(BlockSource& region, int x, short standY, int z, int
 // 1. 严格限制脚部Y在 [33, 100] 区间（避开Y<=31岩浆海与Y>=105天花板基岩缝隙）
 // 2. 支撑方块为非岩浆、非空气、非火焰、非岩浆块的实心支撑
 // 3. 脚部(y)、头部(y+1)以及头部上方(y+2)全部通畅，至少保证 3 格垂直净空，杜绝起跳卡头窒息
-// 4. 水平四周检查：脚部与头部四周至少有 2 个方向通畅，杜绝 1x1 嵌岩缝隙导致窒息
+// 4. 水平四周检查：脚部四周至少有 2 个方向通畅，且 3x3 邻域至少 3 方向通畅，杜绝 1x1 嵌岩缝隙导致窒息
 // 5. 按开阔度与净空评分，优先选择最开阔、最安全的洞穴平坦地面
-inline short FindBestNetherSpawnInColumn(BlockSource& region, int x, int z, int preferredY, int& outScore) noexcept {
+inline short FindBestNetherSpawnInColumn(BlockSource& region, int x, int z, int preferredY, int& outScore, bool strict = true) noexcept {
     outScore = -1;
     short bestY = -32000;
 
@@ -3997,7 +4071,7 @@ inline short FindBestNetherSpawnInColumn(BlockSource& region, int x, int z, int 
         std::string groundName;
         if (!SafeGetBlockName(region, x, y - 1, z, groundName) || groundName.empty()) continue;
         if (!IsValidGroundName(groundName, 1)) continue;
-        if (IsBreathableSpaceName(groundName, 1)) continue; // 支撑方块不能是空气/植物/透光虚体
+        if (IsNonSupportingPassable(groundName)) continue; // 支撑方块不能是空气/植物/透光虚体
         if (groundName.find("magma") != std::string::npos) continue;
 
         // 2. 脚部 (y) 与 头部 (y + 1) 校验
@@ -4005,9 +4079,10 @@ inline short FindBestNetherSpawnInColumn(BlockSource& region, int x, int z, int 
         if (!SafeGetBlockName(region, x, y, z, feetName) || !IsBreathableSpaceName(feetName, 1)) continue;
         if (!SafeGetBlockName(region, x, y + 1, z, headName) || !IsBreathableSpaceName(headName, 1)) continue;
 
-        // 3. 头部上方空间 (y + 2) 校验：至少 3 格连续垂直净空
-        std::string aboveName;
+        // 3. 头部上方空间 (y + 2, y + 3) 校验：至少 4 格连续垂直净空，杜绝起跳卡头窒息
+        std::string aboveName, above2Name;
         if (!SafeGetBlockName(region, x, y + 2, z, aboveName) || !IsBreathableSpaceName(aboveName, 1)) continue;
+        if (!SafeGetBlockName(region, x, y + 3, z, above2Name) || !IsBreathableSpaceName(above2Name, 1)) continue;
 
         // 4. 水平四周开阔度校验 (杜绝 1x1 夹缝穿模窒息)
         static const struct { int dx, dz; } kAdj[] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
@@ -4019,9 +4094,26 @@ inline short FindBestNetherSpawnInColumn(BlockSource& region, int x, int z, int 
                 openSides++;
             }
         }
-        if (openSides < 1) continue; // 至少保证一侧水平畅通，绝不落在 4 面实心石缝中
+        if (strict && openSides < 2) continue; // 严格模式下必须至少两面开阔
+        if (!strict && openSides < 1) continue;
 
-        // 5. 测量实际净空高度
+        // 3x3 邻域开阔度 (8 邻居)
+        int openSurr = 0;
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dz = -1; dz <= 1; ++dz) {
+                if (dx == 0 && dz == 0) continue;
+                std::string sFeet;
+                if (SafeGetBlockName(region, x + dx, y, z + dz, sFeet) && IsBreathableSpaceName(sFeet, 1)) {
+                    openSurr++;
+                }
+            }
+        }
+        if (strict && openSurr < 3) continue;
+
+        // 5. 危险物检查 (避开相邻岩浆或火)
+        if (HasAdjacentHazard(region, x, y, z, 1, 1)) continue;
+
+        // 6. 测量实际净空高度
         int headroom = 3;
         for (int h = y + 3; h <= std::min(y + 16, 120); ++h) {
             std::string hName;
@@ -4032,8 +4124,8 @@ inline short FindBestNetherSpawnInColumn(BlockSource& region, int x, int z, int 
             }
         }
 
-        // 6. 综合评分：净空越高、四周越开阔得分越高，更优先开阔大溶洞地面
-        int score = headroom * 12 + openSides * 20;
+        // 7. 综合评分：开阔度与净空加权，优先选择大溶洞开阔地面
+        int score = headroom * 12 + openSides * 25 + openSurr * 10;
         int targetRef = (preferredY >= 33 && preferredY <= 100) ? preferredY : 64;
         score -= std::abs(y - targetRef) * 2;
 
@@ -4046,33 +4138,23 @@ inline short FindBestNetherSpawnInColumn(BlockSource& region, int x, int z, int 
     return bestY;
 }
 
-// [下界附近最佳安全点搜索] 螺旋搜索附近列，寻找最开阔安全的洞穴地面
-inline bool FindBestSafeSpawnNether(BlockSource& region, int& x, int& z, short& outY, int preferredY = 64, int maxRadius = 16) noexcept {
+// [下界大范围开阔安全点搜索] 遍历一片区域，寻找最开阔安全的洞穴地面 (x, z 可自由变化)
+inline bool FindBestSafeSpawnNether(BlockSource& region, int& x, int& z, short& outY, int preferredY = 64, int maxRadius = 24) noexcept {
     int bestScore = -1;
     short bestY = -32000;
     int bestX = x, bestZ = z;
 
-    int selfScore = -1;
-    short selfY = FindBestNetherSpawnInColumn(region, x, z, preferredY, selfScore);
-    if (selfY > -64 && selfScore >= 45) {
-        outY = selfY;
-        return true;
-    }
-    if (selfY > -64) {
-        bestScore = selfScore;
-        bestY = selfY;
-    }
-
-    for (int r = 1; r <= maxRadius; ++r) {
+    // 第一轮：严格模式 (openSides >= 2, openSurr >= 3, 搜索整片区域，轻微距离衰减)
+    for (int r = 0; r <= maxRadius; ++r) {
         for (int dx = -r; dx <= r; ++dx) {
             for (int dz = -r; dz <= r; ++dz) {
                 if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
                 int testX = x + dx;
                 int testZ = z + dz;
                 int colScore = -1;
-                short colY = FindBestNetherSpawnInColumn(region, testX, testZ, preferredY, colScore);
+                short colY = FindBestNetherSpawnInColumn(region, testX, testZ, preferredY, colScore, true);
                 if (colY > -64) {
-                    colScore -= r * 3;  // 距离惩罚
+                    colScore -= (r / 2);  // 极轻微距离惩罚，鼓励选择更远的大溶洞开阔平地
                     if (colScore > bestScore) {
                         bestScore = colScore;
                         bestY = colY;
@@ -4082,7 +4164,8 @@ inline bool FindBestSafeSpawnNether(BlockSource& region, int& x, int& z, short& 
                 }
             }
         }
-        if (bestScore >= 60) {
+        // 若在 r >= 8 之后已找到综合得分 >= 120 的极高品质开阔大溶洞，可提前采纳
+        if (bestScore >= 120 && r >= 8) {
             x = bestX;
             z = bestZ;
             outY = bestY;
@@ -4090,7 +4173,37 @@ inline bool FindBestSafeSpawnNether(BlockSource& region, int& x, int& z, short& 
         }
     }
 
-    if (bestY > -64) {
+    if (bestY > -64 && bestScore > 0) {
+        x = bestX;
+        z = bestZ;
+        outY = bestY;
+        return true;
+    }
+
+    // 第二轮：宽松模式 (openSides >= 1, 扩大至 maxRadius + 8)
+    int fallbackLimit = std::min(32, maxRadius + 8);
+    for (int r = 0; r <= fallbackLimit; ++r) {
+        for (int dx = -r; dx <= r; ++dx) {
+            for (int dz = -r; dz <= r; ++dz) {
+                if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
+                int testX = x + dx;
+                int testZ = z + dz;
+                int colScore = -1;
+                short colY = FindBestNetherSpawnInColumn(region, testX, testZ, preferredY, colScore, false);
+                if (colY > -64) {
+                    colScore -= r;
+                    if (colScore > bestScore) {
+                        bestScore = colScore;
+                        bestY = colY;
+                        bestX = testX;
+                        bestZ = testZ;
+                    }
+                }
+            }
+        }
+    }
+
+    if (bestY > -64 && bestScore > -50) {
         x = bestX;
         z = bestZ;
         outY = bestY;
@@ -4228,7 +4341,8 @@ inline bool FindNearestSafeSpawnNearY(BlockSource& region, int& x, int& z, short
 // 规则：
 // 1. 主世界与下界：除岩浆外任何方块均为安全落脚点（包括水体、草地、冰面等）
 // 2. 末地：除虚空外任何位置均为安全落脚点
-// 3. 自顶向下扫描：从天空 Y=319 (主世界/末地) 或 Y=128 (下界) 向下查找第一个真实地表/洞底支撑方块，绝不卡入地底或石头内部
+// 3. 下界：在 [33, 100] 洞穴区间查找
+// 4. 主世界/末地：通过引擎 SafeGetSurfaceY 定位真实地表站立高度，快速验证落脚点及露天净空
 // 返回值：安全 Y（玩家脚部位置），或 -32000 表示该列无安全落脚点
 inline short SafeFindSafeSpawnY(BlockSource& region, int x, int z, int dimId = 0) noexcept {
     try {
@@ -4241,82 +4355,82 @@ inline short SafeFindSafeSpawnY(BlockSource& region, int x, int z, int dimId = 0
                 prefY = (int)cachedNetherY + 1;
             }
             int outScore = -1;
-            short bestY = FindBestNetherSpawnInColumn(region, x, z, prefY, outScore);
+            short bestY = FindBestNetherSpawnInColumn(region, x, z, prefY, outScore, true);
+            if (bestY >= 33 && bestY <= 100) return bestY;
+            bestY = FindBestNetherSpawnInColumn(region, x, z, prefY, outScore, false);
             if (bestY >= 33 && bestY <= 100) return bestY;
             return -32000;
         }
 
         // 主世界 (dimId == 0) 与 末地 (dimId == 2):
-        // 从最高空 (319) 向下扫描真实地表
-        int16_t cachedY = MapCacheManager::GetCachedSurfaceHeight(x, z);
+        // 使用引擎内置 SafeGetSurfaceY (已包裹 __try/__except SEH 防止 NULL subchunk AV)
+        short surfY = SafeGetSurfaceY(region, x, z);
+        if (surfY <= -64 || surfY >= 319 || surfY == -32000) {
+            return -32000;
+        }
 
-        // [主世界底部基岩与地表就绪校验] 主世界 Y=-64 必须为 bedrock 且 SafeGetSurfaceY 就绪
-        if (dimId == 0) {
-            std::string bottomBlock;
-            if (!SafeGetBlockName(region, x, -64, z, bottomBlock) || bottomBlock.find("bedrock") == std::string::npos) {
-                return -32000;
-            }
-            short surfY = SafeGetSurfaceY(region, x, z);
-            if (surfY <= -64 || surfY >= 320 || surfY == -32000) {
+        // 主世界海平面防窒息安全线：若检测到的 surfY < 62，检查地表是否为水体。
+        // 若为岩石/泥土等干地，极大概率是地表高层 subchunk (Y=64+) 尚未下发完成的假象，坚决拒绝采纳！
+        if (dimId == 0 && surfY < 62) {
+            std::string surfGround;
+            if (SafeGetBlockName(region, x, surfY - 1, z, surfGround)) {
+                if (surfGround.find("water") == std::string::npos) {
+                    return -32000;
+                }
+            } else {
                 return -32000;
             }
         }
 
-        for (short y = 319; y >= -60; --y) {
-            std::string blockName;
-            if (!SafeGetBlockName(region, x, y, z, blockName)) {
-                // 上层 subchunk 尚未加载到达 (AV/异常) → 严禁当作空气继续向下扫描，直接返回 -32000 等待！
-                return -32000;
-            }
-            if (blockName.empty()) return -32000;
+        int16_t cachedY = MapCacheManager::GetCachedSurfaceHeight(x, z);
 
-            // 跳过空气，寻找从天空向下的第一个实体支撑方块 (y 为支撑方块，y+1 为脚部)
-            if (IsAirLikeName(blockName)) {
-                continue;
-            }
+        // surfY 是引擎最高实体方块上方的格点 (站立高度)
+        // 在 [surfY + 2, surfY - 4] 范围内精准定位真实支撑地面与站立空间
+        short startY = std::min((short)318, (short)(surfY + 2));
+        short endY = std::max((short)-60, (short)(surfY - 4));
+        for (short standY = startY; standY >= endY; --standY) {
+            std::string groundName;
+            if (!SafeGetBlockName(region, x, standY - 1, z, groundName) || groundName.empty()) continue;
+            if (!IsValidGroundName(groundName, dimId)) continue;
+            if (IsNonSupportingPassable(groundName)) continue; // 支撑物不能是空气或无法站立的植物/小部件
+            if (dimId == 0 && standY < 62 && groundName.find("water") == std::string::npos) continue; // 主世界干地 standY 必须 >= 62
 
-            // 找到了最高实体方块 y
-            if (IsValidGroundName(blockName, dimId)) {
-                short standY = y + 1;
-                if (standY > 318) return -32000;
+            std::string feetName, headName, aboveHeadName;
+            if (!SafeGetBlockName(region, x, standY, z, feetName) || feetName.empty()) continue;
+            if (!IsBreathableSpaceName(feetName, dimId)) continue;
 
-                // 与引擎最高实体高度 SafeGetSurfaceY 校验，落差不可超过 8 格 (杜绝洞穴地面)
-                if (dimId == 0) {
-                    short surfY = SafeGetSurfaceY(region, x, z);
-                    if (surfY <= -64 || surfY >= 320 || surfY == -32000 || standY < surfY - 8) {
-                        return -32000;
-                    }
+            if (!SafeGetBlockName(region, x, standY + 1, z, headName) || headName.empty()) continue;
+            if (!IsBreathableSpaceName(headName, dimId)) continue;
+
+            // 头部上方空间 (standY + 2) 校验：允许树叶/藤蔓等自然树冠；若为实体方块（如岩石洞穴天花板），跳过
+            if (SafeGetBlockName(region, x, standY + 2, z, aboveHeadName) && !aboveHeadName.empty()) {
+                if (!IsBreathableSpaceName(aboveHeadName, dimId) &&
+                    aboveHeadName.find("leaf") == std::string::npos &&
+                    aboveHeadName.find("leaves") == std::string::npos &&
+                    aboveHeadName.find("vine") == std::string::npos) {
+                    continue;
                 }
-
-                std::string feetName, headName, aboveHeadName;
-                if (!SafeGetBlockName(region, x, standY, z, feetName) || feetName.empty()) return -32000;
-                if (!SafeGetBlockName(region, x, standY + 1, z, headName) || headName.empty()) return -32000;
-                if (!SafeGetBlockName(region, x, standY + 2, z, aboveHeadName) || aboveHeadName.empty()) return -32000;
-
-                // 保证脚部、头部及头部上方至少 3 格垂直通畅
-                if (IsBreathableSpaceName(feetName, dimId) && 
-                    IsBreathableSpaceName(headName, dimId) && 
-                    IsBreathableSpaceName(aboveHeadName, dimId)) {
-                    
-                    // 如果存在有效历史缓存且当前扫描高度比缓存地表低 15 格以上，
-                    // 说明上层 subchunk 尚未加载到达，返回 -32000 继续等待，防止提前掉入未加载的地底石头！
-                    if (cachedY != MapCacheManager::HEIGHT_UNKNOWN && cachedY > -60) {
-                        if (standY < cachedY - 15) {
-                            return -32000;
-                        }
-                    }
-
-                    // [露天与无实心天花板阻挡校验]
-                    if (!HasOpenSkyAbove(region, x, standY, z, dimId)) {
-                        return -32000;
-                    }
-
-                    return standY;
-                }
-            } else {
-                // 最高方块为岩浆等危险方块 → 该列不安全
-                return -32000;
             }
+
+            // 水域安全：脚部或下方是水时，头部必须绝对处于空气中（不能浸没在水底），保证呼吸与水面安全
+            if (dimId == 0 && (feetName.find("water") != std::string::npos || groundName.find("water") != std::string::npos)) {
+                if (headName.find("water") != std::string::npos) continue;
+            }
+
+            // 检查历史缓存落差：如果历史缓存存在且落差过大 (>15)，说明可能正在向下加载，继续等待
+            if (cachedY != MapCacheManager::HEIGHT_UNKNOWN && cachedY > -60) {
+                if (standY < cachedY - 15) {
+                    return -32000;
+                }
+            }
+
+            // 周围危险检测
+            if (HasAdjacentHazard(region, x, standY, z, 1, dimId)) continue;
+
+            // 露天与天花板阻挡校验
+            if (!HasOpenSkyAbove(region, x, standY, z, dimId)) continue;
+
+            return standY;
         }
 
         return -32000;
@@ -4331,7 +4445,7 @@ inline bool FindNearestSafeSpawn(BlockSource& region, int& x, int& z, short& out
     if (dimId == 1) {
         return FindBestSafeSpawnNether(region, x, z, outY, 64, maxRadius);
     }
-    // 第一轮：严格搜索（主世界/下界 3x3 邻居无岩浆）
+    // 第一轮：严格搜索（主世界/下界 3x3 邻居无岩浆，且必须露天）
     for (int r = 0; r <= maxRadius; ++r) {
         for (int dx = -r; dx <= r; ++dx) {
             for (int dz = -r; dz <= r; ++dz) {
@@ -4339,7 +4453,7 @@ inline bool FindNearestSafeSpawn(BlockSource& region, int& x, int& z, short& out
                 int testX = x + dx;
                 int testZ = z + dz;
                 short testY = SafeFindSafeSpawnY(region, testX, testZ, dimId);
-                if (testY > -64 && testY < 319 && IsTeleportSpotSafe(region, testX, testY, testZ, dimId)) {
+                if (testY > -64 && testY < 319 && IsTeleportSpotSafe(region, testX, testY, testZ, dimId) && HasOpenSkyAbove(region, testX, testY, testZ, dimId)) {
                     if (!HasAdjacentHazard(region, testX, testY, testZ, 1, dimId)) {
                         x = testX;
                         z = testZ;
@@ -4351,7 +4465,7 @@ inline bool FindNearestSafeSpawn(BlockSource& region, int& x, int& z, short& out
         }
     }
 
-    // 第二轮：宽松搜索（仅本列安全）
+    // 第二轮：宽松搜索（仅本列安全，且必须露天）
     for (int r = 0; r <= maxRadius; ++r) {
         for (int dx = -r; dx <= r; ++dx) {
             for (int dz = -r; dz <= r; ++dz) {
@@ -4359,7 +4473,7 @@ inline bool FindNearestSafeSpawn(BlockSource& region, int& x, int& z, short& out
                 int testX = x + dx;
                 int testZ = z + dz;
                 short testY = SafeFindSafeSpawnY(region, testX, testZ, dimId);
-                if (testY > -64 && testY < 319 && IsTeleportSpotSafe(region, testX, testY, testZ, dimId)) {
+                if (testY > -64 && testY < 319 && IsTeleportSpotSafe(region, testX, testY, testZ, dimId) && HasOpenSkyAbove(region, testX, testY, testZ, dimId)) {
                     x = testX;
                     z = testZ;
                     outY = testY;
@@ -4369,7 +4483,7 @@ inline bool FindNearestSafeSpawn(BlockSource& region, int& x, int& z, short& out
         }
     }
 
-    // 第三轮：超大范围宽松搜索（半径 ±(maxRadius+1)~±32）
+    // 第三轮：超大范围宽松搜索（半径 ±(maxRadius+1)~±32，且必须露天）
     for (int r = maxRadius + 1; r <= 32; ++r) {
         for (int dx = -r; dx <= r; ++dx) {
             for (int dz = -r; dz <= r; ++dz) {
@@ -4377,7 +4491,7 @@ inline bool FindNearestSafeSpawn(BlockSource& region, int& x, int& z, short& out
                 int testX = x + dx;
                 int testZ = z + dz;
                 short testY = SafeFindSafeSpawnY(region, testX, testZ, dimId);
-                if (testY > -64 && testY < 319 && IsTeleportSpotSafe(region, testX, testY, testZ, dimId)) {
+                if (testY > -64 && testY < 319 && IsTeleportSpotSafe(region, testX, testY, testZ, dimId) && HasOpenSkyAbove(region, testX, testY, testZ, dimId)) {
                     x = testX;
                     z = testZ;
                     outY = testY;
@@ -4547,6 +4661,7 @@ LL_TYPE_INSTANCE_HOOK(
 
                 float finalY = targetY;
                 bool needNetherCrossProbe = false;
+                bool needOverworldCrossProbe = false;
                 if (targetDim == 1) {
                     // 跨维度传送至下界：若 finalY 在基岩顶 (>=125) 或岩浆海 (<33) 或未指定 (<-500/==320)
                     // 严禁直接传送进实心地狱岩中窒息！
@@ -4555,12 +4670,18 @@ LL_TYPE_INSTANCE_HOOK(
                         finalY = 128.0f;
                         needNetherCrossProbe = true;
                     }
-                } else if (finalY < -500.0f || std::abs(finalY - 320.0f) < 0.1f) {
+                } else if (targetDim == 0 && (finalY < -500.0f || std::abs(finalY - 320.0f) < 0.1f)) {
                     int16_t cachedY = MapCacheManager::GetCachedSurfaceHeight((int)std::floor(targetX), (int)std::floor(targetZ), false);
                     if (cachedY != MapCacheManager::HEIGHT_UNKNOWN && cachedY > -64 && cachedY < 319) {
                         finalY = (float)cachedY + 1.0f;
-                    } else if (targetDim == 2) finalY = 65.0f;  // 末地岛屿表面
-                    else finalY = 70.0f;                      // 主世界海平面附近
+                    } else {
+                        // 主世界未探索黑色区域：传送到 Y=320 高空启动两阶段地表探测
+                        finalY = 320.0f;
+                        needOverworldCrossProbe = true;
+                    }
+                } else if (finalY < -500.0f || std::abs(finalY - 320.0f) < 0.1f) {
+                    if (targetDim == 2) finalY = 65.0f;  // 末地岛屿表面
+                    else finalY = 70.0f;                // 默认海平面附近
                 }
 
                 char coordBuf[160];
@@ -4568,13 +4689,13 @@ LL_TYPE_INSTANCE_HOOK(
                               dimName.c_str(), targetX, finalY, targetZ);
                 SendServerCommand(*player, coordBuf);
 
-                if (needNetherCrossProbe) {
-                    // 启动下界向下探测安全落脚点 (Phase 1)
-                    MapRenderState::probeMode = 1;
-                    MapRenderState::probeMinY = 2;
-                    MapRenderState::probeMaxY = 125;
+                if (needNetherCrossProbe || needOverworldCrossProbe) {
+                    // 启动向下探测安全落脚点 (Phase 1)
+                    MapRenderState::probeMode = (targetDim == 1) ? 1 : 0;
+                    MapRenderState::probeMinY = (targetDim == 1) ? 2 : -64;
+                    MapRenderState::probeMaxY = (targetDim == 1) ? 125 : 319;
                     MapRenderState::probeRefY = 64;
-                    MapRenderState::probeIsNether = true;
+                    MapRenderState::probeIsNether = (targetDim == 1);
                     MapRenderState::probeOriginalX = g_playerX;
                     MapRenderState::probeOriginalY = g_playerY;
                     MapRenderState::probeOriginalZ = g_playerZ;
@@ -4687,57 +4808,29 @@ LL_TYPE_INSTANCE_HOOK(
                         detectMethod = "cache";
                     }
 
-                    // [优先级2] 实时 BlockSource：仅对已加载区块有效
-                    if (surfaceY == MapCacheManager::HEIGHT_UNKNOWN && region && chunkReady) {
-                        short liveY = SafeGetSurfaceY(*region, blockX, blockZ);
-                        if (liveY > -64 && liveY < 319) {
-                            surfaceY = liveY;
-                            detectMethod = "live";
+                    // 未探索黑色区域：绝不盲目瞬移到默认高度，必须传送到 Y=320 高空启动两阶段地表探测！
+                    if (cachedY == MapCacheManager::HEIGHT_UNKNOWN) {
+                        needProbe = true;
+                    } else {
+                        // [优先级2] 实时 BlockSource：仅对已加载区块有效
+                        if (surfaceY == MapCacheManager::HEIGHT_UNKNOWN && region && chunkReady) {
+                            short liveY = SafeGetSurfaceY(*region, blockX, blockZ);
+                            if (liveY > -64 && liveY < 319) {
+                                surfaceY = liveY;
+                                detectMethod = "live";
+                            }
                         }
-                    }
 
-                    if (surfaceY != MapCacheManager::HEIGHT_UNKNOWN && surfaceY > -64 && surfaceY < 319) {
-                        if (region && chunkReady) {
-                            // [防线②③] 命中缓存/实时且区块就绪 → 用 SafeFindSafeSpawnY 验证落脚点
-                            short safeY = SafeFindSafeSpawnY(*region, blockX, blockZ, dimId);
-                            if (safeY > -64 && safeY < 319 && IsTeleportSpotSafe(*region, blockX, safeY, blockZ, dimId)) {
-                                // 落脚点验证通过 → 直接传送
-                                float finalY = (float)safeY;
-                                LogTeleport("tp instant (" + std::to_string(blockX) + "," +
-                                            std::to_string((int)finalY) + "," + std::to_string(blockZ) +
-                                            ") dim=" + std::to_string(dimId) + " method=" + detectMethod + "/safe-spawn");
-                                char coordBuf[128];
-                                std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
-                                              (float)blockX + 0.5f, finalY, (float)blockZ + 0.5f);
-                                SendServerCommand(*player, coordBuf);
-                                MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
-                                MapRenderState::teleportStatusMsg.clear();
-                            } else {
-                                // [防线⑤] 目标列为岩浆/虚空/不安全 → 螺旋搜索周围安全落脚点 (±16~±32)
-                                int searchX = blockX, searchZ = blockZ;
-                                short nearbyY = -32000;
-                                if (FindNearestSafeSpawn(*region, searchX, searchZ, nearbyY, 16, dimId) &&
-                                    IsTeleportSpotSafe(*region, searchX, nearbyY, searchZ, dimId)) {
-                                    LogTeleport("tp nearby-fallback (" + std::to_string(searchX) + "," +
-                                                std::to_string((int)nearbyY) + "," + std::to_string(searchZ) +
-                                                ") [original (" + std::to_string(blockX) + "," +
-                                                std::to_string(blockZ) + ") lava/void, landed on safe ground, dim=" + std::to_string(dimId) + "]");
-                                    char coordBuf[128];
-                                    std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
-                                                  (float)searchX + 0.5f, (float)nearbyY, (float)searchZ + 0.5f);
-                                    SendServerCommand(*player, coordBuf);
-                                    MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
-                                    MapRenderState::teleportStatusMsg.clear();
-                                } else if (surfaceY != MapCacheManager::HEIGHT_UNKNOWN && surfaceY > -64 && surfaceY < 319) {
-                                    // [解除误判驳回] 实时落脚点未就绪（虽然 hasChunksAt 返回 true，但远端区块 subchunk 尚未全部解压到达客户端或基岩未下发）
-                                    // 绝不可误判为"周围全是岩浆/虚空"而立即驳回！优先使用已探索地图缓存中的真实地表Y高度进行精准传送
-                                    float finalY = (float)surfaceY;
-                                    if (dimId == 0 && MapCacheManager::IsCachedWater(blockX, blockZ)) {
-                                        if (finalY < 63.0f) finalY = 63.0f;
-                                    }
-                                    LogTeleport("tp instant cached-fallback (" + std::to_string(blockX) + "," +
+                        if (surfaceY != MapCacheManager::HEIGHT_UNKNOWN && surfaceY > -64 && surfaceY < 319) {
+                            if (region && chunkReady) {
+                                // [防线②③] 命中缓存/实时且区块就绪 → 用 SafeFindSafeSpawnY 验证落脚点
+                                short safeY = SafeFindSafeSpawnY(*region, blockX, blockZ, dimId);
+                                if (safeY > -64 && safeY < 319 && IsTeleportSpotSafe(*region, blockX, safeY, blockZ, dimId)) {
+                                    // 落脚点验证通过 → 直接传送
+                                    float finalY = (float)safeY;
+                                    LogTeleport("tp instant (" + std::to_string(blockX) + "," +
                                                 std::to_string((int)finalY) + "," + std::to_string(blockZ) +
-                                                ") dim=" + std::to_string(dimId) + " method=" + detectMethod + "/direct-cache-fallback");
+                                                ") dim=" + std::to_string(dimId) + " method=" + detectMethod + "/safe-spawn");
                                     char coordBuf[128];
                                     std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
                                                   (float)blockX + 0.5f, finalY, (float)blockZ + 0.5f);
@@ -4745,29 +4838,59 @@ LL_TYPE_INSTANCE_HOOK(
                                     MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
                                     MapRenderState::teleportStatusMsg.clear();
                                 } else {
-                                    // 缓存无记录且实时落脚点未就绪 → 转入两阶段探测加载区块
-                                    needProbe = true;
+                                    // [防线⑤] 目标列为岩浆/虚空/不安全 → 螺旋搜索周围安全落脚点 (±16~±32)
+                                    int searchX = blockX, searchZ = blockZ;
+                                    short nearbyY = -32000;
+                                    if (FindNearestSafeSpawn(*region, searchX, searchZ, nearbyY, 16, dimId) &&
+                                        IsTeleportSpotSafe(*region, searchX, nearbyY, searchZ, dimId)) {
+                                        LogTeleport("tp nearby-fallback (" + std::to_string(searchX) + "," +
+                                                    std::to_string((int)nearbyY) + "," + std::to_string(searchZ) +
+                                                    ") [original (" + std::to_string(blockX) + "," +
+                                                    std::to_string(blockZ) + ") lava/void, landed on safe ground, dim=" + std::to_string(dimId) + "]");
+                                        char coordBuf[128];
+                                        std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
+                                                      (float)searchX + 0.5f, (float)nearbyY, (float)searchZ + 0.5f);
+                                        SendServerCommand(*player, coordBuf);
+                                        MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
+                                        MapRenderState::teleportStatusMsg.clear();
+                                    } else if (surfaceY != MapCacheManager::HEIGHT_UNKNOWN && surfaceY > -64 && surfaceY < 319) {
+                                        // [解除误判驳回] 实时落脚点未就绪，使用已探索地图缓存中的真实地表Y高度进行精准传送
+                                        float finalY = (float)surfaceY;
+                                        if (dimId == 0 && MapCacheManager::IsCachedWater(blockX, blockZ)) {
+                                            if (finalY < 63.0f) finalY = 63.0f;
+                                        }
+                                        LogTeleport("tp instant cached-fallback (" + std::to_string(blockX) + "," +
+                                                    std::to_string((int)finalY) + "," + std::to_string(blockZ) +
+                                                    ") dim=" + std::to_string(dimId) + " method=" + detectMethod + "/direct-cache-fallback");
+                                        char coordBuf[128];
+                                        std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
+                                                      (float)blockX + 0.5f, finalY, (float)blockZ + 0.5f);
+                                        SendServerCommand(*player, coordBuf);
+                                        MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
+                                        MapRenderState::teleportStatusMsg.clear();
+                                    } else {
+                                        needProbe = true;
+                                    }
                                 }
+                            } else {
+                                // [解除强行区块就绪校验] 区块未就绪，但已探索缓存中有地表Y记录 → 直接精准传送到地表
+                                float finalY = (float)surfaceY;
+                                if (dimId == 0 && MapCacheManager::IsCachedWater(blockX, blockZ)) {
+                                    if (finalY < 63.0f) finalY = 63.0f;
+                                }
+                                LogTeleport("tp instant cached (" + std::to_string(blockX) + "," +
+                                            std::to_string((int)finalY) + "," + std::to_string(blockZ) +
+                                            ") dim=" + std::to_string(dimId) + " method=" + detectMethod + "/direct-cache");
+                                char coordBuf[128];
+                                std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
+                                              (float)blockX + 0.5f, finalY, (float)blockZ + 0.5f);
+                                SendServerCommand(*player, coordBuf);
+                                MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
+                                MapRenderState::teleportStatusMsg.clear();
                             }
                         } else {
-                            // [解除强行区块就绪校验] 区块未就绪（如不在视野/未加载），但已探索缓存（MapCacheManager）中有地表Y记录 → 直接精准传送到地表
-                            float finalY = (float)surfaceY;
-                            if (dimId == 0 && MapCacheManager::IsCachedWater(blockX, blockZ)) {
-                                if (finalY < 63.0f) finalY = 63.0f;
-                            }
-                            LogTeleport("tp instant cached (" + std::to_string(blockX) + "," +
-                                        std::to_string((int)finalY) + "," + std::to_string(blockZ) +
-                                        ") dim=" + std::to_string(dimId) + " method=" + detectMethod + "/direct-cache");
-                            char coordBuf[128];
-                            std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
-                                          (float)blockX + 0.5f, finalY, (float)blockZ + 0.5f);
-                            SendServerCommand(*player, coordBuf);
-                            MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
-                            MapRenderState::teleportStatusMsg.clear();
+                            needProbe = true;
                         }
-                    } else {
-                        // 缓存无记录且区块未就绪 → 两阶段探测
-                        needProbe = true;
                     }
                 } else {
                     // === 洞穴/下界传送: 在参考Y附近搜索安全落脚点 ===
@@ -4775,8 +4898,11 @@ LL_TYPE_INSTANCE_HOOK(
                     int16_t cachedCaveY = MapCacheManager::GetCachedSurfaceHeight(blockX, blockZ, isCave);
 
                     if (dimId == 1) {
-                        // [下界传送] 若区块已就绪且已加载
-                        if (region && chunkReady) {
+                        // [下界传送]
+                        // 未探索黑色区域：绝不单列瞬移，强制传送到 Y=128 基岩顶层之上启动两阶段范围探测！
+                        if (cachedCaveY == MapCacheManager::HEIGHT_UNKNOWN) {
+                            needProbe = true;
+                        } else if (region && chunkReady) {
                             short safeY = SafeFindSafeSpawnY(*region, blockX, blockZ, 1);
                             if (safeY >= 33 && safeY <= 100 && IsTeleportSpotSafe(*region, blockX, safeY, blockZ, 1)) {
                                 LogTeleport("tp nether-instant (" + std::to_string(blockX) + "," +
@@ -4806,12 +4932,12 @@ LL_TYPE_INSTANCE_HOOK(
                                     MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
                                     MapRenderState::teleportStatusMsg.clear();
                                 } else {
-                                    // 目标点及周围 32 格内暂无已验证的安全点 → 严禁盲目传送到未验证的缓存高度，转入两阶段探测！
+                                    // 目标点及周围 32 格内暂无已验证的安全点 → 转入两阶段探测！
                                     needProbe = true;
                                 }
                             }
                         } else {
-                            // 下界区块未就绪：严禁直接传送到 cachedCaveY (可能卡在未加载实心地狱岩中窒息)！转入两阶段探测
+                            // 下界区块未就绪：转入两阶段探测
                             needProbe = true;
                         }
                     } else {
@@ -4921,267 +5047,307 @@ LL_TYPE_INSTANCE_HOOK(
             auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - MapRenderState::probeStartTime).count();
 
-            // [防线①] Phase 0 tp 后 1000ms 宽限期，留出远端区块建立连接与初始包下发时间
-            if (elapsedMs >= 1000) {
+            // [防线①] Phase 0 tp 后 400ms 宽限期，留出远端区块建立连接与初始包下发时间
+            if (elapsedMs >= 400) {
                 BlockSource* region = this->getRegion();
                 if (region) {
                     int probeMode = MapRenderState::probeMode;
-                    int dimId = MapRenderState::currentDimensionId;
-                    int checkY = (probeMode == 1) ? ((dimId == 1 && MapRenderState::probeRefY >= 120) ? 64 : MapRenderState::probeRefY) : 64;
-                    if (IsChunkReady(*region, probeX, checkY, probeZ)) {
-                        // [主世界基础数据就绪检查] 确认基岩层与地表就绪，杜绝在空指针/未下发区块上误判
-                        bool baseDataReady = true;
-                        if (dimId == 0) {
-                            std::string testBedrock;
-                            if (!SafeGetBlockName(*region, probeX, -64, probeZ, testBedrock) || testBedrock.find("bedrock") == std::string::npos) {
-                                baseDataReady = false;
-                            }
-                            if (probeMode == 0) {
-                                // 地表传送模式：引擎最高地表高度必须就绪且有效
-                                short testSurfY = SafeGetSurfaceY(*region, probeX, probeZ);
-                                if (testSurfY <= -64 || testSurfY >= 320 || testSurfY == -32000) {
-                                    baseDataReady = false;
-                                }
-                            }
+                    int dimId = (int)player->getDimensionId();
+                    bool isNether = (dimId == 1 || MapRenderState::probeIsNether);
+
+                    // 跨维度传送防护：等待客户端真正切换维度后再探测方块
+                    if (MapRenderState::probeIsNether && dimId != 1) {
+                        // 正在跨维度进入下界，继续等待
+                    } else if (!MapRenderState::probeIsNether && dimId == 1 && MapRenderState::currentDimensionId != 1) {
+                        // 正在跨维度退出下界，继续等待
+                    } else if (isNether) {
+                        // ==========================================
+                        // [下界·Phase 1] 确认下界区块方块数据加载到达客户端后，寻找最佳开阔安全落脚点
+                        // ==========================================
+                        bool netherDataLoaded = false;
+                        std::string testBlock;
+                        // 检查下界顶部 Y=127 或底部 Y=0 基岩层是否已下发（保证全高 subchunk 已完整到达客户端）
+                        if (SafeGetBlockName(*region, probeX, 127, probeZ, testBlock) && 
+                            !testBlock.empty() && testBlock.find("bedrock") != std::string::npos) {
+                            netherDataLoaded = true;
+                        } else if (SafeGetBlockName(*region, probeX, 0, probeZ, testBlock) && 
+                            !testBlock.empty() && testBlock.find("bedrock") != std::string::npos) {
+                            netherDataLoaded = true;
+                        } else if (SafeGetBlockName(*region, probeX, 32, probeZ, testBlock) && !testBlock.empty()) {
+                            netherDataLoaded = true;
+                        } else if (SafeGetBlockName(*region, probeX, 64, probeZ, testBlock) && !testBlock.empty()) {
+                            netherDataLoaded = true;
                         }
-                        if (!baseDataReady) {
-                            MapRenderState::probeStableCount = 0;
-                            MapRenderState::probeLastY = -32000;
-                        } else if (dimId == 1) {
-                            // ==========================================
-                            // [下界·Phase 1] 确认下界区块方块数据加载到达客户端后，寻找最佳开阔安全落脚点
-                            // ==========================================
-                            bool netherDataLoaded = false;
-                            std::string testBlock;
-                            // 检查下界底部 Y=0 基岩层是否已下发（保证全高 subchunk 已完整到达客户端）
-                            if (SafeGetBlockName(*region, probeX, 0, probeZ, testBlock) && 
-                                !testBlock.empty() && testBlock.find("bedrock") != std::string::npos) {
-                                netherDataLoaded = true;
+
+                        int searchX = probeX;
+                        int searchZ = probeZ;
+                        short netherY = -32000;
+                        int prefY = (MapRenderState::probeRefY >= 33 && MapRenderState::probeRefY <= 100) ? MapRenderState::probeRefY : 64;
+
+                        // 仅当区块数据确已加载到达时，范围搜索整片区域 (r=32) 内的最佳开阔安全点，允许 x, z 自由变化
+                        bool found = false;
+                        if (netherDataLoaded) {
+                            found = FindBestSafeSpawnNether(*region, searchX, searchZ, netherY, prefY, 32);
+                        }
+
+                        if (found && netherY >= 33 && netherY <= 100 && IsTeleportSpotSafe(*region, searchX, netherY, searchZ, 1)) {
+                            // 连续 6 帧且至少 800ms 宽限期确认安全点坐标与高度稳定
+                            if (netherY == MapRenderState::probeLastY && searchX == MapRenderState::probeLastX && searchZ == MapRenderState::probeLastZ) {
+                                MapRenderState::probeStableCount++;
                             } else {
-                                // 检查 [33, 100] 洞穴区间内是否有方块已加载
-                                if (SafeGetBlockName(*region, probeX, 32, probeZ, testBlock) && !testBlock.empty()) {
-                                    netherDataLoaded = true;
-                                } else if (SafeGetBlockName(*region, probeX, 64, probeZ, testBlock) && !testBlock.empty()) {
-                                    netherDataLoaded = true;
-                                }
+                                MapRenderState::probeLastY = netherY;
+                                MapRenderState::probeLastX = searchX;
+                                MapRenderState::probeLastZ = searchZ;
+                                MapRenderState::probeStableCount = 1;
                             }
 
-                            int searchX = probeX;
-                            int searchZ = probeZ;
-                            short netherY = -32000;
-                            int prefY = (MapRenderState::probeRefY >= 33 && MapRenderState::probeRefY <= 100) ? MapRenderState::probeRefY : 64;
-
-                            // 优先搜索目标列及周围 r=16 内的最佳开阔安全点，若周围全是实心地狱岩或岩浆海则扩大至 r=32
-                            bool found = FindBestSafeSpawnNether(*region, searchX, searchZ, netherY, prefY, 16);
-                            if (!found) {
-                                found = FindBestSafeSpawnNether(*region, searchX, searchZ, netherY, prefY, 32);
-                            }
-
-                            if (found && netherY >= 33 && netherY <= 100 && IsTeleportSpotSafe(*region, searchX, netherY, searchZ, 1)) {
-                                // 连续 3 帧确认安全点坐标与高度稳定
-                                if (netherY == MapRenderState::probeLastY && searchX == MapRenderState::probeLastX && searchZ == MapRenderState::probeLastZ) {
-                                    MapRenderState::probeStableCount++;
-                                } else {
-                                    MapRenderState::probeLastY = netherY;
-                                    MapRenderState::probeLastX = searchX;
-                                    MapRenderState::probeLastZ = searchZ;
-                                    MapRenderState::probeStableCount = 1;
-                                }
-
-                                if (MapRenderState::probeStableCount >= MapRenderState::kProbeStableThreshold) {
-                                    float finalY = (float)netherY;
-                                    char coordBuf[128];
-                                    std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
-                                                  (float)searchX + 0.5f, finalY, (float)searchZ + 0.5f);
-                                    SendServerCommand(*player, coordBuf);
-                                    LogTeleport("probe SUCCESS-nether (" + std::to_string(searchX) + "," +
-                                                std::to_string((int)finalY) + "," + std::to_string(searchZ) +
-                                                ") [prefY=" + std::to_string(prefY) + ", safe open cavern ground]");
-                                    MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
-                                    MapRenderState::teleportStatusMsg.clear();
-                                    probeDone = true;
-                                }
-                            } else {
-                                MapRenderState::probeStableCount = 0;
-                                MapRenderState::probeLastY = -32000;
-                                // 仅当区块数据确已加载完成，且超过 8 秒仍未找到安全落脚点时才驳回
-                                if (netherDataLoaded && elapsedMs >= 8000) {
-                                    LogTeleport("probe REJECT-nether (" + std::to_string(probeX) + "," +
-                                                std::to_string(probeZ) + ") [chunk loaded but no safe spawn within r=32, reject]");
-                                    char abortBuf[128];
-                                    float abortY = MapRenderState::probeOriginalY;
-                                    if (abortY >= 125.0f) abortY = 64.0f; // 避免回退到基岩顶层
-                                    std::snprintf(abortBuf, sizeof(abortBuf), "/tp @s %.2f %.2f %.2f",
-                                                  MapRenderState::probeOriginalX, abortY, MapRenderState::probeOriginalZ);
-                                    SendServerCommand(*player, abortBuf);
-                                    MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Failed);
-                                    MapRenderState::teleportStatusMsg.clear();
-                                    MapRenderState::teleportFailReason = LanguageManager::GetText("TELEPORT_FAILED_MSG");
-                                    probeDone = true;
-                                }
-                            }
-                        } else if (probeMode == 1) {
-                            // [主世界洞穴·Phase 1] 稳定性检查 + 纵向安全落脚点搜索
-                            int refY = MapRenderState::probeRefY;
-                            short liveY = SafeFindSafeSpawnYNearY(*region, probeX, probeZ, refY, MapRenderState::probeMinY, MapRenderState::probeMaxY, dimId);
-                            int targetX = probeX;
-                            int targetZ = probeZ;
-                            short targetY = liveY;
-
-                            if (targetY <= -64 || targetY >= 319 || !IsTeleportSpotSafe(*region, targetX, targetY, targetZ, dimId)) {
-                                // 目标列为岩石/岩浆/不安全 → 搜索周围安全落脚点
-                                short nearbyY = -32000;
-                                int searchX = probeX, searchZ = probeZ;
-                                if (FindNearestSafeSpawnNearY(*region, searchX, searchZ, nearbyY, refY, 16, MapRenderState::probeMinY, MapRenderState::probeMaxY, dimId) &&
-                                    IsTeleportSpotSafe(*region, searchX, nearbyY, searchZ, dimId)) {
-                                    targetX = searchX;
-                                    targetZ = searchZ;
-                                    targetY = nearbyY;
-                                }
-                            }
-
-                            if (targetY > -64 && targetY < 319) {
-                                if (targetY == MapRenderState::probeLastY && targetX == MapRenderState::probeLastX && targetZ == MapRenderState::probeLastZ) {
-                                    MapRenderState::probeStableCount++;
-                                } else {
-                                    MapRenderState::probeLastY = targetY;
-                                    MapRenderState::probeLastX = targetX;
-                                    MapRenderState::probeLastZ = targetZ;
-                                    MapRenderState::probeStableCount = 1;
-                                }
-                            } else {
-                                MapRenderState::probeStableCount = 0;
-                                MapRenderState::probeLastY = -32000;
-                            }
-
-                            if (MapRenderState::probeStableCount >= MapRenderState::kProbeStableThreshold) {
-                                float finalY = (float)targetY;
+                            if (MapRenderState::probeStableCount >= 6 && elapsedMs >= 800) {
+                                float finalY = (float)netherY;
                                 char coordBuf[128];
                                 std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
-                                              (float)targetX + 0.5f, finalY, (float)targetZ + 0.5f);
+                                              (float)searchX + 0.5f, finalY, (float)searchZ + 0.5f);
                                 SendServerCommand(*player, coordBuf);
-                                LogTeleport("probe SUCCESS-cave (" + std::to_string(targetX) + "," +
-                                            std::to_string((int)finalY) + "," + std::to_string(targetZ) +
-                                            ") [refY=" + std::to_string(refY) + ", safe cave ground]");
+                                LogTeleport("probe SUCCESS-nether (" + std::to_string(searchX) + "," +
+                                            std::to_string((int)finalY) + "," + std::to_string(searchZ) +
+                                            ") [prefY=" + std::to_string(prefY) + ", safe open cavern ground]");
                                 MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
                                 MapRenderState::teleportStatusMsg.clear();
                                 probeDone = true;
-                            } else if (targetY <= -64 && elapsedMs >= 4000) {
-                                // 超过 4 秒且周围全无安全落脚点 → 驳回传送，回退原位
-                                LogTeleport("probe REJECT-cave (" + std::to_string(probeX) + "," +
-                                            std::to_string(probeZ) + ") [chunk stable but target and surroundings are unsafe, reject]");
-                                char abortBuf[128];
-                                std::snprintf(abortBuf, sizeof(abortBuf), "/tp @s %.2f %.2f %.2f",
-                                              MapRenderState::probeOriginalX, MapRenderState::probeOriginalY, MapRenderState::probeOriginalZ);
-                                SendServerCommand(*player, abortBuf);
-                                MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Failed);
+                            }
+                        } else {
+                            MapRenderState::probeStableCount = 0;
+                            MapRenderState::probeLastY = -32000;
+                            // 超过 6 秒未在下方找到足够开阔的安全溶洞 → 绝不驳回！安全驻留在 Y=128 基岩顶层完成传送
+                            if (elapsedMs >= 6000 && netherDataLoaded) {
+                                LogTeleport("probe SUCCESS-nether-roof (" + std::to_string(probeX) + ",128," +
+                                            std::to_string(probeZ) + ") [stationed safely on bedrock roof above target]");
+                                MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
                                 MapRenderState::teleportStatusMsg.clear();
-                                MapRenderState::teleportFailReason = LanguageManager::GetText("TELEPORT_FAILED_MSG");
+                                probeDone = true;
+                            }
+                        }
+                    } else if (probeMode == 1) {
+                        // [主世界洞穴·Phase 1] 稳定性检查 + 纵向安全落脚点搜索
+                        int refY = MapRenderState::probeRefY;
+                        short liveY = SafeFindSafeSpawnYNearY(*region, probeX, probeZ, refY, MapRenderState::probeMinY, MapRenderState::probeMaxY, dimId);
+                        int targetX = probeX;
+                        int targetZ = probeZ;
+                        short targetY = liveY;
+
+                        if (targetY <= -64 || targetY >= 319 || !IsTeleportSpotSafe(*region, targetX, targetY, targetZ, dimId)) {
+                            // 目标列为岩石/岩浆/不安全 → 搜索周围安全落脚点
+                            short nearbyY = -32000;
+                            int searchX = probeX, searchZ = probeZ;
+                            if (FindNearestSafeSpawnNearY(*region, searchX, searchZ, nearbyY, refY, 16, MapRenderState::probeMinY, MapRenderState::probeMaxY, dimId) &&
+                                IsTeleportSpotSafe(*region, searchX, nearbyY, searchZ, dimId)) {
+                                targetX = searchX;
+                                targetZ = searchZ;
+                                targetY = nearbyY;
+                            }
+                        }
+
+                        if (targetY > -64 && targetY < 319) {
+                            if (targetY == MapRenderState::probeLastY && targetX == MapRenderState::probeLastX && targetZ == MapRenderState::probeLastZ) {
+                                MapRenderState::probeStableCount++;
+                            } else {
+                                MapRenderState::probeLastY = targetY;
+                                MapRenderState::probeLastX = targetX;
+                                MapRenderState::probeLastZ = targetZ;
+                                MapRenderState::probeStableCount = 1;
+                            }
+                        } else {
+                            MapRenderState::probeStableCount = 0;
+                            MapRenderState::probeLastY = -32000;
+                        }
+
+                        if (MapRenderState::probeStableCount >= 2) {
+                            float finalY = (float)targetY;
+                            char coordBuf[128];
+                            std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
+                                          (float)targetX + 0.5f, finalY, (float)targetZ + 0.5f);
+                            SendServerCommand(*player, coordBuf);
+                            LogTeleport("probe SUCCESS-cave (" + std::to_string(targetX) + "," +
+                                        std::to_string((int)finalY) + "," + std::to_string(targetZ) +
+                                        ") [refY=" + std::to_string(refY) + ", safe cave ground]");
+                            MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
+                            MapRenderState::teleportStatusMsg.clear();
+                            probeDone = true;
+                        } else if (targetY <= -64 && elapsedMs >= 4000) {
+                            // 超过 4 秒未在洞穴深度找到落脚点 → 优雅降级至对应地表安全位置，绝不失败驳回！
+                            short surfY = SafeFindSafeSpawnY(*region, probeX, probeZ, 0);
+                            if (surfY <= -64 || surfY >= 319) surfY = SafeGetSurfaceY(*region, probeX, probeZ);
+                            if (surfY > -64 && surfY < 319) {
+                                float finalY = (float)surfY;
+                                char coordBuf[128];
+                                std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
+                                              (float)probeX + 0.5f, finalY, (float)probeZ + 0.5f);
+                                SendServerCommand(*player, coordBuf);
+                                LogTeleport("probe CAVE-FALLBACK-SURFACE (" + std::to_string(probeX) + "," +
+                                            std::to_string((int)finalY) + "," + std::to_string(probeZ) +
+                                            ") [cave unsafe/solid rock, landed on surface]");
+                                MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
+                                MapRenderState::teleportStatusMsg.clear();
+                                probeDone = true;
+                            }
+                        }
+                    } else {
+                        // ==========================================
+                        // [主世界地表 / 末地·Phase 1] 稳定性检查：自顶向下获取地表安全落脚点
+                        // ==========================================
+                        int targetX = probeX;
+                        int targetZ = probeZ;
+                        short targetY = -32000;
+                        bool found = false;
+
+                        // 阶段 1: 精准查找安全落脚点（含水面、雪原、植被与开阔陆地）
+                        short liveY = SafeFindSafeSpawnY(*region, probeX, probeZ, dimId);
+                        if (liveY > -64 && liveY < 319 && 
+                            IsTeleportSpotSafe(*region, probeX, liveY, probeZ, dimId) &&
+                            HasOpenSkyAbove(*region, probeX, liveY, probeZ, dimId)) {
+                            targetX = probeX;
+                            targetZ = probeZ;
+                            targetY = liveY;
+                            found = true;
+                        } else if (elapsedMs >= 1500) {
+                            // 留出 1500ms 保证中心区块完整生成，再搜索周围安全露天落脚点 (r=16, 必要时扩展至 r=32)
+                            int searchX = probeX, searchZ = probeZ;
+                            short nearbyY = -32000;
+                            if (FindNearestSafeSpawn(*region, searchX, searchZ, nearbyY, 16, dimId) &&
+                                nearbyY > -64 && nearbyY < 319 &&
+                                IsTeleportSpotSafe(*region, searchX, nearbyY, searchZ, dimId) &&
+                                HasOpenSkyAbove(*region, searchX, nearbyY, searchZ, dimId)) {
+                                targetX = searchX;
+                                targetZ = searchZ;
+                                targetY = nearbyY;
+                                found = true;
+                            } else if (FindNearestSafeSpawn(*region, searchX, searchZ, nearbyY, 32, dimId) &&
+                                       nearbyY > -64 && nearbyY < 319 &&
+                                       IsTeleportSpotSafe(*region, searchX, nearbyY, searchZ, dimId) &&
+                                       HasOpenSkyAbove(*region, searchX, nearbyY, searchZ, dimId)) {
+                                targetX = searchX;
+                                targetZ = searchZ;
+                                targetY = nearbyY;
+                                found = true;
+                            }
+                        }
+
+                        // 阶段 2: 优雅降级（若经过 4.0 秒仍未精准命中，尝试 SafeFindSafeSpawnY 严格验证）
+                        if (!found && elapsedMs >= 4000) {
+                            short directSurfY = SafeFindSafeSpawnY(*region, probeX, probeZ, dimId);
+                            if (directSurfY > -64 && directSurfY < 319 && 
+                                IsTeleportSpotSafe(*region, probeX, directSurfY, probeZ, dimId) &&
+                                HasOpenSkyAbove(*region, probeX, directSurfY, probeZ, dimId)) {
+                                targetX = probeX;
+                                targetZ = probeZ;
+                                targetY = directSurfY;
+                                found = true;
+                            }
+                        }
+
+                        // 高空滞空防坠落保护：如果区块尚未就绪仍在等待，每 1.2 秒刷新一次玩家于 320 高度
+                        static auto s_lastHoverHoldTime = std::chrono::steady_clock::now();
+                        if (!found && elapsedMs >= 1500) {
+                            auto holdDiff = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - s_lastHoverHoldTime).count();
+                            if (holdDiff >= 1200) {
+                                s_lastHoverHoldTime = std::chrono::steady_clock::now();
+                                char hoverBuf[128];
+                                std::snprintf(hoverBuf, sizeof(hoverBuf), "/tp @s %.2f 320.00 %.2f",
+                                              (float)probeX + 0.5f, (float)probeZ + 0.5f);
+                                SendServerCommand(*player, hoverBuf);
+                            }
+                        }
+
+                        if (found && targetY > -64 && targetY < 319) {
+                            if (targetY == MapRenderState::probeLastY && targetX == MapRenderState::probeLastX && targetZ == MapRenderState::probeLastZ) {
+                                MapRenderState::probeStableCount++;
+                            } else {
+                                MapRenderState::probeLastY = targetY;
+                                MapRenderState::probeLastX = targetX;
+                                MapRenderState::probeLastZ = targetZ;
+                                MapRenderState::probeStableCount = 1;
+                            }
+
+                            // 稳定判定：至少 6 帧连续稳定且达到基础等待时间 (800ms)；
+                            // 主世界干地若 < 62，必须至少等待 5000ms 宽限期以确保绝非未完成下发的假象
+                            bool meetsWaitTime = (elapsedMs >= 800);
+                            if (dimId == 0 && targetY < 62) {
+                                std::string tg;
+                                bool isWater = (SafeGetBlockName(*region, targetX, targetY - 1, targetZ, tg) && tg.find("water") != std::string::npos);
+                                if (!isWater && elapsedMs < 5000) {
+                                    meetsWaitTime = false;
+                                }
+                            }
+
+                            if (MapRenderState::probeStableCount >= 6 && meetsWaitTime) {
+                                float finalY = (float)targetY;
+                                char coordBuf[128];
+                                std::snprintf(coordBuf, sizeof(coordBuf),
+                                              "/tp @s %.2f %.2f %.2f", (float)targetX + 0.5f, finalY, (float)targetZ + 0.5f);
+                                SendServerCommand(*player, coordBuf);
+                                LogTeleport("probe SUCCESS-surface (" + std::to_string(targetX) + "," +
+                                            std::to_string((int)finalY) + "," + std::to_string(targetZ) +
+                                            ") dim=" + std::to_string(dimId) + " method=stable-safe");
+                                MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
+                                MapRenderState::teleportStatusMsg.clear();
                                 probeDone = true;
                             }
                         } else {
-                            // [主世界地表 / 末地·Phase 1] 稳定性检查：直接通过自顶向下的 SafeFindSafeSpawnY 获取 Y
-                            short liveY = SafeFindSafeSpawnY(*region, probeX, probeZ, dimId);
-
-                            if (liveY > -64 && liveY < 319) {
-                                if (liveY == MapRenderState::probeLastY) {
-                                    MapRenderState::probeStableCount++;
-                                } else {
-                                    MapRenderState::probeLastY = liveY;
-                                    MapRenderState::probeStableCount = 1;
-                                }
-                            } else {
-                                MapRenderState::probeStableCount = 0;
-                                MapRenderState::probeLastY = -32000;
-                            }
-
-                            if (MapRenderState::probeStableCount >= MapRenderState::kProbeStableThreshold) {
-                                MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Validating);
-
-                                if (liveY > -64 && liveY < 319 && 
-                                    IsTeleportSpotSafe(*region, probeX, liveY, probeZ, dimId) &&
-                                    HasOpenSkyAbove(*region, probeX, liveY, probeZ, dimId)) {
-                                    // 目标点本身为安全地表/空岛且完全露天无石顶阻挡 → 直接传送
-                                    float finalY = (float)liveY;
-                                    char coordBuf[128];
-                                    std::snprintf(coordBuf, sizeof(coordBuf),
-                                                  "/tp @s %.2f %.2f %.2f", (float)probeX + 0.5f, finalY, (float)probeZ + 0.5f);
-                                    SendServerCommand(*player, coordBuf);
-                                    LogTeleport("probe SUCCESS (" + std::to_string(probeX) + "," +
-                                                std::to_string((int)finalY) + "," + std::to_string(probeZ) +
-                                                ") dim=" + std::to_string(dimId) + " method=stable-safe");
-                                    MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
-                                    MapRenderState::teleportStatusMsg.clear();
-                                    probeDone = true;
-                                } else {
-                                    // 目标点为岩浆（主世界）或虚空（末地）或不安全 → 搜索周围安全落脚点
-                                    int searchX = probeX, searchZ = probeZ;
-                                    short nearbyY = -32000;
-                                    if (FindNearestSafeSpawn(*region, searchX, searchZ, nearbyY, 16, dimId) &&
-                                        IsTeleportSpotSafe(*region, searchX, nearbyY, searchZ, dimId) &&
-                                        HasOpenSkyAbove(*region, searchX, nearbyY, searchZ, dimId)) {
-                                        // 周围找到安全陆地/空岛且露天 → 传送到安全落脚点
-                                        char coordBuf[128];
-                                        std::snprintf(coordBuf, sizeof(coordBuf),
-                                                      "/tp @s %.2f %.2f %.2f",
-                                                      (float)searchX + 0.5f,
-                                                      (float)nearbyY,
-                                                      (float)searchZ + 0.5f);
-                                        SendServerCommand(*player, coordBuf);
-                                        LogTeleport("probe SUCCESS-nearby (" +
-                                                    std::to_string(searchX) + "," +
-                                                    std::to_string((int)nearbyY) + "," +
-                                                    std::to_string(searchZ) +
-                                                    ") [original lava/void, landed on safe ground, dim=" + std::to_string(dimId) + "]");
-                                        MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
-                                        MapRenderState::teleportStatusMsg.clear();
-                                        probeDone = true;
-                                    } else if (elapsedMs >= 4000) {
-                                        // 超过 4 秒仍无任何安全露天落脚点 → 驳回传送，安全回退原位
-                                        char abortBuf[128];
-                                        std::snprintf(abortBuf, sizeof(abortBuf),
-                                                      "/tp @s %.2f %.2f %.2f",
-                                                      MapRenderState::probeOriginalX,
-                                                      MapRenderState::probeOriginalY,
-                                                      MapRenderState::probeOriginalZ);
-                                        SendServerCommand(*player, abortBuf);
-                                        LogTeleport("probe REJECT (" + std::to_string(probeX) + "," +
-                                                    std::to_string(probeZ) + ") [target and surroundings unsafe/unready, reject] → original, dim=" + std::to_string(dimId));
-                                        MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Failed);
-                                        MapRenderState::teleportStatusMsg.clear();
-                                        MapRenderState::teleportFailReason = LanguageManager::GetText("TELEPORT_FAILED_MSG");
-                                        probeDone = true;
-                                    }
-                                }
-                            }
+                            MapRenderState::probeStableCount = 0;
+                            MapRenderState::probeLastY = -32000;
                         }
                     }
                 }
             }
 
             if (!probeDone) {
-                // [超时降级] 下界 10 秒，其他 8 秒：回退原位（给远距离未探索区块生成与下发留出充足时间）
-                int timeoutMs = (MapRenderState::probeIsNether || MapRenderState::currentDimensionId == 1) ? 10000 : 8000;
-                if (elapsedMs >= timeoutMs) {
-                    char abortBuf[128];
-                    float abortY = MapRenderState::probeOriginalY;
-                    if ((MapRenderState::probeIsNether || MapRenderState::currentDimensionId == 1) && abortY >= 125.0f) {
-                        abortY = 64.0f;
+                // [超时安全保障] 给予远距离未探索区块生成与下发充裕时间 (25 秒)
+                if (elapsedMs >= 25000) {
+                    BlockSource* reg = this->getRegion();
+                    bool fallbackDone = false;
+                    if (reg) {
+                        int dimId = (int)player->getDimensionId();
+                        if (dimId == 1 || MapRenderState::probeIsNether) {
+                            // 下界超时保底：安居基岩顶层 Y=128
+                            LogTeleport("probe SUCCESS-nether-roof (" + std::to_string(probeX) + ",128," +
+                                        std::to_string(probeZ) + ") [timeout safe: stationed on bedrock roof]");
+                            fallbackDone = true;
+                        } else {
+                            short surfY = SafeFindSafeSpawnY(*reg, probeX, probeZ, 0);
+                            if (surfY <= -64 || surfY >= 319) surfY = SafeGetSurfaceY(*reg, probeX, probeZ);
+                            // 超时安全防线：主世界传送绝对不允许落在 Y < 63 的地下岩石/泥土中窒息！
+                            if (surfY < 63) surfY = 64;
+                            char coordBuf[128];
+                            std::snprintf(coordBuf, sizeof(coordBuf), "/tp @s %.2f %.2f %.2f",
+                                          (float)probeX + 0.5f, (float)surfY, (float)probeZ + 0.5f);
+                            SendServerCommand(*player, coordBuf);
+                            LogTeleport("probe TIMEOUT-FALLBACK-SURFACE (" + std::to_string(probeX) + "," +
+                                        std::to_string((int)surfY) + "," + std::to_string(probeZ) + ") [safe height >= 64]");
+                            fallbackDone = true;
+                        }
                     }
-                    std::snprintf(abortBuf, sizeof(abortBuf), "/tp @s %.2f %.2f %.2f",
-                                  MapRenderState::probeOriginalX,
-                                  abortY,
-                                  MapRenderState::probeOriginalZ);
-                    SendServerCommand(*player, abortBuf);
-                    LogTeleport("probe TIMEOUT abort→original (" +
-                                std::to_string((int)MapRenderState::probeOriginalX) + "," +
-                                std::to_string((int)abortY) + "," +
-                                std::to_string((int)MapRenderState::probeOriginalZ) +
-                                ") [chunk not ready within " + std::to_string(timeoutMs / 1000) + "s]");
-                    MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Failed);
-                    MapRenderState::teleportStatusMsg.clear();
-                    MapRenderState::teleportFailReason = LanguageManager::GetText("TELEPORT_TIMEOUT_MSG");
-                    probeDone = true;
+                    if (fallbackDone) {
+                        MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Idle);
+                        MapRenderState::teleportStatusMsg.clear();
+                        probeDone = true;
+                    } else {
+                        // 仅当经过 25 秒仍未收到任何有效区块数据（如网络断开/离线异常）时，才回退原位防止永久卡在虚空
+                        char abortBuf[128];
+                        std::snprintf(abortBuf, sizeof(abortBuf), "/tp @s %.2f %.2f %.2f",
+                                      MapRenderState::probeOriginalX,
+                                      MapRenderState::probeOriginalY,
+                                      MapRenderState::probeOriginalZ);
+                        SendServerCommand(*player, abortBuf);
+                        LogTeleport("probe TIMEOUT abort→original (" +
+                                    std::to_string((int)MapRenderState::probeOriginalX) + "," +
+                                    std::to_string((int)MapRenderState::probeOriginalY) + "," +
+                                    std::to_string((int)MapRenderState::probeOriginalZ) +
+                                    ") [server stopped streaming chunks for 25s]");
+                        MapRenderState::teleportState.store((int)MapRenderState::TeleportState::Failed);
+                        MapRenderState::teleportStatusMsg.clear();
+                        MapRenderState::teleportFailReason = LanguageManager::GetText("TELEPORT_TIMEOUT_MSG");
+                        probeDone = true;
+                    }
                 }
             }
 
@@ -5263,6 +5429,7 @@ LL_TYPE_INSTANCE_HOOK(
                     MapRenderState::currentDimensionId = dimId;
                     MapRenderState::bigMapViewDimensionId = -999;
 
+                    MultiworldManager::SwitchWorld(finalWorldId, MapRenderState::worldSpawnX, MapRenderState::worldSpawnZ);
                     MapCacheManager::SwitchWorld(finalWorldId, dimId);
                     WaypointManager::SwitchWorld(finalWorldId, dimId);
                     DeathPointManager::SwitchWorld(finalWorldId);

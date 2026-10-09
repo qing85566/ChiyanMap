@@ -1,5 +1,6 @@
 #include "state/MapCacheManager.h"
 #include "state/WaypointManager.h"
+#include "state/MultiworldManager.h"
 #include "mod/ChiyanMap.h"
 #include <fstream>
 #include <filesystem>
@@ -25,9 +26,24 @@ namespace MapCacheManager {
     // 初始化为空，等待进入世界时分配
     std::string g_cacheDir = "";
     static int s_currentLoadedDimId = -999;
+    static std::string s_currentLoadedMapId = "default";
 
     int GetLoadedDimensionId() {
         return s_currentLoadedDimId;
+    }
+
+    std::string GetCurrentLoadedMapId() {
+        return s_currentLoadedMapId;
+    }
+
+    void SwitchMap(const std::string& mapId) {
+        if (MapRenderState::currentWorldId.empty()) return;
+        SwitchWorld(MapRenderState::currentWorldId, s_currentLoadedDimId >= 0 ? s_currentLoadedDimId : 0, mapId);
+        MapRenderState::clearGPUCache.store(true);
+        MapRenderState::hoverBiomeAlpha = 0.0f;
+        MapRenderState::hoverBiomeTargetAlpha = 0.0f;
+        MapRenderState::hoverBiomeHasValidResult = false;
+        InvalidateExportPreview();
     }
 
     void SwitchViewDimension(int dimensionId) {
@@ -77,6 +93,38 @@ namespace MapCacheManager {
     static void SanitizeLoadedRegionColors(RegionData& reg, bool isCave) {
         if (isCave) return; // 仅对主世界地表执行自愈
 
+        bool healedAny = false;
+
+        // [自愈增强 1] 苍白之园树叶历史偏差自愈：
+        // 自动修正历史缓存中因未校准导致偏橄榄绿的苍白树叶 (127, 135, 112)
+        // 恢复为精心调色的原版真实冷调银灰淡绿 RGB(110, 115, 107) (mce::Color(0.431f, 0.451f, 0.420f))
+        for (int i = 0; i < REGION_SIZE * REGION_SIZE; ++i) {
+            uint8_t a = reg.colors[i * 4 + 3];
+            if (a < 10) continue;
+            uint8_t r = reg.colors[i * 4 + 0];
+            uint8_t g = reg.colors[i * 4 + 1];
+            uint8_t b = reg.colors[i * 4 + 2];
+
+            // 匹配未校准的橄榄绿色相 (r 约 115~145, g 约 125~155, b 约 95~125, g 显著高于 b 且 g > r)
+            if (r >= 115 && r <= 145 && g >= 125 && g <= 155 && b >= 95 && b <= 125 && (g - b) >= 15 && (g - r) >= 3) {
+                int px = i % REGION_SIZE;
+                int pz = i / REGION_SIZE;
+                int cellX = px / BIOME_CELL_SIZE;
+                int cellZ = pz / BIOME_CELL_SIZE;
+                int bIdx = cellZ * BIOME_CELLS_PER_REGION + cellX;
+                if (bIdx >= 0 && bIdx < (int)sizeof(reg.biomeCells)) {
+                    uint8_t bId = reg.biomeCells[bIdx];
+                    if (bId < reg.biomeTable.size() && reg.biomeTable[bId].find("pale_garden") != std::string::npos) {
+                        float factor = (float)g / 135.0f; // 保持原有高度差明暗比
+                        reg.colors[i * 4 + 0] = (uint8_t)std::clamp((int)(110.0f * factor), 0, 255);
+                        reg.colors[i * 4 + 1] = (uint8_t)std::clamp((int)(115.0f * factor), 0, 255);
+                        reg.colors[i * 4 + 2] = (uint8_t)std::clamp((int)(107.0f * factor), 0, 255);
+                        healedAny = true;
+                    }
+                }
+            }
+        }
+
         int corruptBlackCount = 0;
         int corruptWhiteCount = 0;
 
@@ -98,9 +146,13 @@ namespace MapCacheManager {
         }
 
         // 仅当检测到严重衰减特征（至少30个纯黑像素或黑白斑点交错）时启动修复
-        if (corruptBlackCount < 30) return;
-
-        bool healedAny = false;
+        if (corruptBlackCount < 30) {
+            if (healedAny) {
+                reg.dirty = true;
+                reg.textureDirty = true;
+            }
+            return;
+        }
 
         auto isBadPixel = [&](int x, int z) -> bool {
             int idx = (z * REGION_SIZE + x) * 4;
@@ -224,10 +276,12 @@ namespace MapCacheManager {
 
             std::vector<uint64_t> toLoad;
             std::string currentDir;
+            int loadedDimId = -999;
             {
                 std::lock_guard<std::mutex> lock(g_cacheMutex);
                 if (g_cacheDir.empty()) continue; // 没有世界路径时挂起
                 currentDir = g_cacheDir;
+                loadedDimId = s_currentLoadedDimId;
                 if (!g_loadQueue.empty()) {
                     toLoad = g_loadQueue;
                     g_loadQueue.clear();
@@ -243,13 +297,20 @@ namespace MapCacheManager {
                 std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
 
                 RegionData* newRegion = new RegionData();
+                newRegion->dimId = loadedDimId;
+                newRegion->saveDir = dir;
                 LoadRegionFromFile(filePath, *newRegion, IsCaveHash(hash));
                 newRegion->textureDirty = true;
 
                 {
                     std::lock_guard<std::mutex> lock(g_cacheMutex);
-                    if (g_loadedRegions[hash] == nullptr) g_loadedRegions[hash] = newRegion;
-                    else delete newRegion;
+                    // 核心防护：若在读取期间维度已被并发切换，坚决丢弃旧维度加载结果，杜绝污染新维度
+                    if (s_currentLoadedDimId == loadedDimId && g_cacheDir == currentDir) {
+                        if (g_loadedRegions[hash] == nullptr) g_loadedRegions[hash] = newRegion;
+                        else delete newRegion;
+                    } else {
+                        delete newRegion;
+                    }
                 }
             }
 
@@ -262,6 +323,12 @@ namespace MapCacheManager {
                     std::lock_guard<std::mutex> lock(g_cacheMutex);
                     for (auto& pair : g_loadedRegions) {
                         if (pair.second && pair.second->dirty) {
+                            if (pair.second->saveDir.empty()) {
+                                pair.second->saveDir = g_cacheDir + GetRegionSubdir(IsCaveHash(pair.first));
+                            }
+                            if (pair.second->dimId < 0) {
+                                pair.second->dimId = s_currentLoadedDimId;
+                            }
                             regionsToSave.push_back({pair.first, *pair.second});
                             pair.second->dirty = false;
                         }
@@ -269,7 +336,18 @@ namespace MapCacheManager {
                 }
                 for (auto& item : regionsToSave) {
                     int rx, rz; DecodeRegionHash(item.first, rx, rz);
-                    std::string dir = currentDir + GetRegionSubdir(IsCaveHash(item.first));
+                    std::string dir = item.second.saveDir;
+                    if (dir.empty()) continue;
+
+                    // 铁律安全防护：绝对禁止跨维度目录写入
+                    if (item.second.dimId == 0) {
+                        if (dir.find("dim_1") != std::string::npos || dir.find("dim_2") != std::string::npos) continue;
+                    } else if (item.second.dimId == 1) {
+                        if (dir.find("dim_0") != std::string::npos || dir.find("dim_2") != std::string::npos) continue;
+                    } else if (item.second.dimId == 2) {
+                        if (dir.find("dim_0") != std::string::npos || dir.find("dim_1") != std::string::npos) continue;
+                    }
+
                     std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
                     std::ofstream out(filePath, std::ios::binary);
                     if (out) {
@@ -291,11 +369,13 @@ namespace MapCacheManager {
 
     // ==========================================
     // [缓存净化自愈引擎]
-    // 自动扫描下界/末地缓存目录，若检测到含有不属于该维度的生物群系(如 birch_forest 等)
-    // 或在下界存在纯蓝水体像素，立即彻底删除被污染的对应 region 文件，使其能纯净重新探索
+    // 自动扫描缓存目录，跨维度强力净化：
+    //  - 维度 0 (主世界地表与洞穴): 若含有下界/末地专属群系，或在洞穴中含有大量下界特征方块(地狱岩/下界熔岩海/菌岩)，立即彻底清除
+    //  - 维度 1 (下界洞穴): 若含有主世界群系，或存在纯蓝水体像素，立即彻底删除被污染的对应 region 文件
+    //  - 维度 2 (末地): 若含有非末地专属群系，立即清除
     // ==========================================
     static void CleanupCorruptedDimensionCache(const std::filesystem::path& cacheDir, int dimensionId) {
-        if (dimensionId != 1 && dimensionId != 2) return;
+        if (dimensionId < 0 || dimensionId > 2) return;
         std::error_code ec;
 
         auto checkAndPurgeFile = [&](const std::filesystem::path& filePath, bool isCaveSubdir) {
@@ -312,28 +392,8 @@ namespace MapCacheManager {
 
             bool isCorrupted = false;
 
-            // 1. 下界水体检测: 下界无自然水体，若洞穴图存在大面积纯蓝水体像素则判定为主世界洞穴污染
-            if (dimensionId == 1 && isCaveSubdir) {
-                std::vector<uint8_t> colors(colorSize);
-                in.read((char*)colors.data(), colorSize);
-                int waterPixels = 0;
-                for (size_t i = 0; i < colorSize; i += 4) {
-                    uint8_t r = colors[i + 0];
-                    uint8_t g = colors[i + 1];
-                    uint8_t b = colors[i + 2];
-                    uint8_t a = colors[i + 3];
-                    if (a > 200 && b > 180 && b > r + 80 && b > g + 50) {
-                        waterPixels++;
-                        if (waterPixels > 30) {
-                            isCorrupted = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // 2. 生物群系检测: 验证文件中记录的群系是否属于该维度
-            if (!isCorrupted && fileSize > (std::streamoff)headerSize) {
+            // 1. 生物群系检测: 验证文件中记录的群系是否属于该维度 (最权威的维度判定)
+            if (fileSize > (std::streamoff)headerSize) {
                 in.seekg(headerSize, std::ios::beg);
                 uint8_t biomeCount = 0;
                 in.read((char*)&biomeCount, 1);
@@ -350,16 +410,84 @@ namespace MapCacheManager {
                     }
                 }
             }
+
+            // 2. 颜色与方块特征检测 (针对生物群系未记录或历史残存文件的深层比对)
+            if (!isCorrupted) {
+                std::vector<uint8_t> colors(colorSize);
+                in.seekg(0, std::ios::beg);
+                in.read((char*)colors.data(), colorSize);
+
+                if (dimensionId == 1 && isCaveSubdir) {
+                    // 下界水体检测: 下界无自然水体，若洞穴图存在大面积纯蓝水体像素则判定为主世界洞穴污染
+                    int waterPixels = 0;
+                    for (size_t i = 0; i < colorSize; i += 4) {
+                        uint8_t r = colors[i + 0];
+                        uint8_t g = colors[i + 1];
+                        uint8_t b = colors[i + 2];
+                        uint8_t a = colors[i + 3];
+                        if (a > 200 && b > 180 && b > r + 80 && b > g + 50) {
+                            waterPixels++;
+                            if (waterPixels > 30) {
+                                isCorrupted = true;
+                                break;
+                            }
+                        }
+                    }
+                } else if (dimensionId == 0) {
+                    // 主世界洞穴或地表: 绝对不应存在大面积下界特征 (地狱岩、下界熔岩海、诡异/绯红菌岩)
+                    // 地狱岩特征: 暗红褐色 (80 <= r <= 145 && 15 <= g <= 55 && 15 <= b <= 55 && r > g * 2)
+                    // 下界熔岩海特征: 高亮橙红 (r >= 180 && 60 <= g <= 150 && b <= 50)
+                    // 诡异/绯红菌岩: 蓝绿/鲜红紫
+                    if (isCaveSubdir) {
+                        int netherrackCount = 0;
+                        int netherLavaCount = 0;
+                        int netherNyliumCount = 0;
+                        for (size_t i = 0; i < colorSize; i += 4) {
+                            uint8_t a = colors[i + 3];
+                            if (a < 50) continue;
+                            uint8_t r = colors[i + 0];
+                            uint8_t g = colors[i + 1];
+                            uint8_t b = colors[i + 2];
+
+                            if (r >= 80 && r <= 145 && g >= 15 && g <= 55 && b >= 15 && b <= 55 && r > (uint16_t)g * 2) {
+                                netherrackCount++;
+                            } else if (r >= 180 && g >= 60 && g <= 150 && b <= 50) {
+                                netherLavaCount++;
+                            } else if ((r <= 35 && g >= 95 && b >= 95) || (r >= 110 && r <= 160 && g <= 35 && b <= 65)) {
+                                netherNyliumCount++;
+                            }
+                        }
+
+                        // 主世界天然洞穴绝不含地狱岩与诡异菌岩，成百上千像素则必定是下界污染
+                        if (netherrackCount > 500 || 
+                            (netherrackCount > 200 && (netherLavaCount > 300 || netherNyliumCount > 100)) ||
+                            (netherrackCount + netherNyliumCount + netherLavaCount > 3000)) {
+                            isCorrupted = true;
+                        }
+                    } else {
+                        // 地表模式：排除红色花朵(r~216)和恶地陶瓦后，纯暗红地狱岩成千上万像素则为污染
+                        int netherrackCount = 0;
+                        for (size_t i = 0; i < colorSize; i += 4) {
+                            uint8_t a = colors[i + 3];
+                            if (a < 50) continue;
+                            uint8_t r = colors[i + 0];
+                            uint8_t g = colors[i + 1];
+                            uint8_t b = colors[i + 2];
+                            if (r >= 80 && r <= 145 && g >= 15 && g <= 55 && b >= 15 && b <= 55 && r > (uint16_t)g * 2) {
+                                netherrackCount++;
+                            }
+                        }
+                        if (netherrackCount > 1000) {
+                            isCorrupted = true;
+                        }
+                    }
+                }
+            }
             in.close();
 
             if (isCorrupted) {
+                // 仅删除已损坏的目标文件，保留正常的对偶地表/洞穴文件
                 std::filesystem::remove(filePath, ec);
-                std::string fname = filePath.filename().string();
-                if (isCaveSubdir) {
-                    std::filesystem::remove(cacheDir / fname, ec);
-                } else {
-                    std::filesystem::remove(cacheDir / "cave" / fname, ec);
-                }
                 return true;
             }
             return false;
@@ -401,37 +529,57 @@ namespace MapCacheManager {
         return count;
     }
 
-    void SwitchWorld(const std::string& worldId, int dimensionId) {
+    void SwitchWorld(const std::string& worldId, int dimensionId, const std::string& targetMapId) {
         std::lock_guard<std::mutex> lock(g_cacheMutex);
-        s_currentLoadedDimId = dimensionId;
+        int oldDimId = s_currentLoadedDimId;
         
         if (!g_cacheDir.empty()) {
             for (auto& pair : g_loadedRegions) {
                 if (pair.second && pair.second->dirty) {
                     int rx, rz; DecodeRegionHash(pair.first, rx, rz);
-                    std::string dir = g_cacheDir + GetRegionSubdir(IsCaveHash(pair.first));
-                    std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
-                    std::ofstream out(filePath, std::ios::binary);
-                    if (out) {
-                        out.write((char*)pair.second->colors, sizeof(pair.second->colors));
-                        out.write((char*)pair.second->heights, sizeof(pair.second->heights));
-                        // [新增] 生物群系段
-                        WriteBiomeSection(out, *pair.second);
+                    std::string dir = pair.second->saveDir.empty() ? (g_cacheDir + GetRegionSubdir(IsCaveHash(pair.first))) : pair.second->saveDir;
+                    int regDim = pair.second->dimId >= 0 ? pair.second->dimId : (oldDimId >= 0 ? oldDimId : dimensionId);
+
+                    // 铁律安全防护：绝对禁止跨维度目录写入
+                    bool safeToSave = true;
+                    if (regDim == 0) {
+                        if (dir.find("dim_1") != std::string::npos || dir.find("dim_2") != std::string::npos) safeToSave = false;
+                    } else if (regDim == 1) {
+                        if (dir.find("dim_0") != std::string::npos || dir.find("dim_2") != std::string::npos) safeToSave = false;
+                    } else if (regDim == 2) {
+                        if (dir.find("dim_0") != std::string::npos || dir.find("dim_1") != std::string::npos) safeToSave = false;
+                    }
+
+                    if (safeToSave && !dir.empty()) {
+                        std::error_code ec;
+                        std::filesystem::create_directories(dir, ec);
+                        std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
+                        std::ofstream out(filePath, std::ios::binary);
+                        if (out) {
+                            out.write((char*)pair.second->colors, sizeof(pair.second->colors));
+                            out.write((char*)pair.second->heights, sizeof(pair.second->heights));
+                            // [新增] 生物群系段
+                            WriteBiomeSection(out, *pair.second);
+                        }
                     }
                 }
                 if (pair.second) delete pair.second;
             }
         }
         
+        s_currentLoadedDimId = dimensionId;
         g_loadedRegions.clear();
         g_loadQueue.clear();
 
-        // 路径示例：mods/ChiyanMap/data/cache/<worldId>/dim_<n>/
+        // 路径示例：mods/ChiyanMap/data/cache/<worldId>/dim_<n>/ (default)
+        // 或 mods/ChiyanMap/data/cache/<worldId>/maps/<mapId>/dim_<n>/ (subworlds)
         // 地表 (region_*.bin) 直接存放于 dim_<n>/ 下；洞穴存放于 dim_<n>/cave/ 下
+        std::string mapToLoad = !targetMapId.empty() ? targetMapId : MultiworldManager::GetViewedMapId();
+        s_currentLoadedMapId = mapToLoad.empty() ? "default" : mapToLoad;
         auto baseDataDir = chiyan_map::ChiyanMap::getInstance().getSelf().getDataDir();
         auto cacheRoot = baseDataDir / "cache";
         auto worldDir = cacheRoot / worldId;
-        auto cacheDir = worldDir / ("dim_" + std::to_string(dimensionId));
+        auto cacheDir = MultiworldManager::GetMapCacheDir(worldId, s_currentLoadedMapId, dimensionId);
 
         int exactCount = CountRegionBinFiles(worldDir);
 
@@ -606,13 +754,26 @@ namespace MapCacheManager {
             for (auto& pair : g_loadedRegions) {
                 if (pair.second && pair.second->dirty) {
                     int rx, rz; DecodeRegionHash(pair.first, rx, rz);
-                    std::string dir = g_cacheDir + GetRegionSubdir(IsCaveHash(pair.first));
-                    std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
-                    std::ofstream out(filePath, std::ios::binary);
-                    if (out) {
-                        out.write((char*)pair.second->colors, sizeof(pair.second->colors));
-                        out.write((char*)pair.second->heights, sizeof(pair.second->heights));
-                        WriteBiomeSection(out, *pair.second);
+                    std::string dir = pair.second->saveDir.empty() ? (g_cacheDir + GetRegionSubdir(IsCaveHash(pair.first))) : pair.second->saveDir;
+                    int regDim = pair.second->dimId >= 0 ? pair.second->dimId : s_currentLoadedDimId;
+                    bool safeToSave = true;
+                    if (regDim == 0) {
+                        if (dir.find("dim_1") != std::string::npos || dir.find("dim_2") != std::string::npos) safeToSave = false;
+                    } else if (regDim == 1) {
+                        if (dir.find("dim_0") != std::string::npos || dir.find("dim_2") != std::string::npos) safeToSave = false;
+                    } else if (regDim == 2) {
+                        if (dir.find("dim_0") != std::string::npos || dir.find("dim_1") != std::string::npos) safeToSave = false;
+                    }
+                    if (safeToSave && !dir.empty()) {
+                        std::error_code ec;
+                        std::filesystem::create_directories(dir, ec);
+                        std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
+                        std::ofstream out(filePath, std::ios::binary);
+                        if (out) {
+                            out.write((char*)pair.second->colors, sizeof(pair.second->colors));
+                            out.write((char*)pair.second->heights, sizeof(pair.second->heights));
+                            WriteBiomeSection(out, *pair.second);
+                        }
                     }
                 }
             }
@@ -629,6 +790,9 @@ namespace MapCacheManager {
         // [严格维度防护] 拒绝写入不属于当前加载维度或玩家物理维度的扫描数据，彻底阻断跨维度污染
         if (targetDim != s_currentLoadedDimId || targetDim != MapRenderState::currentDimensionId) return;
         if (s_currentLoadedDimId != MapRenderState::currentDimensionId) return;
+        if (s_currentLoadedMapId != MultiworldManager::GetActiveMapId()) return;
+        std::string expectedDimStr = "dim_" + std::to_string(targetDim);
+        if (g_cacheDir.find(expectedDimStr) == std::string::npos) return;
         int startX = centerX - MAP_DATA_RADIUS; int startZ = centerZ - MAP_DATA_RADIUS;
 
         for (int z = 0; z < MAP_DATA_SIZE; z++) {
@@ -641,9 +805,11 @@ namespace MapCacheManager {
                 int rz = (worldZ < 0 ? (worldZ + 1) / REGION_SIZE - 1 : worldZ / REGION_SIZE);
                 uint64_t hash = GetRegionHash(rx, rz, isCave);
                 
+                std::string dir = g_cacheDir + GetRegionSubdir(isCave);
                 if (g_loadedRegions.find(hash) == g_loadedRegions.end() || g_loadedRegions[hash] == nullptr) {
                     RegionData* newRegion = new RegionData();
-                    std::string dir = g_cacheDir + GetRegionSubdir(isCave);
+                    newRegion->dimId = targetDim;
+                    newRegion->saveDir = dir;
                     std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
                     LoadRegionFromFile(filePath, *newRegion, isCave);
                     newRegion->textureDirty = true;
@@ -651,6 +817,11 @@ namespace MapCacheManager {
                 }
 
                 RegionData* region = g_loadedRegions[hash];
+                if (!region) continue;
+                region->dimId = targetDim;
+                if (region->saveDir.empty()) {
+                    region->saveDir = dir;
+                }
                 int localX = worldX - (rx * REGION_SIZE); int localZ = worldZ - (rz * REGION_SIZE);
 
                 float currentY = scanHeights[x][z];
@@ -828,6 +999,8 @@ namespace MapCacheManager {
             RegionData* newRegion = (it != g_loadedRegions.end() && it->second) ? it->second : new RegionData();
             if (LoadRegionFromFile(filePath, *newRegion, isCave)) {
                 newRegion->textureDirty = true;
+                newRegion->dimId = s_currentLoadedDimId;
+                newRegion->saveDir = dir;
                 g_loadedRegions[hash] = newRegion;
                 it = g_loadedRegions.find(hash);
             } else {
@@ -906,6 +1079,9 @@ namespace MapCacheManager {
         // [严格维度防护] 拒绝写入不属于当前加载维度或玩家物理维度的群系数据，彻底阻断跨维度污染
         if (targetDim != s_currentLoadedDimId || targetDim != MapRenderState::currentDimensionId) return;
         if (s_currentLoadedDimId != MapRenderState::currentDimensionId) return;
+        if (s_currentLoadedMapId != MultiworldManager::GetActiveMapId()) return;
+        std::string expectedDimStr = "dim_" + std::to_string(targetDim);
+        if (g_cacheDir.find(expectedDimStr) == std::string::npos) return;
         for (const auto& e : entries) {
             // [群系合法性防护] 严格核实生物群系是否属于该维度，绝不将主世界群系写入下界/末地
             if (!IsValidBiomeForDimension(targetDim, e.name)) continue;
@@ -1071,6 +1247,8 @@ namespace MapCacheManager {
                     RegionData* newRegion = new RegionData();
                     if (LoadRegionFromFile(filePath, *newRegion, isCave)) {
                         newRegion->textureDirty = true;
+                        newRegion->dimId = s_currentLoadedDimId;
+                        newRegion->saveDir = dir;
                         g_loadedRegions[hash] = newRegion;
                         region = newRegion;
                     } else {

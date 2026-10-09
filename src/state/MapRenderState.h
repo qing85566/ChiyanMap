@@ -353,6 +353,16 @@ namespace MapRenderState {
     inline std::atomic<int> teleportState{(int)TeleportState::Idle};
     inline std::string teleportStatusMsg;     // 给 UI 显示的简短状态文本（如"加载地形中..."）
     inline std::string teleportFailReason;    // 失败原因（供日志与调试）
+    // [多世界 / 子世界地图实例管理] UI 面板状态
+    inline bool showMapSelectionUI = false; // 地图选择与管理模态面板
+    inline bool showNewMapModal = false;    // 新建地图模态窗口
+    inline bool showRenameMapModal = false; // 重命名地图模态窗口
+    inline bool showConnectMapModal = false;// 互联管理模态窗口
+    inline std::string selectedConfigMapId = ""; // 正在配置互联的地图 ID
+    inline std::string renamingMapId = "";       // 正在重命名的地图 ID
+    inline char newMapNameInput[128] = "";       // 新建地图名称输入缓冲
+    inline char renameMapNameInput[128] = "";    // 重命名输入缓冲
+    inline bool showTeleportNotConnectedWarning = false; // 传送未连接警告
 
     // [统一拦截枢纽] 判断是否有任何全屏 UI 处于活动状态
     inline bool IsUIActive() {
@@ -361,7 +371,7 @@ namespace MapRenderState {
                                    tp == (int)TeleportState::Validating || 
                                    tp == (int)TeleportState::Failed);
         return showBigMap || showWaypointUI || showDeathPointUI || showMiniMapPosSettings || showMiniMapSettings || showBigMapSettings || showHotkeySettings || showCaveSettings ||
-               showExportPNGScreen || showSeedMap || isTeleportUIActive;
+               showExportPNGScreen || showSeedMap || showMapSelectionUI || showNewMapModal || showRenameMapModal || showConnectMapModal || showTeleportNotConnectedWarning || isTeleportUIActive;
     }
 
     // [新增] 跨菜单桥接：大地图右键唤起新建地标的预设坐标与归属维度
@@ -371,6 +381,7 @@ namespace MapRenderState {
     inline int addWaypointY = -999999;
     inline int addWaypointZ = -999999;
     inline int addWaypointDim = -1; // -1=当前维度, 0=主世界, 1=下界, 2=末地
+    inline int addWaypointIsCave = -1; // -1=自动, 0=地表, 1=洞穴
 
     // [新增] 原生瞬间传送信号器
     inline std::atomic<bool> triggerTeleport{false};
