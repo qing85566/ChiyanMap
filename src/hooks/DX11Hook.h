@@ -3295,6 +3295,66 @@ namespace DX11Hook {
         return LanguageManager::GetText(SeedMapLayerTextKey(layer));
     }
 
+    inline const char* SeedMapLayerDetailTextKey(ChiyanMap::WorldGen::LayerId layer) {
+        using ChiyanMap::WorldGen::LayerId;
+        switch (layer) {
+        case LayerId::Village:
+            return "SEED_MAP_DETAIL_VILLAGE";
+        case LayerId::DesertPyramid:
+        case LayerId::JungleTemple:
+        case LayerId::WoodlandMansion:
+            return "SEED_MAP_DETAIL_SURFACE_HEIGHT";
+        case LayerId::Stronghold:
+            return "SEED_MAP_DETAIL_STRONGHOLD";
+        case LayerId::Mineshaft:
+            return "SEED_MAP_DETAIL_MINESHAFT";
+        case LayerId::NetherFossil:
+            return "SEED_MAP_DETAIL_NO_FIXTURE";
+        case LayerId::EndGateway:
+            return "SEED_MAP_DETAIL_END_GATEWAY";
+        case LayerId::OverworldBiomes:
+        case LayerId::NetherBiomes:
+        case LayerId::EndBiomes:
+            return "SEED_MAP_DETAIL_BIOME_NOISE";
+        case LayerId::SlimeChunks:
+            return "SEED_MAP_DETAIL_SLIME_CHUNKS";
+        case LayerId::OverworldOres:
+        case LayerId::NetherOres:
+            return "SEED_MAP_DETAIL_ORES";
+        case LayerId::OverworldUndergroundFeatures:
+            return "SEED_MAP_DETAIL_UNDERGROUND";
+        case LayerId::DungeonSpawner:
+            return "SEED_MAP_DETAIL_DUNGEON";
+        case LayerId::WorldSpawn:
+            return "SEED_MAP_DETAIL_WORLD_SPAWN";
+        case LayerId::MushroomFields:
+        case LayerId::CherryGrove:
+        case LayerId::Badlands:
+        case LayerId::IceSpikes:
+        case LayerId::MangroveSwamp:
+        case LayerId::PaleGarden:
+        case LayerId::SulfurCaves:
+        case LayerId::DappledForest:
+            return "SEED_MAP_DETAIL_RARE_BIOME";
+        case LayerId::SoulSandValley:
+        case LayerId::CrimsonForest:
+        case LayerId::WarpedForest:
+        case LayerId::BasaltDeltas:
+            return "SEED_MAP_DETAIL_NETHER_BIOME";
+        case LayerId::EndSmallIslands:
+        case LayerId::EndMidlands:
+        case LayerId::EndHighlands:
+        case LayerId::EndBarrens:
+            return "SEED_MAP_DETAIL_END_BIOME";
+        default:
+            return "SEED_MAP_DETAIL_AWAITS_FIXTURE";
+        }
+    }
+
+    inline const char* SeedMapLayerDetailText(ChiyanMap::WorldGen::LayerId layer) {
+        return LanguageManager::GetText(SeedMapLayerDetailTextKey(layer));
+    }
+
     inline ImU32 SeedMapMarkerColor(ChiyanMap::WorldGen::LayerId layer) {
         if (const auto* icon = ChiyanMap::SeedMapIcons::FindIcon(layer)) {
             return IM_COL32(icon->accent.r, icon->accent.g, icon->accent.b, 255);
@@ -3727,7 +3787,7 @@ namespace DX11Hook {
                 && descriptor->support == ChiyanMap::WorldGen::LayerSupportState::FixtureVerified
             ? LanguageManager::GetText("SEED_MAP_FIXTURE_LOCATION")
             : LanguageManager::GetText("SEED_MAP_SEED_PREDICTION"));
-        if (descriptor != nullptr) ImGui::TextWrapped("%s", std::string(descriptor->detail).c_str());
+        if (descriptor != nullptr) ImGui::TextWrapped("%s", SeedMapLayerDetailText(descriptor->id));
         ImGui::Text("X %lld   Z %lld", static_cast<long long>(block.x), static_cast<long long>(block.z));
 
         if (ImGui::Button(LanguageManager::GetText("SEED_MAP_CENTER"), ImVec2(0.0f, 0.0f))) {
@@ -3838,10 +3898,10 @@ namespace DX11Hook {
                 }
             }
 
-            ImGui::TextDisabled("Candidates %llu  Markers %llu",
+            ImGui::TextDisabled(LanguageManager::GetText("SEED_MAP_STATS_CANDIDATES"),
                                 static_cast<unsigned long long>(status.cachedQueryStatistics.placementCandidates),
                                 static_cast<unsigned long long>(status.cachedQueryStatistics.emittedMarkers));
-            ImGui::TextDisabled("Biome rejected %llu",
+            ImGui::TextDisabled(LanguageManager::GetText("SEED_MAP_STATS_REJECTED"),
                                 static_cast<unsigned long long>(status.cachedQueryStatistics.biomeRejectedCandidates));
 
             auto settings = SeedMapManager::GetSettings();

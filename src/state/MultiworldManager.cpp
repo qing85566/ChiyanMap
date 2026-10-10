@@ -108,7 +108,6 @@ namespace MultiworldManager {
             MapInstance def;
             def.id = "default";
             def.name = LanguageManager::GetText("MAP_DEFAULT_NAME");
-            if (def.name.empty() || def.name == "MAP_DEFAULT_NAME") def.name = "默认地图";
             def.createdAt = GetCurrentTimeMs();
             def.lastUsedAt = def.createdAt;
             def.connectedMaps.insert("default");
@@ -128,6 +127,27 @@ namespace MultiworldManager {
             g_activeMapId = "default";
         }
         g_viewedMapId = g_activeMapId;
+    }
+
+    static bool IsBuiltinDefaultMapName(const std::string& name) {
+        if (name.empty() || name == "MAP_DEFAULT_NAME") return true;
+        static const char* const s_defaultNames[] = {
+            "默认地图", "預設地圖", "Default Map", "Standardkarte",
+            "Mapa predeterminado", "Carte par défaut", "Peta Bawaan", "Mappa predefinita",
+            "デフォルトマップ", "기본 지도", "Mapa Padrão", "Карта по умолчанию",
+            "แผนที่เริ่มต้น", "Varsayılan Harita", "Стандартна мапа", "Bản đồ mặc định"
+        };
+        for (const char* s : s_defaultNames) {
+            if (name == s) return true;
+        }
+        return false;
+    }
+
+    static std::string ResolveMapDisplayName(const MapInstance& m) {
+        if (m.id == "default" && IsBuiltinDefaultMapName(m.name)) {
+            return LanguageManager::GetText("MAP_DEFAULT_NAME");
+        }
+        return m.name;
     }
 
     void SaveConfig() {
@@ -186,10 +206,10 @@ namespace MultiworldManager {
         std::lock_guard<std::mutex> lock(g_mwMutex);
         for (const auto& m : g_mapInstances) {
             if (m.id == g_activeMapId) {
-                return m.name;
+                return ResolveMapDisplayName(m);
             }
         }
-        return "默认地图";
+        return LanguageManager::GetText("MAP_DEFAULT_NAME");
     }
 
     std::string GetViewedMapId() {
@@ -203,10 +223,10 @@ namespace MultiworldManager {
         std::string targetId = g_viewedMapId.empty() ? g_activeMapId : g_viewedMapId;
         for (const auto& m : g_mapInstances) {
             if (m.id == targetId) {
-                return m.name;
+                return ResolveMapDisplayName(m);
             }
         }
-        return "默认地图";
+        return LanguageManager::GetText("MAP_DEFAULT_NAME");
     }
 
     void SetViewedMapId(const std::string& mapId) {
@@ -250,7 +270,11 @@ namespace MultiworldManager {
 
     std::vector<MapInstance> GetMapList() {
         std::lock_guard<std::mutex> lock(g_mwMutex);
-        return g_mapInstances;
+        std::vector<MapInstance> list = g_mapInstances;
+        for (auto& m : list) {
+            m.name = ResolveMapDisplayName(m);
+        }
+        return list;
     }
 
     bool CreateMap(const std::string& name, const std::string& customId) {
