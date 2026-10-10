@@ -2206,6 +2206,7 @@ namespace LanguageManager {
                 MapRenderState::infoShowTime = j.value("infoShowTime", false);
                 MapRenderState::infoShowLight = j.value("infoShowLight", false);
                 MapRenderState::infoShowChunkCoords = j.value("infoShowChunkCoords", false);
+                MapRenderState::infoShowBackground = j.value("infoShowBackground", true);
                 MapRenderState::alwaysShowNametags = j.value("alwaysShowNametags", true);
                 MapRenderState::radarHeightIndicators = j.value("radarHeightIndicators", true);
                 MapRenderState::entityDepth = j.value("entityDepth", true);
@@ -2232,6 +2233,8 @@ namespace LanguageManager {
                 MapRenderState::radarShowFriendly = j.value("radarShowFriendly", true);
                 MapRenderState::radarShowItems = j.value("radarShowItems", false);
                 MapRenderState::bigMapWaypointScale = std::clamp(j.value("bigMapWaypointScale", 1.0f), 0.5f, 2.5f);
+                MapRenderState::minZoomForLocalWaypoints = std::clamp(j.value("minZoomForLocalWaypoints", 0.0f), 0.0f, 2.0f);
+                MapRenderState::renderWaypointBackgrounds = j.value("renderWaypointBackgrounds", true);
                 MapRenderState::bigMapEntityScale = std::clamp(j.value("bigMapEntityScale", 1.0f), 0.5f, 2.5f);
                 MapRenderState::bigMapShowDisabledWaypoints = j.value("bigMapShowDisabledWaypoints", true);
                 MapRenderState::showCompass = j.value("showCompass", true);
@@ -2358,6 +2361,7 @@ namespace LanguageManager {
         j["infoShowTime"] = MapRenderState::infoShowTime;
         j["infoShowLight"] = MapRenderState::infoShowLight;
         j["infoShowChunkCoords"] = MapRenderState::infoShowChunkCoords;
+        j["infoShowBackground"] = MapRenderState::infoShowBackground;
         j["alwaysShowNametags"] = MapRenderState::alwaysShowNametags;
         j["radarHeightIndicators"] = MapRenderState::radarHeightIndicators;
         j["entityDepth"] = MapRenderState::entityDepth;
@@ -2384,6 +2388,8 @@ namespace LanguageManager {
         j["radarShowFriendly"] = MapRenderState::radarShowFriendly;
         j["radarShowItems"] = MapRenderState::radarShowItems;
         j["bigMapWaypointScale"] = MapRenderState::bigMapWaypointScale;
+        j["minZoomForLocalWaypoints"] = MapRenderState::minZoomForLocalWaypoints;
+        j["renderWaypointBackgrounds"] = MapRenderState::renderWaypointBackgrounds;
         j["bigMapEntityScale"] = MapRenderState::bigMapEntityScale;
         j["bigMapShowDisabledWaypoints"] = MapRenderState::bigMapShowDisabledWaypoints;
         j["showCompass"] = MapRenderState::showCompass;
@@ -2560,7 +2566,15 @@ namespace LanguageManager {
             {"ALWAYS_SHOW_NAMETAGS", "Always Show Nametagged Entities"},
             {"LABEL_BLOCK_LIGHT", "Block"},
             {"LABEL_SKY_LIGHT", "Sky"},
-            {"LABEL_CHUNK", "Chunk"}
+            {"LABEL_CHUNK", "Chunk"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS", "Min Zoom For Local Waypoints"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS_OFF", "Off"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS_DESC", "When world map zoom is below this threshold, hide normal local waypoints and only display pinned (★) or temporary waypoints."},
+            {"RENDER_WAYPOINT_BG", "Render Waypoint Backgrounds"},
+            {"RESTORE_WP_FMT", "Restore Waypoint: %s (%d)"},
+            {"RESTORE_WP_BTN", "Restore (%d)"},
+            {"RESTORE_WP_TIP", "Click or press Ctrl+Z to restore last deleted waypoint: %s"},
+            {"INFO_SHOW_BG", "Show Info Display Background"}
         };
         static const std::unordered_map<std::string, std::string> zhCN = {
             {"SEED_MAP_TITLE", "种子地图"},
@@ -2681,7 +2695,15 @@ namespace LanguageManager {
             {"ALWAYS_SHOW_NAMETAGS", "始终显示已命名实体名称"},
             {"LABEL_BLOCK_LIGHT", "方块"},
             {"LABEL_SKY_LIGHT", "天空"},
-            {"LABEL_CHUNK", "区块"}
+            {"LABEL_CHUNK", "区块"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS", "密集路径点最小显示缩放"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS_OFF", "不限"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS_DESC", "当大地图缩放低于此比例时，自动隐藏普通局部路径点，仅显示置顶(★)与临时路径点，防止缩小后图标重叠遮挡。"},
+            {"RENDER_WAYPOINT_BG", "路径点名称半透明背景框"},
+            {"RESTORE_WP_FMT", "恢复路径点: %s (%d)"},
+            {"RESTORE_WP_BTN", "恢复已删 (%d)"},
+            {"RESTORE_WP_TIP", "点击或按 Ctrl+Z 恢复最近删除的路径点: %s"},
+            {"INFO_SHOW_BG", "显示信息栏深色背景底板"}
         };
         static const std::unordered_map<std::string, std::string> zhTW = {
             {"SEED_MAP_TITLE", "種子地圖"},
@@ -2802,7 +2824,15 @@ namespace LanguageManager {
             {"ALWAYS_SHOW_NAMETAGS", "始終顯示已命名實體名稱"},
             {"LABEL_BLOCK_LIGHT", "方塊"},
             {"LABEL_SKY_LIGHT", "天空"},
-            {"LABEL_CHUNK", "區塊"}
+            {"LABEL_CHUNK", "區塊"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS", "密集路徑點最小顯示縮放"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS_OFF", "不限"},
+            {"MIN_ZOOM_LOCAL_WAYPOINTS_DESC", "當大地圖縮放低於此比例時，自動隱藏普通局部路徑點，僅顯示置頂(★)與臨時路徑點，防止縮小後圖示重疊遮擋。"},
+            {"RENDER_WAYPOINT_BG", "路徑點名稱半透明背景框"},
+            {"RESTORE_WP_FMT", "恢復路徑點: %s (%d)"},
+            {"RESTORE_WP_BTN", "恢復已刪 (%d)"},
+            {"RESTORE_WP_TIP", "點擊或按 Ctrl+Z 恢復最近刪除的路徑點: %s"},
+            {"INFO_SHOW_BG", "顯示資訊欄深色背景底板"}
         };
 
         const auto* table = &en;

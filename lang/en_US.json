@@ -522,5 +522,13 @@
   "DELETE": "Delete",
   "WARNING": "Warning",
   "MINIMAP_DISPLAY_SETTINGS": "Minimap Display Options",
-  "BIGMAP_ENTITY_SCALE": "World Map Entity Scale"
+  "BIGMAP_ENTITY_SCALE": "World Map Entity Scale",
+  "MIN_ZOOM_LOCAL_WAYPOINTS": "Min Zoom For Local Waypoints",
+  "MIN_ZOOM_LOCAL_WAYPOINTS_OFF": "Off",
+  "MIN_ZOOM_LOCAL_WAYPOINTS_DESC": "Hide unpinned local waypoints when the world map zoom is below this threshold (pinned & temporary waypoints remain visible)",
+  "RENDER_WAYPOINT_BG": "Render Waypoint Name Backgrounds",
+  "RESTORE_WP_FMT": "Restore Waypoint: %s (%d left)",
+  "RESTORE_WP_BTN": "Restore (%d)",
+  "RESTORE_WP_TIP": "Restore last deleted waypoint: %s (Ctrl+Z)",
+  "INFO_SHOW_BG": "Show Info Display Background"
 }

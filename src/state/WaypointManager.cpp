@@ -16,6 +16,8 @@ namespace WaypointManager {
     std::mutex g_wpMutex;
     Waypoint g_lastDeletedWaypoint;
     bool g_hasDeletedWaypoint = false;
+    std::vector<Waypoint> g_deletedWaypoints;
+    constexpr size_t kMaxDeletedWaypoints = 64;
     
     std::string g_worldId = "";
     std::string g_currentMapId = "default";
@@ -211,6 +213,10 @@ namespace WaypointManager {
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             std::filesystem::create_directories("mods/ChiyanMap/waypoints");
+            if (g_worldId != worldId) {
+                g_deletedWaypoints.clear();
+                g_hasDeletedWaypoint = false;
+            }
             g_worldId = worldId;
             g_currentMapId = MultiworldManager::GetActiveMapId();
             g_currentDim = dimensionId; // 记录“玩家当前所处维度”，用于新路径点归属
@@ -222,6 +228,10 @@ namespace WaypointManager {
         SaveWaypoints();
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
+            if (g_currentMapId != mapId) {
+                g_deletedWaypoints.clear();
+                g_hasDeletedWaypoint = false;
+            }
             g_currentMapId = mapId;
         }
         LoadWaypoints();
@@ -264,6 +274,10 @@ namespace WaypointManager {
                 [&](const Waypoint& w) { return w.id == id; });
             if (it != g_waypoints.end()) {
                 g_lastDeletedWaypoint = *it;
+                g_deletedWaypoints.push_back(*it);
+                if (g_deletedWaypoints.size() > kMaxDeletedWaypoints) {
+                    g_deletedWaypoints.erase(g_deletedWaypoints.begin());
+                }
                 g_hasDeletedWaypoint = true;
                 g_waypoints.erase(it);
                 changed = true;
@@ -278,9 +292,19 @@ namespace WaypointManager {
         bool changed = false;
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
+            for (const auto& w : g_waypoints) {
+                if (ids.count(w.id) > 0) {
+                    g_lastDeletedWaypoint = w;
+                    g_deletedWaypoints.push_back(w);
+                    if (g_deletedWaypoints.size() > kMaxDeletedWaypoints) {
+                        g_deletedWaypoints.erase(g_deletedWaypoints.begin());
+                    }
+                    g_hasDeletedWaypoint = true;
+                }
+            }
             auto it = std::remove_if(g_waypoints.begin(), g_waypoints.end(),
                 [&](const Waypoint& w) {
-                    return std::find(ids.begin(), ids.end(), w.id) != ids.end();
+                    return ids.count(w.id) > 0;
                 });
             if (it != g_waypoints.end()) {
                 g_waypoints.erase(it, g_waypoints.end());
@@ -337,14 +361,53 @@ namespace WaypointManager {
     }
 
     bool RestoreLastDeletedWaypoint() {
-        if (!g_hasDeletedWaypoint) return false;
+        bool restored = false;
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
-            g_waypoints.push_back(g_lastDeletedWaypoint);
-            g_hasDeletedWaypoint = false;
+            if (!g_deletedWaypoints.empty()) {
+                Waypoint wp = g_deletedWaypoints.back();
+                g_deletedWaypoints.pop_back();
+                // 防止万一已有同 ID 的路径点
+                auto dup = std::find_if(g_waypoints.begin(), g_waypoints.end(),
+                    [&](const Waypoint& w) { return w.id == wp.id; });
+                if (dup != g_waypoints.end()) {
+                    wp.id = GenerateID();
+                }
+                if (!wp.folder.empty()) {
+                    g_customFolders.insert(wp.folder);
+                }
+                g_waypoints.push_back(wp);
+                if (!g_deletedWaypoints.empty()) {
+                    g_lastDeletedWaypoint = g_deletedWaypoints.back();
+                    g_hasDeletedWaypoint = true;
+                } else {
+                    g_hasDeletedWaypoint = false;
+                }
+                restored = true;
+            } else if (g_hasDeletedWaypoint) {
+                g_waypoints.push_back(g_lastDeletedWaypoint);
+                g_hasDeletedWaypoint = false;
+                restored = true;
+            }
         }
-        SaveWaypoints();
-        return true;
+        if (restored) SaveWaypoints();
+        return restored;
+    }
+
+    int GetDeletedWaypointCount() {
+        std::lock_guard<std::mutex> lock(g_wpMutex);
+        if (!g_deletedWaypoints.empty()) {
+            return (int)g_deletedWaypoints.size();
+        }
+        return g_hasDeletedWaypoint ? 1 : 0;
+    }
+
+    std::string GetLastDeletedWaypointName() {
+        std::lock_guard<std::mutex> lock(g_wpMutex);
+        if (!g_deletedWaypoints.empty()) {
+            return g_deletedWaypoints.back().name;
+        }
+        return g_hasDeletedWaypoint ? g_lastDeletedWaypoint.name : "";
     }
 
     std::string SetTemporaryWaypoint(int x, int y, int z, int dimId, int8_t isCave) {

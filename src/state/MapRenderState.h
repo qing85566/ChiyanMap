@@ -319,6 +319,8 @@ namespace MapRenderState {
     inline uint8_t g_listeningModifiers = 0;
     // [快捷键增强] Ctrl+Z 撤销请求标志 (由 WndProc 设置，渲染线程消费)
     inline std::atomic<bool> g_hotkeyUndoRequested{false};
+    // [路径点交互增强] Ctrl+Z 误删路径点恢复请求标志 (由 WndProc 设置，渲染线程消费)
+    inline std::atomic<bool> g_waypointRestoreRequested{false};
 
     // [新增] 小地图偏移与位置设置
     inline float miniMapOffsetX = 0.0f; // 小地图 X 偏移
@@ -344,6 +346,10 @@ namespace MapRenderState {
 
     // [大地图路径点缩放] (持久化保存)
     inline float bigMapWaypointScale = 1.0f; // 0.5x ~ 2.5x
+    // [密集路径点最小缩放阈值] 当大地图缩放低于此阈值时自动隐藏普通局部路径点，仅显示置顶(★)与临时路径点 (0.0=关闭，持久化)
+    inline float minZoomForLocalWaypoints = 0.0f; // 0.0f ~ 2.0f
+    // [路径点文字背景底板开关] 控制是否为路径点名称文字渲染半透明背景底板框 (默认开启，持久化)
+    inline bool renderWaypointBackgrounds = true;
 
     // [大地图生物图标缩放] (持久化保存)
     inline float bigMapEntityScale = 1.0f; // 0.5x ~ 2.5x
@@ -455,6 +461,7 @@ namespace MapRenderState {
     inline bool infoShowTime = false;         // 显示游戏时间与现实时间 (第5项: 默认关)
     inline bool infoShowLight = false;        // 显示方块光照等级 (默认关)
     inline bool infoShowChunkCoords = false;  // 显示区块局部坐标与索引 (默认关)
+    inline bool infoShowBackground = true;    // 显示小地图信息栏深色背景底板 (默认开)
     inline bool alwaysShowNametags = true;    // 始终显示已命名实体名称 (默认开)
     inline std::atomic<int> g_blockLight{-1}; // 当前方块光照 (0-15)
     inline std::atomic<int> g_skyLight{-1};   // 当前天空光照 (0-15)

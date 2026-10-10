@@ -159,9 +159,10 @@ Xaero's World Map 包含服务端网络同步组件（`xaero/map/server/`）：
 | | 原版 64 色调色板模式 (Vanilla States) | ✅ | ❌ |
 | | 染色玻璃多层半透明渲染 | ✅ | ❌ |
 | | LOD 纹理分级金字塔 (Branch Regions) | ✅ | ❌ |
-| **交互 & 生态** | 聊天框分享路径点 (Share in Chat) | ✅ | ❌ |
-| | 路径点回收站 (Restore Waypoint) | ✅ | ❌ |
-| | 密集路径点缩放自适应隐藏 | ✅ | ❌ |
+| **交互 & 生态** | 聊天框分享路径点 (Share in Chat) | ✅ | ✅ (大地图菜单 & 管理器一键分享+复制) |
+| | 路径点回收站 (Restore Waypoint) | ✅ | ✅ (多级回收站栈 & Ctrl+Z 恢复) |
+| | 密集路径点缩放自适应隐藏 | ✅ | ✅ (局部路径点最小缩放阈值) |
+| | 路径点名称背景底板开关 | ✅ | ✅ (Render Waypoint Backgrounds) |
 | | 领地插件联动 (OPAC Claims) | ✅ | ❌ |
 | | 服务端远距离玩家追踪协议 | ✅ | ❌ |
 | | 药水状态效果与公平模式禁用 | ✅ | ❌ |

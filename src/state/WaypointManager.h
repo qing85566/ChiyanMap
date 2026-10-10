@@ -32,6 +32,7 @@ namespace WaypointManager {
     extern std::mutex g_wpMutex;
     extern Waypoint g_lastDeletedWaypoint;
     extern bool g_hasDeletedWaypoint;
+    extern std::vector<Waypoint> g_deletedWaypoints;
 
     void Init();
     void SaveWaypoints();
@@ -45,6 +46,8 @@ namespace WaypointManager {
     void ToggleWaypointPin(const std::string& id);
     void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, int dimId = -1);
     bool RestoreLastDeletedWaypoint();
+    int GetDeletedWaypointCount();
+    std::string GetLastDeletedWaypointName();
 
     // 临时路径点接口 (单例临时路径点，重复设置自动更新)
     std::string SetTemporaryWaypoint(int x, int y, int z, int dimId = -1, int8_t isCave = -1);

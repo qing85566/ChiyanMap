@@ -522,5 +522,13 @@
   "DELETE": "删除",
   "WARNING": "警告",
   "MINIMAP_DISPLAY_SETTINGS": "小地图显示选项",
-  "BIGMAP_ENTITY_SCALE": "大地图生物头像缩放"
+  "BIGMAP_ENTITY_SCALE": "大地图生物头像缩放",
+  "MIN_ZOOM_LOCAL_WAYPOINTS": "局部路径点最小缩放",
+  "MIN_ZOOM_LOCAL_WAYPOINTS_OFF": "不限制",
+  "MIN_ZOOM_LOCAL_WAYPOINTS_DESC": "当大地图缩放低于此倍率时，自动隐藏未置顶的普通路径点，仅保留置顶地标与临时标记",
+  "RENDER_WAYPOINT_BG": "显示路径点名称背景底板",
+  "RESTORE_WP_FMT": "恢复已删除路径点: %s (剩余 %d)",
+  "RESTORE_WP_BTN": "恢复删除 (%d)",
+  "RESTORE_WP_TIP": "恢复最近删除的路径点：%s (快捷键 Ctrl+Z)",
+  "INFO_SHOW_BG": "显示信息栏深色背景底板"
 }

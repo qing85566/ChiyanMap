@@ -469,5 +469,13 @@
     "HELP_RIGHT_CLICK": "右鍵點擊地圖或標記彈出快捷操作選單",
     "HELP_SPACE_CENTER": "空格鍵快速將地圖視角置中對齊玩家",
     "HELP_SHIFT_DRAG_EXPORT": "按住 Shift + 左鍵拖曳可框選區域導出高清 PNG",
-    "HELP_GOTO_COORDS": "輸入 X/Z 座標按 Enter 可快速定位目標地點"
+    "HELP_GOTO_COORDS": "輸入 X/Z 座標按 Enter 可快速定位目標地點",
+    "MIN_ZOOM_LOCAL_WAYPOINTS": "局部路徑點最小縮放",
+    "MIN_ZOOM_LOCAL_WAYPOINTS_OFF": "不限制",
+    "MIN_ZOOM_LOCAL_WAYPOINTS_DESC": "當大地圖縮放低於此倍率時，自動隱藏未置頂的普通路徑點，僅保留置頂地標與臨時標記",
+    "RENDER_WAYPOINT_BG": "顯示路徑點名稱背景底板",
+    "RESTORE_WP_FMT": "恢復已刪除路徑點: %s (剩餘 %d)",
+    "RESTORE_WP_BTN": "恢復刪除 (%d)",
+    "RESTORE_WP_TIP": "恢復最近刪除的路徑點：%s (快捷鍵 Ctrl+Z)",
+    "INFO_SHOW_BG": "顯示資訊欄深色背景底板"
 }
