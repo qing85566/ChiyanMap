@@ -43,7 +43,7 @@ namespace WaypointManager {
     void RemoveWaypoints(const std::set<std::string>& ids);
     void ToggleWaypoint(const std::string& id);
     void ToggleWaypointPin(const std::string& id);
-    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1);
+    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, int dimId = -1);
     bool RestoreLastDeletedWaypoint();
 
     // 临时路径点接口 (单例临时路径点，重复设置自动更新)

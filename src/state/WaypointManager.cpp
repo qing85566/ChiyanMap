@@ -315,7 +315,7 @@ namespace WaypointManager {
         if (changed) SaveWaypoints();
     }
 
-    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned, const std::string& folder, int8_t isCave) {
+    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned, const std::string& folder, int8_t isCave, int dimId) {
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             auto it = std::find_if(g_waypoints.begin(), g_waypoints.end(),
@@ -328,6 +328,9 @@ namespace WaypointManager {
             it->pinned = pinned;
             it->folder = folder;
             it->isCave = isCave;
+            if (dimId >= 0 && dimId < 3) {
+                it->dimId = dimId;
+            }
             if (!folder.empty()) g_customFolders.insert(folder);
         }
         SaveWaypoints();

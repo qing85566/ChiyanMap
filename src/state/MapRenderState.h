@@ -22,6 +22,11 @@ namespace MapRenderState {
     inline bool showChunkGrid = false;     // 区块网格显示开关 (小地图 + 大地图共用，图标按钮切换，持久化)
     inline bool bigMapShowHoverBox = true; // 全屏大地图鼠标悬停区块选框显示开关 (持久化)
 
+    // [光标位置记忆与恢复] 记录离开全屏大地图时的光标屏幕坐标，在切回大地图时精准恢复，确保光标静止不动
+    struct SavedCursorPos { long x = -1; long y = -1; };
+    inline SavedCursorPos g_lastBigMapCursorPos = { -1, -1 };
+    inline bool g_hasSavedBigMapCursor = false;
+
     // 当前玩家所处生物群系名称 (拆分为原始命名空间ID与本地化名称)
     inline std::string rawBiomeName = "minecraft:unknown";
     inline std::string translatedBiomeName = "Unknown Biome";

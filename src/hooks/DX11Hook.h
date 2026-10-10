@@ -366,8 +366,24 @@ namespace DX11Hook {
 
     typedef BOOL(WINAPI* PSETCURSORPOS_HOOK)(int, int);
     inline PSETCURSORPOS_HOOK oSetCursorPos = nullptr;
+    inline std::atomic<bool> g_allowInternalSetCursorPos{false};
+
+    inline void SafeSetCursorPosInternal(int X, int Y) {
+        g_allowInternalSetCursorPos.store(true);
+        if (oSetCursorPos) {
+            oSetCursorPos(X, Y);
+        } else {
+            SetCursorPos(X, Y);
+        }
+        g_allowInternalSetCursorPos.store(false);
+    }
+
     inline BOOL WINAPI hkSetCursorPos(int X, int Y) {
         if (MapRenderState::g_isShuttingDown.load()) {
+            if (oSetCursorPos) return oSetCursorPos(X, Y);
+            return FALSE;
+        }
+        if (g_allowInternalSetCursorPos.load()) {
             if (oSetCursorPos) return oSetCursorPos(X, Y);
             return FALSE;
         }
@@ -2932,6 +2948,7 @@ namespace DX11Hook {
             static bool isPinned    = false;
             static char folderBuf[128] = "";
             static int  isCaveChoice = -1;
+            static int  targetDimChoice = 0;
             static bool initialized = false;
 
             Waypoint targetWp;
@@ -2955,6 +2972,7 @@ namespace DX11Hook {
                     rgb[2] = (int)(col[2] * 255.0f);
                     showOnMap = targetWp.enabled;
                     isPinned = targetWp.pinned;
+                    targetDimChoice = (targetWp.dimId >= 0 && targetWp.dimId < 3) ? targetWp.dimId : 0;
                     isCaveChoice = targetWp.isCave;
                     snprintf(folderBuf, sizeof(folderBuf), "%s", targetWp.folder.c_str());
                     initialized = true;
@@ -3021,8 +3039,31 @@ namespace DX11Hook {
                 ImGui::SameLine(180.0f * curScale);
                 ImGui::Checkbox(LanguageManager::GetText("WP_PIN"), &isPinned);
 
+                // 维度选择下拉框 (主世界 / 下界 / 末地)
+                const char* dimPreview = LanguageManager::GetText(
+                    targetDimChoice == 1 ? "WP_TAB_NETHER" :
+                    targetDimChoice == 2 ? "WP_TAB_END" : "WP_TAB_OVERWORLD");
+                ImGui::PushItemWidth(180.0f * curScale);
+                if (ImGui::BeginCombo("##EditWPDimCombo", dimPreview)) {
+                    if (ImGui::Selectable(LanguageManager::GetText("WP_TAB_OVERWORLD"), targetDimChoice == 0)) {
+                        targetDimChoice = 0;
+                    }
+                    if (ImGui::Selectable(LanguageManager::GetText("WP_TAB_NETHER"), targetDimChoice == 1)) {
+                        targetDimChoice = 1;
+                        isCaveChoice = -1;
+                    }
+                    if (ImGui::Selectable(LanguageManager::GetText("WP_TAB_END"), targetDimChoice == 2)) {
+                        targetDimChoice = 2;
+                        isCaveChoice = -1;
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                ImGui::Text("%s", LanguageManager::GetText("SEED_MAP_DIMENSION"));
+
                 // 主世界层级选择下拉框 (自动判定 / 地表地图 / 洞穴地图)
-                if (targetWp.dimId == 0) {
+                if (targetDimChoice == 0) {
                     const char* layerPreview = LanguageManager::GetText(
                         isCaveChoice == 0 ? "WP_LAYER_SURFACE" :
                         isCaveChoice == 1 ? "WP_LAYER_CAVE" : "WP_LAYER_AUTO");
@@ -3049,7 +3090,8 @@ namespace DX11Hook {
 
                 ImGui::Spacing();
                 if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(120.0f * curScale, 0))) {
-                    WaypointManager::UpdateWaypoint(wpId, nameBuf, pos[0], pos[1], pos[2], col[0], col[1], col[2], showOnMap, isPinned, folderBuf, (int8_t)isCaveChoice);
+                    int8_t finalCaveChoice = (targetDimChoice == 0) ? (int8_t)isCaveChoice : -1;
+                    WaypointManager::UpdateWaypoint(wpId, nameBuf, pos[0], pos[1], pos[2], col[0], col[1], col[2], showOnMap, isPinned, folderBuf, finalCaveChoice, targetDimChoice);
                     ImGui::CloseCurrentPopup();
                     initialized = false;
                     NativeIME::Close();
@@ -3429,10 +3471,17 @@ namespace DX11Hook {
 
         int oldViewDim = MapRenderState::GetEffectiveViewDimensionId();
         bool caveChanged = false;
-        if (targetDim == 0 && targetIsCave >= 0) {
-            bool wantCave = (targetIsCave == 1);
-            if (MapRenderState::bigMapOverworldCave != wantCave) {
-                MapRenderState::bigMapOverworldCave = wantCave;
+        if (targetDim == 0) {
+            if (targetIsCave >= 0) {
+                bool wantCave = (targetIsCave == 1);
+                if (MapRenderState::bigMapOverworldCave != wantCave) {
+                    MapRenderState::bigMapOverworldCave = wantCave;
+                    caveChanged = true;
+                }
+            }
+        } else {
+            if (MapRenderState::bigMapOverworldCave) {
+                MapRenderState::bigMapOverworldCave = false;
                 caveChanged = true;
             }
         }
@@ -5743,6 +5792,7 @@ namespace DX11Hook {
                 MapRenderState::addWaypointY = (int)std::floor(selectedEntity.y);
                 MapRenderState::addWaypointZ = (int)std::floor(selectedEntity.z);
                 MapRenderState::addWaypointDim = viewDim;
+                MapRenderState::addWaypointIsCave = (viewDim == 0) ? (isCave ? 1 : 0) : -1;
                 MapRenderState::triggerAddWaypoint = true;
                 MapRenderState::addWaypointFromBigMap = true;
                 MapRenderState::showWaypointUI = true;
@@ -6303,6 +6353,9 @@ namespace DX11Hook {
         return text.substr(0, lastValidBytePos) + ellipsis;
     }
 
+    inline bool s_wasWaypointUIActive = false;
+    inline int s_wpTab = -1; // 维度标签: -1=全部, 0=主世界, 1=下界, 2=末地
+
     // ==========================================
     // 路径点 ImGui 管理控制台 (添加搜索、排序、置顶、文件夹、手动排序、重命名与传送)
     // ==========================================
@@ -6315,6 +6368,8 @@ namespace DX11Hook {
         ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x / 2 - 420.0f * curScale, ImGui::GetIO().DisplaySize.y / 2 - 260.0f * curScale), ImGuiCond_FirstUseEver);
         
         // 记录管理器面板当前帧的开启状态
+        bool isFirstOpen = !s_wasWaypointUIActive;
+        s_wasWaypointUIActive = true;
         bool lastShowWPUI = MapRenderState::showWaypointUI;
         
         ImGuiWindowFlags winFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
@@ -6327,7 +6382,6 @@ namespace DX11Hook {
             // 记录新建窗口当前帧的开启状态
             bool lastShowAddPopup = showAddPopup;
             static char searchBuf[256] = "";
-            static int wpTab = -1; // 维度标签: -1=全部, 0=主世界, 1=下界, 2=末地
             
             // 顶栏第一排：搜索栏与新建按钮
             ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 190.0f * curScale);
@@ -6349,12 +6403,12 @@ namespace DX11Hook {
 
             // 顶栏第二排：维度标签筛选与排序选择
             {
-                if (!lastShowWPUI) {
+                if (isFirstOpen) {
                     if (MapRenderState::addWaypointDim >= 0 && MapRenderState::addWaypointDim < 3) {
-                        wpTab = MapRenderState::addWaypointDim;
-                        MapRenderState::addWaypointDim = -1;
+                        s_wpTab = MapRenderState::addWaypointDim;
                     } else {
-                        wpTab = MapRenderState::currentDimensionId; // 打开管理器时默认选中当前维度
+                        s_wpTab = (MapRenderState::currentDimensionId >= 0 && MapRenderState::currentDimensionId < 3)
+                                  ? MapRenderState::currentDimensionId : 0;
                     }
                 }
                 const char* tabLabels[4] = {
@@ -6366,11 +6420,11 @@ namespace DX11Hook {
                 int tabValues[4] = { -1, 0, 1, 2 };
                 for (int i = 0; i < 4; ++i) {
                     if (i > 0) ImGui::SameLine();
-                    bool active = (wpTab == tabValues[i]);
+                    bool active = (s_wpTab == tabValues[i]);
                     ImGui::PushStyleColor(ImGuiCol_Button, active ? ImVec4(0.25f, 0.55f, 0.9f, 1.0f) : ImVec4(0.25f, 0.32f, 0.38f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.45f, 0.52f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.20f, 0.28f, 0.34f, 1.0f));
-                    if (ImGui::Button(tabLabels[i], ImVec2(105.0f * curScale, 0))) wpTab = tabValues[i];
+                    if (ImGui::Button(tabLabels[i], ImVec2(105.0f * curScale, 0))) s_wpTab = tabValues[i];
                     ImGui::PopStyleColor(3);
                 }
 
@@ -6494,7 +6548,7 @@ namespace DX11Hook {
             {
                 std::lock_guard<std::mutex> lock(WaypointManager::g_wpMutex);
                 for (const auto& wp : WaypointManager::g_waypoints) {
-                    if (wpTab != -1 && wp.dimId != wpTab) continue; // 维度标签筛选
+                    if (s_wpTab != -1 && wp.dimId != s_wpTab) continue; // 维度标签筛选
                     if (!MapRenderState::waypointFolderFilter.empty()) {
                         if (MapRenderState::waypointFolderFilter == "__ROOT__") {
                             if (!wp.folder.empty()) continue; // 仅未分类
@@ -7052,6 +7106,9 @@ namespace DX11Hook {
 
             if (MapRenderState::triggerAddWaypoint) {
                 showAddPopup = true;
+                if (MapRenderState::addWaypointDim >= 0 && MapRenderState::addWaypointDim < 3) {
+                    s_wpTab = MapRenderState::addWaypointDim;
+                }
                 MapRenderState::triggerAddWaypoint = false;
             }
 
@@ -7075,12 +7132,30 @@ namespace DX11Hook {
                 static int  rgb[3] = {255, 76, 76};
                 static bool isPinned = false;
                 static int  isCaveChoice = -1;
+                static int  targetDimChoice = 0;
                 
                 if (ImGui::IsWindowAppearing()) {
                     nameBuf[0] = '\0'; 
                     isPinned = false;
-                    isCaveChoice = MapRenderState::addWaypointIsCave;
+
+                    if (MapRenderState::addWaypointDim >= 0 && MapRenderState::addWaypointDim < 3) {
+                        targetDimChoice = MapRenderState::addWaypointDim;
+                        s_wpTab = targetDimChoice;
+                        MapRenderState::addWaypointDim = -1;
+                    } else if (s_wpTab >= 0 && s_wpTab < 3) {
+                        targetDimChoice = s_wpTab;
+                    } else {
+                        targetDimChoice = (MapRenderState::currentDimensionId >= 0 && MapRenderState::currentDimensionId < 3)
+                                          ? MapRenderState::currentDimensionId : 0;
+                    }
+
+                    if (targetDimChoice == 0) {
+                        isCaveChoice = MapRenderState::addWaypointIsCave;
+                    } else {
+                        isCaveChoice = -1;
+                    }
                     MapRenderState::addWaypointIsCave = -1;
+
                     if (!MapRenderState::waypointFolderFilter.empty() && MapRenderState::waypointFolderFilter != "__ROOT__") {
                         snprintf(folderBuf, sizeof(folderBuf), "%s", MapRenderState::waypointFolderFilter.c_str());
                     } else {
@@ -7158,9 +7233,31 @@ namespace DX11Hook {
 
                 ImGui::Checkbox(LanguageManager::GetText("WP_PIN"), &isPinned);
 
+                // 维度选择下拉框 (主世界 / 下界 / 末地)
+                const char* dimPreview = LanguageManager::GetText(
+                    targetDimChoice == 1 ? "WP_TAB_NETHER" :
+                    targetDimChoice == 2 ? "WP_TAB_END" : "WP_TAB_OVERWORLD");
+                ImGui::PushItemWidth(180.0f * curScale);
+                if (ImGui::BeginCombo("##NewWPDimCombo", dimPreview)) {
+                    if (ImGui::Selectable(LanguageManager::GetText("WP_TAB_OVERWORLD"), targetDimChoice == 0)) {
+                        targetDimChoice = 0;
+                    }
+                    if (ImGui::Selectable(LanguageManager::GetText("WP_TAB_NETHER"), targetDimChoice == 1)) {
+                        targetDimChoice = 1;
+                        isCaveChoice = -1;
+                    }
+                    if (ImGui::Selectable(LanguageManager::GetText("WP_TAB_END"), targetDimChoice == 2)) {
+                        targetDimChoice = 2;
+                        isCaveChoice = -1;
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                ImGui::Text("%s", LanguageManager::GetText("SEED_MAP_DIMENSION"));
+
                 // 主世界层级选择下拉框 (自动判定 / 地表地图 / 洞穴地图)
-                int targetDim = (wpTab >= 0 && wpTab < 3) ? wpTab : MapRenderState::currentDimensionId;
-                if (targetDim == 0) {
+                if (targetDimChoice == 0) {
                     const char* layerPreview = LanguageManager::GetText(
                         isCaveChoice == 0 ? "WP_LAYER_SURFACE" :
                         isCaveChoice == 1 ? "WP_LAYER_CAVE" : "WP_LAYER_AUTO");
@@ -7187,7 +7284,11 @@ namespace DX11Hook {
                 
                 ImGui::Spacing();
                 if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(120.0f * curScale, 0))) {
-                    WaypointManager::AddWaypoint(nameBuf, pos[0], pos[1], pos[2], col[0], col[1], col[2], wpTab, isPinned, folderBuf, (int8_t)isCaveChoice);
+                    int8_t finalCaveChoice = (targetDimChoice == 0) ? (int8_t)isCaveChoice : -1;
+                    WaypointManager::AddWaypoint(nameBuf, pos[0], pos[1], pos[2], col[0], col[1], col[2], targetDimChoice, isPinned, folderBuf, finalCaveChoice);
+                    if (s_wpTab != -1 && s_wpTab != targetDimChoice) {
+                        s_wpTab = targetDimChoice;
+                    }
                     showAddPopup = false;
                     ImGui::CloseCurrentPopup();
                     NativeIME::Close();
@@ -7220,6 +7321,7 @@ namespace DX11Hook {
             // 状态跳变检测：点击右上角 [X] 关闭整个管理器面板时的联动销毁
             if (lastShowWPUI && !MapRenderState::showWaypointUI) {
                 NativeIME::Close();
+                s_wasWaypointUIActive = false;
             }
         }
         ImGui::End();
@@ -7265,6 +7367,7 @@ namespace DX11Hook {
         int locateX = 0;
         int locateZ = 0;
         int locateDim = 0;
+        int locateIsCave = -1;
         std::string removeId;
 
         ImGui::BeginChild("DeathPointList", ImVec2(0, 0), false);
@@ -7330,6 +7433,12 @@ namespace DX11Hook {
                 locateX = point.x;
                 locateZ = point.z;
                 locateDim = point.dimensionId;
+                locateIsCave = -1;
+                if (point.dimensionId == 0) {
+                    Waypoint dummy;
+                    dummy.x = point.x; dummy.y = point.y; dummy.z = point.z; dummy.dimId = 0; dummy.isCave = -1;
+                    locateIsCave = IsOverworldWaypointInCave(dummy) ? 1 : 0;
+                }
             }
             PopOreButtonStyle();
             if (ImGui::IsItemHovered()) {
@@ -7346,7 +7455,13 @@ namespace DX11Hook {
             if (ImGui::Button(btnLabel, ImVec2(btnWidthWp, 34.0f * curScale))) {
                 if (!isConverted) {
                     std::string wpName = std::string(LanguageManager::GetText("DEATH_POINT_WP_PREFIX")) + " " + FormatDeathTime(point.timestamp);
-                    std::string newWaypointId = WaypointManager::AddWaypoint(wpName, point.x, point.y, point.z, 0.95f, 0.25f, 0.25f, point.dimensionId);
+                    int8_t deathCave = -1;
+                    if (point.dimensionId == 0) {
+                        Waypoint dummy;
+                        dummy.x = point.x; dummy.y = point.y; dummy.z = point.z; dummy.dimId = 0; dummy.isCave = -1;
+                        deathCave = IsOverworldWaypointInCave(dummy) ? 1 : 0;
+                    }
+                    std::string newWaypointId = WaypointManager::AddWaypoint(wpName, point.x, point.y, point.z, 0.95f, 0.25f, 0.25f, point.dimensionId, false, "", deathCave);
                     WaypointManager::SaveWaypoints();
                     DeathPointManager::SetConverted(point.id, true, newWaypointId);
                 }
@@ -7383,7 +7498,7 @@ namespace DX11Hook {
         }
 
         if (triggerLocate) {
-            LocateBigMapOn(locateDim, (float)locateX + 0.5f, (float)locateZ + 0.5f, g_smoothPX, g_smoothPZ);
+            LocateBigMapOn(locateDim, (float)locateX + 0.5f, (float)locateZ + 0.5f, g_smoothPX, g_smoothPZ, locateIsCave);
             MapRenderState::showDeathPointUI = false;
         }
 
@@ -8342,16 +8457,64 @@ namespace DX11Hook {
             // 并解除任何残留的光标裁剪，让原生界面恢复正常鼠标操作。
             {
                 static bool s_wasUIActive = false;
+                static bool s_hasClippedCenter = false;
+                static RECT s_lastClipRect = { 0, 0, 0, 0 };
+
                 bool uiActiveNow = MapRenderState::IsUIActive();
-                if (!s_wasUIActive && uiActiveNow) {
-                    ClipCursor(NULL);
-                    if (!NativeIME::isTyping.load()) {
-                        SetCursor(NULL);
+                HWND hwnd = g_hWnd ? g_hWnd : FindWindowW(L"Minecraft", NULL);
+                if (!hwnd) hwnd = GetForegroundWindow();
+                bool isForeground = (hwnd && GetForegroundWindow() == hwnd);
+                bool nativeScreenOpen = g_clientInstance && !g_clientInstance->isInGameInputEnabled();
+
+                if (uiActiveNow) {
+                    // UI 激活期间：完全解除裁剪，允许光标自由移动
+                    if (!s_wasUIActive || s_hasClippedCenter) {
+                        ClipCursor(NULL);
+                        s_hasClippedCenter = false;
+                        if (!NativeIME::isTyping.load()) {
+                            SetCursor(NULL);
+                        }
                     }
-                } else if (s_wasUIActive && !uiActiveNow) {
-                    int cur = ShowCursor(TRUE);
-                    while (cur < 0) { cur = ShowCursor(TRUE); }
-                    ClipCursor(NULL);
+                } else {
+                    if (isForeground) {
+                        if (!nativeScreenOpen) {
+                            // 第一人称准心游玩画面：
+                            // 1. 隐藏 Windows 硬件光标，防止漂浮在游戏画面上
+                            CURSORINFO ci = { sizeof(CURSORINFO) };
+                            if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING)) {
+                                while (ShowCursor(FALSE) >= 0);
+                            }
+                            // 2. 窗口化/全屏下将光标锁定在客户区正中心，彻底防止移动视角时光标漂移到标题栏/最小化/最大化/关闭按钮与任务栏
+                            RECT rcClient;
+                            if (GetClientRect(hwnd, &rcClient) && (rcClient.right > rcClient.left) && (rcClient.bottom > rcClient.top)) {
+                                POINT ptCenter = { (rcClient.left + rcClient.right) / 2, (rcClient.top + rcClient.bottom) / 2 };
+                                ClientToScreen(hwnd, &ptCenter);
+                                RECT rcCenter = { ptCenter.x - 1, ptCenter.y - 1, ptCenter.x + 1, ptCenter.y + 1 };
+                                if (!s_hasClippedCenter || std::memcmp(&s_lastClipRect, &rcCenter, sizeof(RECT)) != 0) {
+                                    ClipCursor(&rcCenter);
+                                    s_lastClipRect = rcCenter;
+                                    s_hasClippedCenter = true;
+                                }
+                            }
+                        } else {
+                            // 原生界面（如背包、单机暂停菜单、原生设置、聊天栏）：
+                            // 必须解除裁剪并确保系统光标可见，让玩家自由操作原生 UI
+                            if (s_hasClippedCenter) {
+                                ClipCursor(NULL);
+                                s_hasClippedCenter = false;
+                            }
+                            CURSORINFO ci = { sizeof(CURSORINFO) };
+                            if (GetCursorInfo(&ci) && !(ci.flags & CURSOR_SHOWING)) {
+                                while (ShowCursor(TRUE) < 0);
+                            }
+                        }
+                    } else {
+                        // 窗口失焦（切屏、Alt+Tab）：解除任何裁剪限制
+                        if (s_hasClippedCenter) {
+                            ClipCursor(NULL);
+                            s_hasClippedCenter = false;
+                        }
+                    }
                 }
                 s_wasUIActive = uiActiveNow;
             }
@@ -8440,13 +8603,81 @@ namespace DX11Hook {
                 static bool s_wasBigMapActive = false;
                 if (MapRenderState::showBigMap) {
                     if (!s_wasBigMapActive) {
-                        MapRenderState::bigMapOverworldCave = (MapRenderState::currentDimensionId == 0 && MapRenderState::g_caveModeActive);
+                        if (MapRenderState::bigMapViewDimensionId < 0) {
+                            MapRenderState::bigMapOverworldCave = (MapRenderState::currentDimensionId == 0 && MapRenderState::g_caveModeActive);
+                        }
+
+                        // [光标静止保障] 切回大地图时，将光标精准恢复到关闭前所在的位置，避免由于移动视角导致光标移位
+                        HWND hwnd = g_hWnd ? g_hWnd : FindWindowW(L"Minecraft", NULL);
+                        if (!hwnd) hwnd = GetForegroundWindow();
+                        if (hwnd) {
+                            ClipCursor(NULL);
+                            RECT rcClient;
+                            GetClientRect(hwnd, &rcClient);
+                            POINT ptTopLeft = { rcClient.left, rcClient.top };
+                            POINT ptBottomRight = { rcClient.right, rcClient.bottom };
+                            ClientToScreen(hwnd, &ptTopLeft);
+                            ClientToScreen(hwnd, &ptBottomRight);
+
+                            int targetX = (ptTopLeft.x + ptBottomRight.x) / 2;
+                            int targetY = (ptTopLeft.y + ptBottomRight.y) / 2;
+
+                            if (MapRenderState::g_hasSavedBigMapCursor) {
+                                auto saved = MapRenderState::g_lastBigMapCursorPos;
+                                if (saved.x >= ptTopLeft.x && saved.x < ptBottomRight.x &&
+                                    saved.y >= ptTopLeft.y && saved.y < ptBottomRight.y) {
+                                    targetX = (int)saved.x;
+                                    targetY = (int)saved.y;
+                                }
+                            }
+
+                            SafeSetCursorPosInternal(targetX, targetY);
+                            if (ImGui::GetCurrentContext()) {
+                                POINT ptClient = { targetX, targetY };
+                                ScreenToClient(hwnd, &ptClient);
+                                ImGui::GetIO().MousePos = ImVec2((float)ptClient.x, (float)ptClient.y);
+                            }
+                        }
                     }
                     s_wasBigMapActive = true;
                     RenderImGuiBigMap();
+
+                    // 大地图渲染期间：每一帧实时记忆当前光标坐标
+                    if (ImGui::GetCurrentContext()) {
+                        ImVec2 mp = ImGui::GetIO().MousePos;
+                        HWND hwnd = g_hWnd ? g_hWnd : FindWindowW(L"Minecraft", NULL);
+                        if (!hwnd) hwnd = GetForegroundWindow();
+                        if (hwnd && mp.x >= 0 && mp.y >= 0 && mp.x <= ImGui::GetIO().DisplaySize.x && mp.y <= ImGui::GetIO().DisplaySize.y) {
+                            POINT pt = { (LONG)mp.x, (LONG)mp.y };
+                            ClientToScreen(hwnd, &pt);
+                            MapRenderState::g_lastBigMapCursorPos.x = pt.x;
+                            MapRenderState::g_lastBigMapCursorPos.y = pt.y;
+                            MapRenderState::g_hasSavedBigMapCursor = true;
+                        }
+                    }
                 } else {
                     if (s_wasBigMapActive) {
                         s_wasBigMapActive = false;
+                        // 大地图关闭瞬间：记录最后光标位置
+                        POINT curPt;
+                        if (GetCursorPos(&curPt)) {
+                            HWND hwnd = g_hWnd ? g_hWnd : FindWindowW(L"Minecraft", NULL);
+                            if (!hwnd) hwnd = GetForegroundWindow();
+                            if (hwnd) {
+                                RECT rcClient;
+                                GetClientRect(hwnd, &rcClient);
+                                POINT ptTopLeft = { rcClient.left, rcClient.top };
+                                POINT ptBottomRight = { rcClient.right, rcClient.bottom };
+                                ClientToScreen(hwnd, &ptTopLeft);
+                                ClientToScreen(hwnd, &ptBottomRight);
+                                if (curPt.x >= ptTopLeft.x && curPt.x < ptBottomRight.x &&
+                                    curPt.y >= ptTopLeft.y && curPt.y < ptBottomRight.y) {
+                                    MapRenderState::g_lastBigMapCursorPos.x = curPt.x;
+                                    MapRenderState::g_lastBigMapCursorPos.y = curPt.y;
+                                    MapRenderState::g_hasSavedBigMapCursor = true;
+                                }
+                            }
+                        }
                         // 大地图关闭：保存关闭前所在维度的视角中心与缩放
                         int closingDim = MapRenderState::GetEffectiveViewDimensionId();
                         MapRenderState::SaveDimCamera(closingDim, g_smoothPX, g_smoothPZ);
@@ -8495,6 +8726,8 @@ namespace DX11Hook {
 
                 if (MapRenderState::showWaypointUI) {
                     RenderImGuiWaypointUI();
+                } else {
+                    s_wasWaypointUIActive = false;
                 }
 
                 if (MapRenderState::showDeathPointUI) {
