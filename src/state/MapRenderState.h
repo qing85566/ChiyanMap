@@ -227,6 +227,7 @@ namespace MapRenderState {
     // [PNG导出] PNG 导出面板状态与配置 (全部持久化保存于 config.json)
     inline bool exportForceFullMap = false;     // 强制全图导出 (持久化，默认关)
     inline bool exportMultipleImages = false;   // 多张无缩放图像 (持久化，默认关)
+    inline bool exportNighttime = false;        // 夜间模式导出 (持久化，默认关)
     inline bool exportOpenFolder = true;        // 导出后自动打开所在文件夹 (持久化，默认开)
     inline int  exportScaleDownSquare = 20;     // 单张图像最大尺寸 (0=不限制, 1..90=NxN 区域，持久化，默认20)
     inline std::atomic<int> exportStage{0};     // 0=Idle, 1=Exporting, 2=Finished
@@ -473,25 +474,78 @@ namespace MapRenderState {
 
     // ==================== 洞穴地图系统 ====================
     // 洞穴模式类型
-    // 0=Off(关闭), 1=Layered(分层)
-    enum class CaveModeType : int { Off = 0, Layered = 1 };
+    // 0=Off(关闭), 1=Layered(分层), 2=Full(全深度)
+    enum class CaveModeType : int { Off = 0, Layered = 1, Full = 2 };
 
     // 洞穴模式设置 (持久化到 config)
-    inline int g_caveModeType = (int)CaveModeType::Layered;  // 默认 Layered
-    inline bool g_caveTopYAuto = true;                        // Cave Mode Top Y: auto=自动检测, false=手动指定
-    inline int g_caveTopY = 64;                               // Top Y: 手动模式下的洞穴顶层Y (默认 64=海平面, 有效范围 [-64,320])
-    inline int g_caveDepth = 30;                               // 洞穴扫描深度 (1-64, 默认 30)
-    inline bool g_legibleCaveMaps = false;                     // 清晰洞穴地图 (默认 false)
+    inline int g_caveModeType = (int)CaveModeType::Layered;         // 当前维度洞穴模式类型 (0=Off, 1=Layered, 2=Full)
+    inline int g_defaultCaveModeType = (int)CaveModeType::Layered;  // 各维度默认洞穴类型 (Default Cave Mode Type)
+    inline int g_dimCaveModeTypes[3] = { -1, -1, -1 };              // 各维度独立洞穴模式覆盖 (-1=跟随默认, 0=Off, 1=Layered, 2=Full)
+    inline bool g_caveTopYAuto = true;                              // Cave Mode Top Y: auto=自动检测, false=手动指定
+    inline int g_caveTopY = 64;                                     // Top Y: 手动模式下的洞穴顶层Y (默认 64=海平面, 有效范围 [-64,320])
+    inline int g_caveDepth = 30;                                    // 洞穴扫描深度 (1-64, 默认 30)
+    inline bool g_legibleCaveMaps = false;                          // 清晰洞穴地图 (默认 false)
+    inline int g_autoCaveMode = -1;                                 // 自动洞穴天花板检测尺寸 (-1=智能自适应, 0=关闭自动进入, 1=1x1, 2=3x3, 3=5x5, 4=7x7, 5=9x9)
+    inline int g_caveModeToggleTimer = 1000;                        // 防闪烁切换冷却计时器 (毫秒, 0~5000, 默认 1000ms)
+    inline bool g_caveAllowedOverworld = true;                      // 允许主世界启用洞穴模式 (默认 true)
+    inline bool g_caveAllowedNether = true;                         // 允许下界启用洞穴模式 (默认 true)
+    inline bool g_caveAllowedEnd = false;                           // 允许末地启用洞穴模式 (默认 false)
 
     // 洞穴模式运行时状态 (每帧计算)
     inline bool g_caveModeActive = false;       // 当前是否处于洞穴模式 (玩家在地下)
     inline int g_caveStartY = 0;                // 当前洞穴起始 Y (扫描顶部)
+    inline int g_lastCaveDimensionId = -999;    // 上次同步洞穴模式类型的维度 ID
+    inline bool g_caveHasPendingToggle = false; // 是否存在处于防闪烁计时中的状态切换请求
+    inline bool g_cavePendingTargetState = false;
+    inline std::chrono::steady_clock::time_point g_cavePendingSinceTime = std::chrono::steady_clock::now();
 
-    // ==================== 地形坡度与深度光影系统 ====================
+    // [辅助] 判断指定维度是否在洞穴模式白名单内
+    inline bool IsCaveModeAllowedInDimension(int dimId) noexcept {
+        if (dimId == 0) return g_caveAllowedOverworld;
+        if (dimId == 1) return g_caveAllowedNether;
+        if (dimId == 2) return g_caveAllowedEnd;
+        return false;
+    }
+
+    // [辅助] 获取指定维度的有效洞穴模式类型 (若未单独覆盖则返回 g_defaultCaveModeType)
+    inline int GetDimensionCaveModeType(int dimId) noexcept {
+        if (dimId >= 0 && dimId < 3 && g_dimCaveModeTypes[dimId] >= 0 && g_dimCaveModeTypes[dimId] <= 2) {
+            return g_dimCaveModeTypes[dimId];
+        }
+        return std::clamp(g_defaultCaveModeType, 0, 2);
+    }
+
+    // [辅助] 同步指定维度的洞穴模式类型到 g_caveModeType
+    inline void SyncCaveModeTypeForDimension(int dimId) noexcept {
+        g_caveModeType = GetDimensionCaveModeType(dimId);
+    }
+
+    // [辅助] 设置指定维度的洞穴模式类型并同步当前值
+    inline void SetDimensionCaveModeType(int dimId, int type) noexcept {
+        int clamped = std::clamp(type, 0, 2);
+        if (dimId >= 0 && dimId < 3) {
+            g_dimCaveModeTypes[dimId] = clamped;
+        }
+        g_caveModeType = clamped;
+    }
+
+
+    // ==================== 地形坡度、光影与色彩系统 ====================
     // 0=Default 2D, 1=Legacy, 2=Default 3D (浮雕立体阴影)
     inline int terrainSlopes = 2;
     inline bool terrainDepth = true;
     inline bool adjustHeightForShortBlocks = true;
+
+    // 0=Accurate (精确纹理色), 1=Vanilla (原版地图色)
+    inline int blockColorMode = 0;
+    inline bool biomeColorsInVanilla = true;   // 原版模式下群系染色
+    inline bool mapLighting = true;            // 地图光照渲染 (记录并动态应用方块光照与昼夜明暗)
+    inline bool displayStainedGlass = true;    // 显示染色玻璃与半透明覆盖层 (Overlay)
+    inline bool loadFlowers = true;            // 加载花朵 (渲染地表花朵色彩)
+    inline bool biomeBlending = true;          // 生物群系颜色平滑混合
+    inline bool openingAnimation = true;       // 打开全屏大地图平滑缩放过渡动画
+    inline std::chrono::steady_clock::time_point g_bigMapOpenTime = std::chrono::steady_clock::now();
+    inline std::atomic<bool> forceRescan{false}; // 渲染取色/过滤设置变更时触发立即重扫
 
     // ==================== 探索足迹与个性化 ====================
     inline bool showFootsteps = true;
@@ -543,7 +597,7 @@ namespace MapRenderState {
         return false;
     }
 
-    inline float ComputeTerrainShading(float currentY, float northY, float westY, float northWestY, int slopeMode, bool enableDepth, bool isCave) {
+    inline float ComputeTerrainShading(float currentY, float northY, float westY, float northWestY, int slopeMode, bool enableDepth, bool isCave, uint8_t packedLight = 0x00) {
         float shade = 1.0f;
 
         if (slopeMode == 1) { // Legacy
@@ -571,12 +625,93 @@ namespace MapRenderState {
             shade = 0.50f + directLight;
         }
 
+        // 强自发光方块 (如熔岩/萤石/蛙明灯，blockLight >= 14) 凹陷于地面时，消除 0.50x 深褐色陡坡暗影，保留明亮熔融质感
+        if ((packedLight & 0x0F) >= 14 && shade < 1.0f) {
+            shade = 0.90f + 0.10f * shade;
+        }
+
         if (enableDepth && !isCave) {
             float depthFactor = std::clamp(1.0f + (currentY - 64.0f) / 450.0f, 0.70f, 1.15f);
             shade *= depthFactor;
         }
 
         return std::clamp(shade, 0.45f, 1.40f);
+    }
+
+    // 计算当前维度的天空光亮度比例 (0.22 = 深夜, 1.0 = 白昼)
+    inline float ComputeSkyLightBrightness(int gameTimeTicks, int dimId, bool forceNighttime = false) noexcept {
+        if (forceNighttime) return 0.22f;
+        if (dimId == 1) return 0.0f;  // 下界无天空光
+        if (dimId == 2) return 1.0f;  // 末地恒定环境天光
+        if (gameTimeTicks < 0) return 1.0f;
+
+        int dayTick = gameTimeTicks % 24000;
+        if (dayTick < 0) dayTick += 24000;
+
+        // Minecraft 昼夜曲线:
+        // 0..11800: 白天全亮 (1.0)
+        // 11800..13800: 黄昏日落平滑过渡 (1.0 -> 0.22)
+        // 13800..22200: 夜晚月光 (0.22)
+        // 22200..24000: 黎明日出平滑过渡 (0.22 -> 1.0)
+        if (dayTick <= 11800) {
+            return 1.0f;
+        } else if (dayTick < 13800) {
+            float t = (float)(dayTick - 11800) / 2000.0f;
+            return 1.0f - t * (1.0f - 0.22f);
+        } else if (dayTick <= 22200) {
+            return 0.22f;
+        } else {
+            float t = (float)(dayTick - 22200) / 1800.0f;
+            return 0.22f + t * (1.0f - 0.22f);
+        }
+    }
+
+    // 获取量化后的当前光照阶梯值 (0..32)，供渲染线程检测昼夜渐变并刷新贴图
+    inline int GetCurrentLightStep(int dimId) noexcept {
+        if (!mapLighting) return -1;
+        float sb = ComputeSkyLightBrightness(g_gameTimeTicks.load(), dimId, false);
+        return (int)std::round(sb * 32.0f);
+    }
+
+    // 将方块光照与天空昼夜明暗动态应用到像素 RGB (0..255 浮点)
+    inline void ApplyMapLighting(float& r, float& g, float& b, uint8_t packedLight, bool isCave, int dimId, bool enableLighting, bool forceNighttime = false) noexcept {
+        if (!enableLighting && !forceNighttime) return;
+
+        int skyL   = (packedLight >> 4) & 0x0F;
+        int blockL = packedLight & 0x0F;
+
+        // 洞穴/下界若读取到旧缓存默认 0xF0，视为无天空光 + 基础环境光
+        if ((isCave || dimId == 1) && packedLight == 0xF0) {
+            skyL = 0;
+            blockL = 7;
+        }
+
+        float skyBright = ComputeSkyLightBrightness(g_gameTimeTicks.load(), dimId, forceNighttime);
+        float skyContrib = (skyL / 15.0f) * skyBright;
+        float blockContrib = (blockL / 15.0f);
+        float maxLight = std::max(skyContrib, blockContrib);
+
+        float ambient = 0.26f;
+        if (isCave || dimId == 1) {
+            ambient = 0.36f;
+        } else if (dimId == 2) {
+            ambient = 0.48f;
+        }
+        float lightMult = ambient + (1.0f - ambient) * maxLight;
+
+        // 火把/熔岩等方块光源主导时赋予微暖色调，夜间月光主导时赋予微冷夜色
+        float torchDom = std::max(0.0f, blockContrib - skyContrib);
+        float nightMoon = (!isCave && dimId == 0 && skyBright < 0.70f)
+            ? std::max(0.0f, (0.70f - skyBright) * (1.0f - blockContrib))
+            : 0.0f;
+
+        float rMult = lightMult * (1.0f + 0.08f * torchDom - 0.05f * nightMoon);
+        float gMult = lightMult * (1.0f + 0.02f * torchDom - 0.02f * nightMoon);
+        float bMult = lightMult * (1.0f - 0.08f * torchDom + 0.08f * nightMoon);
+
+        r *= rMult;
+        g *= gMult;
+        b *= bMult;
     }
 }
 
@@ -616,10 +751,12 @@ inline std::atomic<bool> g_mapDataUpdated{true};
 // 前台缓冲（仅供显卡渲染读取，绝不闪烁）
 extern mce::Color g_mapColors[MAP_DATA_SIZE][MAP_DATA_SIZE];
 extern float g_mapHeights[MAP_DATA_SIZE][MAP_DATA_SIZE];
+inline uint8_t g_mapLights[MAP_DATA_SIZE][MAP_DATA_SIZE];
 
 // 后台缓冲（供 CPU 高速扫描写入）
 inline mce::Color g_mapColorsBack[MAP_DATA_SIZE][MAP_DATA_SIZE];
 inline float g_mapHeightsBack[MAP_DATA_SIZE][MAP_DATA_SIZE];
+inline uint8_t g_mapLightsBack[MAP_DATA_SIZE][MAP_DATA_SIZE];
 
 // [洞穴地图] 洞穴模式前台缓冲 (渲染线程读取)
 extern mce::Color g_caveColors[MAP_DATA_SIZE][MAP_DATA_SIZE];

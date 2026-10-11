@@ -1,8 +1,10 @@
 #include "render/BlockColorMap.h"
+#include "state/MapRenderState.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
 #include <fstream>
+#include <algorithm>
 #include "mod/ChiyanMap.h"
 
 namespace BlockColorMap {
@@ -28,7 +30,14 @@ bool IsInvisibleOrTechnicalOverlay(std::string const& rawName) noexcept {
     std::string name = rawName;
     for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
 
-    if (name == "minecraft:air" || name == "air") return true;
+    if (name == "minecraft:air" || name == "air" ||
+        name == "minecraft:cave_air" || name == "cave_air" ||
+        name == "minecraft:void_air" || name == "void_air") return true;
+    // 普通无色玻璃与无色玻璃板始终透明穿透（与原版地图及 Xaero 行为一致，直视下方地形）
+    if (name == "minecraft:glass" || name == "glass" ||
+        name == "minecraft:glass_pane" || name == "glass_pane" ||
+        name == "minecraft:hard_glass" || name == "hard_glass" ||
+        name == "minecraft:hard_glass_pane" || name == "hard_glass_pane") return true;
     if (name.find("barrier") != std::string::npos) return true;
     if (name.find("light_block") != std::string::npos) return true;
     if (name.find("structure_void") != std::string::npos) return true;
@@ -74,7 +83,413 @@ std::string GetHorizontalWoodName(std::string const& name) {
     return result;
 }
 
+// [花朵方块判定] 用于 "Load Flowers" (加载花朵) 开关控制
+bool IsFlowerBlock(std::string const& rawName) noexcept {
+    if (rawName.empty()) return false;
+    std::string name = rawName;
+    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+
+    // 排除带花树叶与花盆
+    if (name.find("leaves") != std::string::npos || name.find("flower_pot") != std::string::npos) return false;
+
+    if (name.find("dandelion") != std::string::npos ||
+        name.find("poppy") != std::string::npos ||
+        name.find("blue_orchid") != std::string::npos ||
+        name.find("allium") != std::string::npos ||
+        name.find("azure_bluet") != std::string::npos ||
+        name.find("tulip") != std::string::npos ||
+        name.find("oxeye_daisy") != std::string::npos ||
+        name.find("cornflower") != std::string::npos ||
+        name.find("lily_of_the_valley") != std::string::npos ||
+        name.find("wither_rose") != std::string::npos ||
+        name.find("torchflower") != std::string::npos ||
+        name.find("pitcher_plant") != std::string::npos ||
+        name.find("pitcher_crop") != std::string::npos ||
+        name.find("sunflower") != std::string::npos ||
+        name.find("lilac") != std::string::npos ||
+        name.find("rose_bush") != std::string::npos ||
+        name.find("peony") != std::string::npos ||
+        name.find("pink_petals") != std::string::npos ||
+        name.find("wildflowers") != std::string::npos ||
+        name.find("cactus_flower") != std::string::npos ||
+        name.find("eyeblossom") != std::string::npos ||
+        name.find("spore_blossom") != std::string::npos ||
+        name.find("red_flower") != std::string::npos ||
+        name.find("yellow_flower") != std::string::npos ||
+        name.find("chorus_flower") != std::string::npos ||
+        name.find("flowering_azalea") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
+// [玻璃与染色玻璃判定] 用于 "Display Stained Glass" 开关控制
+bool IsGlassOrStainedGlassBlock(std::string const& rawName) noexcept {
+    if (rawName.empty()) return false;
+    std::string name = rawName;
+    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+    return name.find("glass") != std::string::npos;
+}
+
+// [多层半透明方块 Overlay 取色] 支持染色玻璃、遮光玻璃、普通玻璃、半透明冰、黏液块、蜂蜜块、传送门逐层混合
+bool GetTranslucentOverlayColor(std::string const& rawName, mce::Color& outColor, float& outAlpha) noexcept {
+    if (rawName.empty()) return false;
+    std::string name = rawName;
+    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+
+    // 1. 玻璃系列 (染色玻璃 / 遮光玻璃 / 普通透明玻璃)
+    if (name.find("glass") != std::string::npos) {
+        bool isPane = (name.find("pane") != std::string::npos);
+        if (name.find("tinted_glass") != std::string::npos) {
+            outColor = mce::Color(0.18f, 0.14f, 0.20f, 1.0f);
+            outAlpha = 0.36f;
+            return true;
+        }
+        if (name.find("stained") != std::string::npos ||
+            name.find("white_glass") != std::string::npos ||
+            name.find("orange_glass") != std::string::npos ||
+            name.find("magenta_glass") != std::string::npos ||
+            name.find("light_blue_glass") != std::string::npos ||
+            name.find("yellow_glass") != std::string::npos ||
+            name.find("lime_glass") != std::string::npos ||
+            name.find("pink_glass") != std::string::npos ||
+            name.find("gray_glass") != std::string::npos ||
+            name.find("silver_glass") != std::string::npos ||
+            name.find("cyan_glass") != std::string::npos ||
+            name.find("purple_glass") != std::string::npos ||
+            name.find("blue_glass") != std::string::npos ||
+            name.find("brown_glass") != std::string::npos ||
+            name.find("green_glass") != std::string::npos ||
+            name.find("red_glass") != std::string::npos ||
+            name.find("black_glass") != std::string::npos) {
+            // 对齐原版染色玻璃贴图内部透明度 (~25%-28%)，确保底层地形与方块纹理清晰透出
+            outAlpha = isPane ? 0.18f : 0.28f;
+            if (name.find("white") != std::string::npos)           outColor = mce::Color(0.98f, 0.98f, 0.98f, 1.0f);
+            else if (name.find("orange") != std::string::npos)     outColor = mce::Color(0.95f, 0.56f, 0.22f, 1.0f);
+            else if (name.find("magenta") != std::string::npos)    outColor = mce::Color(0.82f, 0.36f, 0.92f, 1.0f);
+            else if (name.find("light_blue") != std::string::npos) outColor = mce::Color(0.45f, 0.70f, 0.95f, 1.0f);
+            else if (name.find("yellow") != std::string::npos)     outColor = mce::Color(0.96f, 0.92f, 0.24f, 1.0f);
+            else if (name.find("lime") != std::string::npos)       outColor = mce::Color(0.55f, 0.90f, 0.18f, 1.0f);
+            else if (name.find("pink") != std::string::npos)       outColor = mce::Color(0.98f, 0.58f, 0.74f, 1.0f);
+            else if (name.find("light_gray") != std::string::npos || name.find("silver") != std::string::npos) outColor = mce::Color(0.68f, 0.68f, 0.68f, 1.0f);
+            else if (name.find("gray") != std::string::npos)       outColor = mce::Color(0.38f, 0.38f, 0.38f, 1.0f);
+            else if (name.find("cyan") != std::string::npos)       outColor = mce::Color(0.30f, 0.66f, 0.78f, 1.0f);
+            else if (name.find("purple") != std::string::npos)     outColor = mce::Color(0.64f, 0.32f, 0.88f, 1.0f);
+            else if (name.find("blue") != std::string::npos)       outColor = mce::Color(0.26f, 0.44f, 0.94f, 1.0f);
+            else if (name.find("brown") != std::string::npos)      outColor = mce::Color(0.52f, 0.38f, 0.25f, 1.0f);
+            else if (name.find("green") != std::string::npos)      outColor = mce::Color(0.42f, 0.64f, 0.22f, 1.0f);
+            else if (name.find("red") != std::string::npos)        outColor = mce::Color(0.88f, 0.25f, 0.25f, 1.0f);
+            else if (name.find("black") != std::string::npos)      outColor = mce::Color(0.14f, 0.14f, 0.14f, 1.0f);
+            else outColor = mce::Color(0.86f, 0.94f, 0.98f, 1.0f);
+            return true;
+        }
+        // 普通无色玻璃 / 玻璃板：微微泛青白的透明光泽，透出下方真实地面
+        outColor = mce::Color(0.86f, 0.94f, 0.98f, 1.0f);
+        outAlpha = isPane ? 0.08f : 0.12f;
+        return true;
+    }
+
+    // 2. 半透明冰与霜冰 (排除不透明的浮冰 packed_ice 和蓝冰 blue_ice)
+    if ((name.find("ice") != std::string::npos || name.find("frosted") != std::string::npos) &&
+        name.find("packed_ice") == std::string::npos &&
+        name.find("blue_ice") == std::string::npos) {
+        outColor = (MapRenderState::blockColorMode == 1)
+            ? mce::Color(0.627f, 0.627f, 1.000f, 1.0f)
+            : mce::Color(0.55f, 0.72f, 0.98f, 1.0f);
+        outAlpha = 0.40f;
+        return true;
+    }
+
+    // 3. 黏液块与蜂蜜块
+    if (name == "minecraft:slime" || name == "slime" || name.find("slime_block") != std::string::npos) {
+        outColor = mce::Color(0.49f, 0.78f, 0.35f, 1.0f);
+        outAlpha = 0.40f;
+        return true;
+    }
+    if (name.find("honey_block") != std::string::npos) {
+        outColor = mce::Color(0.95f, 0.68f, 0.18f, 1.0f);
+        outAlpha = 0.42f;
+        return true;
+    }
+
+    // 4. 下界传送门方块
+    if (name == "minecraft:portal" || name == "portal" || name.find("nether_portal") != std::string::npos) {
+        outColor = mce::Color(0.55f, 0.15f, 0.85f, 1.0f);
+        outAlpha = 0.45f;
+        return true;
+    }
+
+    return false;
+}
+
+// [自发光方块内置亮度表] 供地图光照系统采样时保底自发光方块的光源亮度 (0..15)
+uint8_t GetIntrinsicBlockLight(std::string const& rawName) noexcept {
+    if (rawName.empty()) return 0;
+    std::string name = rawName;
+    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+
+    if (name.find("lava") != std::string::npos ||
+        name.find("glowstone") != std::string::npos ||
+        name.find("sea_lantern") != std::string::npos ||
+        name.find("sealantern") != std::string::npos ||
+        name.find("shroomlight") != std::string::npos ||
+        name.find("froglight") != std::string::npos ||
+        name.find("beacon") != std::string::npos ||
+        name.find("conduit") != std::string::npos ||
+        name.find("jack_o_lantern") != std::string::npos ||
+        name.find("lit_pumpkin") != std::string::npos ||
+        name.find("lit_redstone_lamp") != std::string::npos ||
+        name.find("end_portal") != std::string::npos ||
+        name.find("end_gateway") != std::string::npos) {
+        if (name.find("end_portal_frame") != std::string::npos) return 1;
+        return 15;
+    }
+    if (name.find("fire") != std::string::npos && name.find("firefly") == std::string::npos) {
+        if (name.find("soul") != std::string::npos) return 10;
+        return 15;
+    }
+    if (name.find("lantern") != std::string::npos) {
+        if (name.find("soul") != std::string::npos) return 10;
+        return 15;
+    }
+    if (name.find("torch") != std::string::npos) {
+        if (name.find("redstone") != std::string::npos) {
+            return (name.find("unlit") != std::string::npos) ? 0 : 7;
+        }
+        if (name.find("soul") != std::string::npos) return 10;
+        return 14;
+    }
+    if (name.find("end_rod") != std::string::npos || name.find("glow_berries") != std::string::npos || name.find("cave_vines_with_berries") != std::string::npos) {
+        return 14;
+    }
+    if (name.find("portal") != std::string::npos) return 11;
+    if (name.find("crying_obsidian") != std::string::npos || name.find("respawn_anchor") != std::string::npos) return 10;
+    if (name.find("glow_lichen") != std::string::npos || name.find("enchanting_table") != std::string::npos || name.find("ender_chest") != std::string::npos) return 7;
+    if (name.find("sculk_catalyst") != std::string::npos || name.find("sea_pickle") != std::string::npos) return 6;
+    if (name.find("amethyst_cluster") != std::string::npos) return 5;
+    if (name.find("magma") != std::string::npos) return 3;
+    return 0;
+}
+
+// =========================================================================
+// [原版地图调色板引擎 (Vanilla Map Color Mode)]
+// 严格遵循 Minecraft 原版 MapColor 标准 64 色系调色板，并支持可选群系染色
+// =========================================================================
+mce::Color GetVanillaBlockColor(std::string const& rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol, bool useBiomeColors) {
+    std::string name = rawName;
+    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+
+    if (IsInvisibleOrTechnicalOverlay(name)) {
+        return mce::Color(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    auto rgb = [](int r, int g, int b) noexcept -> mce::Color {
+        return mce::Color(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+    };
+
+    // 1. 水与熔岩
+    if (name.find("water") != std::string::npos || name.find("bubble_column") != std::string::npos ||
+        name.find("seagrass") != std::string::npos || name.find("kelp") != std::string::npos) {
+        return useBiomeColors ? waterCol : rgb(64, 64, 255); // MapColor.WATER (#4040FF)
+    }
+    if (name.find("lava") != std::string::npos || name.find("fire") != std::string::npos || name.find("tnt") != std::string::npos) {
+        return rgb(255, 0, 0); // MapColor.FIRE (#FF0000)
+    }
+
+    // 2. 冰雪
+    if (name.find("snow") != std::string::npos) return rgb(255, 255, 255); // MapColor.SNOW (#FFFFFF)
+    if (name.find("ice") != std::string::npos)  return rgb(160, 160, 255); // MapColor.ICE (#A0A0FF)
+
+    // 3. 草方块与草本植物 (支持 Biome Colors in Vanilla Mode 开关)
+    if (name.find("mycelium") != std::string::npos) return rgb(111, 76, 178); // MapColor.COLOR_PURPLE (#7F3FB2)
+    if (name.find("podzol") != std::string::npos)   return rgb(129, 86, 49);  // MapColor.PODZOL (#815631)
+    if (name.find("grass_path") != std::string::npos || name.find("dirt_path") != std::string::npos) return rgb(151, 109, 77); // MapColor.DIRT (#976D4D)
+    if (name.find("dry_grass") != std::string::npos || name.find("deadbush") != std::string::npos || name.find("dead_bush") != std::string::npos) return rgb(143, 119, 72); // MapColor.WOOD
+    if (name.find("grass_block") != std::string::npos || name == "minecraft:grass" || name == "grass" ||
+        name.find("short_grass") != std::string::npos || name.find("tall_grass") != std::string::npos ||
+        name.find("fern") != std::string::npos || name.find("slime") != std::string::npos) {
+        return useBiomeColors ? grassCol : rgb(127, 178, 56); // MapColor.GRASS (#7FB238)
+    }
+
+    // 4. 树叶、藤蔓与植物 (MapColor.PLANT #007C00)
+    if (name.find("cherry_leaves") != std::string::npos || name.find("pink_petals") != std::string::npos) {
+        return rgb(242, 127, 165); // MapColor.COLOR_PINK (#F27FA5)
+    }
+    if (name.find("pale_oak_leaves") != std::string::npos || name.find("pale_moss") != std::string::npos) {
+        return rgb(153, 153, 153); // MapColor.COLOR_LIGHT_GRAY
+    }
+    if (name.find("leaves") != std::string::npos || name.find("leaf") != std::string::npos ||
+        name.find("vine") != std::string::npos || name.find("lily_pad") != std::string::npos || name.find("waterlily") != std::string::npos ||
+        name.find("sugar_cane") != std::string::npos || name.find("reeds") != std::string::npos ||
+        name.find("bamboo") != std::string::npos || name.find("cactus") != std::string::npos ||
+        name.find("azalea") != std::string::npos || name.find("dripleaf") != std::string::npos ||
+        name.find("sapling") != std::string::npos || IsFlowerBlock(name)) {
+        if (useBiomeColors && (name.find("leaves") != std::string::npos || name.find("vine") != std::string::npos)) {
+            if (name.find("spruce") != std::string::npos) return rgb(97, 153, 97);
+            if (name.find("birch") != std::string::npos)  return rgb(128, 167, 85);
+            return foliageCol;
+        }
+        return rgb(0, 124, 0); // MapColor.PLANT (#007C00)
+    }
+    if (name.find("moss") != std::string::npos) return rgb(102, 127, 51); // MapColor.COLOR_GREEN
+
+    // 5. 16 色陶瓦 (MapColor.TERRACOTTA_*)
+    if (name.find("terracotta") != std::string::npos || name.find("hardened_clay") != std::string::npos) {
+        if (name.find("white") != std::string::npos)      return rgb(209, 177, 161);
+        if (name.find("orange") != std::string::npos)     return rgb(159, 82, 36);
+        if (name.find("magenta") != std::string::npos)    return rgb(149, 87, 108);
+        if (name.find("light_blue") != std::string::npos) return rgb(112, 108, 138);
+        if (name.find("yellow") != std::string::npos)     return rgb(186, 133, 36);
+        if (name.find("lime") != std::string::npos)       return rgb(103, 117, 53);
+        if (name.find("pink") != std::string::npos)       return rgb(160, 77, 78);
+        if (name.find("light_gray") != std::string::npos || name.find("silver") != std::string::npos) return rgb(135, 107, 98);
+        if (name.find("gray") != std::string::npos)       return rgb(57, 41, 35);
+        if (name.find("cyan") != std::string::npos)       return rgb(87, 92, 92);
+        if (name.find("purple") != std::string::npos)     return rgb(122, 73, 88);
+        if (name.find("blue") != std::string::npos)       return rgb(76, 62, 92);
+        if (name.find("brown") != std::string::npos)      return rgb(76, 50, 35);
+        if (name.find("green") != std::string::npos)      return rgb(76, 82, 42);
+        if (name.find("red") != std::string::npos)        return rgb(142, 60, 46);
+        if (name.find("black") != std::string::npos)      return rgb(37, 22, 16);
+        return rgb(159, 82, 36); // 默认陶瓦色
+    }
+
+    // 6. 16 色羊毛 / 混凝土 / 地毯 / 染色玻璃 / 潜影盒 / 床 / 旗帜 / 珊瑚
+    if (name.find("wool") != std::string::npos || name.find("concrete") != std::string::npos ||
+        name.find("carpet") != std::string::npos || name.find("stained_glass") != std::string::npos ||
+        name.find("shulker_box") != std::string::npos || name.find("bed") != std::string::npos ||
+        name.find("banner") != std::string::npos || name.find("candle") != std::string::npos) {
+        if (name.find("bedrock") == std::string::npos) {
+            if (name.find("white") != std::string::npos)      return rgb(255, 255, 255);
+            if (name.find("orange") != std::string::npos)     return rgb(216, 127, 51);
+            if (name.find("magenta") != std::string::npos)    return rgb(178, 76, 216);
+            if (name.find("light_blue") != std::string::npos) return rgb(102, 153, 216);
+            if (name.find("yellow") != std::string::npos)     return rgb(229, 229, 51);
+            if (name.find("lime") != std::string::npos)       return rgb(127, 204, 25);
+            if (name.find("pink") != std::string::npos)       return rgb(242, 127, 165);
+            if (name.find("light_gray") != std::string::npos || name.find("silver") != std::string::npos) return rgb(153, 153, 153);
+            if (name.find("gray") != std::string::npos)       return rgb(76, 76, 76);
+            if (name.find("cyan") != std::string::npos)       return rgb(76, 127, 153);
+            if (name.find("purple") != std::string::npos)     return rgb(127, 63, 178);
+            if (name.find("blue") != std::string::npos)       return rgb(51, 76, 178);
+            if (name.find("brown") != std::string::npos)      return rgb(102, 76, 51);
+            if (name.find("green") != std::string::npos)      return rgb(102, 127, 51);
+            if (name.find("red") != std::string::npos)        return rgb(153, 51, 51);
+            if (name.find("black") != std::string::npos)      return rgb(25, 25, 25);
+            return rgb(199, 199, 199); // MapColor.WOOL (#C7C7C7)
+        }
+    }
+
+    // 7. 珊瑚块
+    if (name.find("coral") != std::string::npos && name.find("dead") == std::string::npos) {
+        if (name.find("tube") != std::string::npos)   return rgb(51, 76, 178);
+        if (name.find("brain") != std::string::npos)  return rgb(242, 127, 165);
+        if (name.find("bubble") != std::string::npos) return rgb(178, 76, 216);
+        if (name.find("fire") != std::string::npos)   return rgb(153, 51, 51);
+        if (name.find("horn") != std::string::npos)   return rgb(229, 229, 51);
+    }
+
+    // 8. 下界方块
+    if (name.find("crimson_nylium") != std::string::npos)  return rgb(189, 48, 49);
+    if (name.find("crimson_hyphae") != std::string::npos)  return rgb(92, 25, 29);
+    if (name.find("crimson") != std::string::npos)         return rgb(148, 63, 97);
+    if (name.find("warped_nylium") != std::string::npos)   return rgb(22, 126, 134);
+    if (name.find("warped_hyphae") != std::string::npos)   return rgb(86, 44, 62);
+    if (name.find("warped_wart") != std::string::npos)     return rgb(20, 180, 133);
+    if (name.find("warped") != std::string::npos)          return rgb(58, 142, 140);
+    if (name.find("netherrack") != std::string::npos || name.find("nether_brick") != std::string::npos ||
+        name.find("nether_wart") != std::string::npos || name.find("magma") != std::string::npos) {
+        return rgb(112, 2, 0); // MapColor.NETHER (#700200)
+    }
+    if (name.find("soul_sand") != std::string::npos || name.find("soul_soil") != std::string::npos) {
+        return rgb(102, 76, 51); // MapColor.COLOR_BROWN
+    }
+    if (name.find("blackstone") != std::string::npos || name.find("basalt") != std::string::npos ||
+        name.find("obsidian") != std::string::npos || name.find("coal_block") != std::string::npos ||
+        name.find("sculk") != std::string::npos) {
+        return rgb(25, 25, 25); // MapColor.COLOR_BLACK
+    }
+    if (name.find("quartz") != std::string::npos || name.find("sea_lantern") != std::string::npos || name.find("diorite") != std::string::npos || name.find("calcite") != std::string::npos) {
+        return rgb(255, 252, 245); // MapColor.QUARTZ (#FFFCF5)
+    }
+
+    // 9. 木材与原木 (按树种对应原版地图色)
+    if (name.find("birch") != std::string::npos || name.find("sand") != std::string::npos ||
+        name.find("end_stone") != std::string::npos || name.find("end_brick") != std::string::npos ||
+        name.find("glowstone") != std::string::npos || name.find("bone_block") != std::string::npos) {
+        if (name.find("red_sand") != std::string::npos) return rgb(216, 127, 51); // MapColor.COLOR_ORANGE
+        return rgb(247, 233, 163); // MapColor.SAND (#F7E9A3)
+    }
+    if (name.find("spruce") != std::string::npos)   return rgb(129, 86, 49);  // MapColor.PODZOL
+    if (name.find("jungle") != std::string::npos || name.find("granite") != std::string::npos ||
+        name.find("dirt") != std::string::npos || name.find("farmland") != std::string::npos ||
+        name.find("mud_brick") != std::string::npos || name.find("packed_mud") != std::string::npos ||
+        name.find("dripstone") != std::string::npos) {
+        return rgb(151, 109, 77); // MapColor.DIRT (#976D4D)
+    }
+    if (name.find("acacia") != std::string::npos || name.find("copper") != std::string::npos ||
+        name.find("pumpkin") != std::string::npos || name.find("honey") != std::string::npos ||
+        name.find("shroomlight") != std::string::npos) {
+        if (name.find("oxidized") != std::string::npos) return rgb(22, 126, 134);
+        if (name.find("weathered") != std::string::npos) return rgb(58, 142, 140);
+        if (name.find("exposed") != std::string::npos) return rgb(135, 107, 98);
+        return rgb(216, 127, 51); // MapColor.COLOR_ORANGE
+    }
+    if (name.find("dark_oak") != std::string::npos || name.find("mud") != std::string::npos) {
+        return rgb(102, 76, 51); // MapColor.COLOR_BROWN
+    }
+    if (name.find("mangrove") != std::string::npos || name.find("brick") != std::string::npos) {
+        if (name.find("stone_brick") != std::string::npos || name.find("deepslate") != std::string::npos || name.find("tuff") != std::string::npos) {
+            return rgb(112, 112, 112);
+        }
+        return rgb(153, 51, 51); // MapColor.COLOR_RED
+    }
+    if (name.find("cherry") != std::string::npos) return rgb(209, 177, 161); // MapColor.TERRACOTTA_WHITE
+    if (name.find("pale_oak") != std::string::npos) return rgb(199, 199, 199);
+    if (name.find("oak") != std::string::npos || name.find("planks") != std::string::npos ||
+        name.find("log") != std::string::npos || name.find("wood") != std::string::npos ||
+        name.find("fence") != std::string::npos || name.find("chest") != std::string::npos ||
+        name.find("barrel") != std::string::npos || name.find("crafting_table") != std::string::npos ||
+        name.find("bookshelf") != std::string::npos) {
+        return rgb(143, 119, 72); // MapColor.WOOD (#8F7748)
+    }
+
+    // 10. 矿物块与宝石块
+    if (name.find("gold_block") != std::string::npos || name.find("raw_gold_block") != std::string::npos ||
+        name.find("hay") != std::string::npos || name.find("sponge") != std::string::npos || name.find("bell") != std::string::npos) {
+        return rgb(250, 238, 77); // MapColor.GOLD (#FAEE4D)
+    }
+    if (name.find("diamond_block") != std::string::npos || name.find("prismarine_brick") != std::string::npos ||
+        name.find("dark_prismarine") != std::string::npos || name.find("beacon") != std::string::npos) {
+        return rgb(92, 219, 213); // MapColor.DIAMOND (#5CDBD5)
+    }
+    if (name.find("prismarine") != std::string::npos) return rgb(76, 127, 153); // MapColor.COLOR_CYAN
+    if (name.find("lapis_block") != std::string::npos) return rgb(74, 128, 255); // MapColor.LAPIS (#4A80FF)
+    if (name.find("emerald_block") != std::string::npos) return rgb(0, 217, 58); // MapColor.EMERALD (#00D93A)
+    if (name.find("iron_block") != std::string::npos || name.find("iron_bars") != std::string::npos ||
+        name.find("iron_door") != std::string::npos || name.find("iron_trapdoor") != std::string::npos ||
+        name.find("anvil") != std::string::npos || name.find("lantern") != std::string::npos ||
+        name.find("chain") != std::string::npos || name.find("cauldron") != std::string::npos ||
+        name.find("hopper") != std::string::npos) {
+        return rgb(167, 167, 167); // MapColor.METAL (#A7A7A7)
+    }
+    if (name.find("raw_iron_block") != std::string::npos) return rgb(216, 175, 147); // MapColor.RAW_IRON
+    if (name.find("amethyst") != std::string::npos || name.find("purpur") != std::string::npos) return rgb(127, 63, 178); // MapColor.COLOR_PURPLE
+
+    // 11. 黏土、深板岩与岩石
+    if (name.find("clay") != std::string::npos) return rgb(164, 168, 184); // MapColor.CLAY (#A4A8B8)
+    if (name.find("deepslate") != std::string::npos) return rgb(100, 100, 100); // MapColor.DEEPSLATE (#646464)
+    if (name.find("tuff") != std::string::npos) return rgb(57, 41, 35); // MapColor.TERRACOTTA_GRAY
+
+    // 默认原版岩石灰 MapColor.STONE (#707070)
+    return rgb(112, 112, 112);
+}
+
 mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol) {
+    if (MapRenderState::blockColorMode == 1) {
+        return GetVanillaBlockColor(rawName, grassCol, foliageCol, waterCol, MapRenderState::biomeColorsInVanilla);
+    }
+
     // 统一转为全小写，杜绝基岩版 camelCase 命名（如 invisibleBedrock, seaLantern, tripWire, concretePowder）匹配问题
     std::string name = rawName;
     for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
@@ -1689,7 +2104,7 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
     if (name.find("netherrack") != std::string::npos) return mce::Color(0.45f, 0.12f, 0.12f, 1.0f);
     if (name.find("nether_wart") != std::string::npos) return mce::Color(0.60f, 0.14f, 0.14f, 1.0f);
     if (name.find("magma") != std::string::npos) return mce::Color(0.60f, 0.20f, 0.08f, 1.0f);
-    if (name.find("lava") != std::string::npos) return mce::Color(0.95f, 0.30f, 0.0f, 1.0f);
+    if (name.find("lava") != std::string::npos) return mce::Color(0.855f, 0.412f, 0.090f, 1.0f);
     // [红色下界砖] 必须在 nether_brick 之前
     if (name.find("red_nether_brick") != std::string::npos) return mce::Color(0.38f, 0.08f, 0.10f, 1.0f);
     if (name.find("nether_brick") != std::string::npos) return mce::Color(0.25f, 0.10f, 0.15f, 1.0f);

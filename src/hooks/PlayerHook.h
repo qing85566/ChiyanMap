@@ -25,6 +25,7 @@
 #include <mc/world/level/block/Block.h>
 #include <mc/world/level/block/BlockType.h>
 #include <mc/world/level/biome/Biome.h>
+#include <mc/world/level/levelgen/synth/PerlinSimplexNoise.h>
 #include <mc/world/level/material/Material.h>
 #if __has_include(<mc/world/level/material/MaterialType.h>)
 #include <mc/world/level/material/MaterialType.h>
@@ -273,6 +274,7 @@ inline std::thread* g_cacheWriteThread = nullptr;
 // 预分配缓冲 (仅 worker 线程访问，无需加锁)
 inline mce::Color (*g_cacheWriteColors)[MAP_DATA_SIZE] = nullptr;
 inline float (*g_cacheWriteHeights)[MAP_DATA_SIZE] = nullptr;
+inline uint8_t (*g_cacheWriteLights)[MAP_DATA_SIZE] = nullptr;
 // 请求参数 (由扫描线程写入，worker 线程读取，通过 g_cacheWritePending 标志同步)
 inline int g_cacheWriteX = 0;
 inline int g_cacheWriteZ = 0;
@@ -331,7 +333,7 @@ inline void CacheWriteWorkerFunc() {
         // [修复] 包裹 try-catch 防止 UpdateFromScan/UpdateBiomesFromScan 抛异常
         // 导致 std::terminate → 0xC0000409 FAST_FAIL_FATAL_APP_EXIT
         try {
-            MapCacheManager::UpdateFromScan(g_cacheWriteDim, g_cacheWriteX, g_cacheWriteZ, g_cacheWriteColors, g_cacheWriteHeights, g_cacheWriteIsCave);
+            MapCacheManager::UpdateFromScan(g_cacheWriteDim, g_cacheWriteX, g_cacheWriteZ, g_cacheWriteColors, g_cacheWriteHeights, g_cacheWriteIsCave, g_cacheWriteLights);
             MapCacheManager::UpdateBiomesFromScan(g_cacheWriteDim, g_cacheWriteBiomes);
         } catch (...) {
             // 异常时仍需复位状态，避免 pending 永远卡住
@@ -351,6 +353,7 @@ inline void SubmitCacheWrite(int x, int z, int dim, bool isCave, std::vector<Map
     if (!g_cacheWriteThread) {
         g_cacheWriteColors = new mce::Color[MAP_DATA_SIZE][MAP_DATA_SIZE];
         g_cacheWriteHeights = new float[MAP_DATA_SIZE][MAP_DATA_SIZE];
+        g_cacheWriteLights = new uint8_t[MAP_DATA_SIZE][MAP_DATA_SIZE];
         g_cacheWriteThread = new std::thread(CacheWriteWorkerFunc);
     }
 
@@ -358,6 +361,7 @@ inline void SubmitCacheWrite(int x, int z, int dim, bool isCave, std::vector<Map
         std::lock_guard<std::mutex> lock(g_mapDataMutex);
         std::memcpy(g_cacheWriteColors, g_mapColorsBack, sizeof(g_mapColorsBack));
         std::memcpy(g_cacheWriteHeights, g_mapHeightsBack, sizeof(g_mapHeightsBack));
+        std::memcpy(g_cacheWriteLights, g_mapLightsBack, sizeof(g_mapLightsBack));
     }
     g_cacheWriteX = x;
     g_cacheWriteZ = z;
@@ -380,6 +384,7 @@ inline void ShutdownCacheWriteThread() {
     }
     if (g_cacheWriteColors) { delete[] g_cacheWriteColors; g_cacheWriteColors = nullptr; }
     if (g_cacheWriteHeights) { delete[] g_cacheWriteHeights; g_cacheWriteHeights = nullptr; }
+    if (g_cacheWriteLights) { delete[] g_cacheWriteLights; g_cacheWriteLights = nullptr; }
 }
 
 // ==========================================
@@ -396,18 +401,18 @@ inline void ShutdownCacheWriteThread() {
 //   alpha=0 列, 不会用缺口覆盖缓存中已有的已访问区域数据。
 // ==========================================
 template <typename T>
-inline void ShiftScanGrid(T (&grid)[MAP_DATA_SIZE][MAP_DATA_SIZE], int shiftX, int shiftZ) noexcept {
+inline void ShiftScanGrid(T (&grid)[MAP_DATA_SIZE][MAP_DATA_SIZE], int shiftX, int shiftZ, int fillByte = 0) noexcept {
     constexpr int N = MAP_DATA_SIZE;
     // X 方向: 整行平移 (grid 按 [arrX][arrZ] 排布, arrX 是行索引)
     // 玩家向东移动 (shiftX>0): 新[arrX'] = 旧[arrX'+shiftX], 西侧数据移出, 东侧条带置零
     if (shiftX != 0) {
         if (shiftX > 0) {
             std::memmove(grid[0], grid[shiftX], (size_t)(N - shiftX) * sizeof(grid[0]));
-            std::memset(grid[N - shiftX], 0, (size_t)shiftX * sizeof(grid[0]));
+            std::memset(grid[N - shiftX], fillByte, (size_t)shiftX * sizeof(grid[0]));
         } else {
             int s = -shiftX;
             std::memmove(grid[s], grid[0], (size_t)(N - s) * sizeof(grid[0]));
-            std::memset(grid[0], 0, (size_t)s * sizeof(grid[0]));
+            std::memset(grid[0], fillByte, (size_t)s * sizeof(grid[0]));
         }
     }
     // Z 方向: 每行内部平移
@@ -415,11 +420,11 @@ inline void ShiftScanGrid(T (&grid)[MAP_DATA_SIZE][MAP_DATA_SIZE], int shiftX, i
         for (int x = 0; x < N; x++) {
             if (shiftZ > 0) {
                 std::memmove(grid[x], grid[x] + shiftZ, (size_t)(N - shiftZ) * sizeof(grid[x][0]));
-                std::memset(grid[x] + (N - shiftZ), 0, (size_t)shiftZ * sizeof(grid[x][0]));
+                std::memset(grid[x] + (N - shiftZ), fillByte, (size_t)shiftZ * sizeof(grid[x][0]));
             } else {
                 int s = -shiftZ;
                 std::memmove(grid[x] + s, grid[x], (size_t)(N - s) * sizeof(grid[x][0]));
-                std::memset(grid[x], 0, (size_t)s * sizeof(grid[x][0]));
+                std::memset(grid[x], fillByte, (size_t)s * sizeof(grid[x][0]));
             }
         }
     }
@@ -706,6 +711,7 @@ struct BiomeTintTriple {
         mce::Color grass;
         mce::Color foliage;
         mce::Color water;
+        bool isSwampDualTone = false;
     };
 
 // [步骤1排查打点] 记录未命中规则直接落入默认/哈希的群系和方块（每种仅记录一次）
@@ -997,6 +1003,8 @@ inline void getBiomeTints(std::string const& biomeName, mce::Color& grass, mce::
 inline bool IsBiomeTintedBlock(std::string const& name) noexcept {
     if (name.find("grass") != std::string::npos ||
         name.find("fern") != std::string::npos ||
+        name.find("double_plant") != std::string::npos ||
+        name.find("bush") != std::string::npos ||
         name.find("vine") != std::string::npos ||
         name.find("leaf") != std::string::npos ||
         name.find("leaves") != std::string::npos) {
@@ -1011,6 +1019,83 @@ inline bool IsBiomeTintedBlock(std::string const& name) noexcept {
     return false;
 }
 
+// [沼泽双色草地噪声生成]
+// 原版沼泽 (swamp / swampland，不含红树林沼泽 mangrove_swamp) 的草地并非单一枯萎橄榄色，
+// 而是基于原版 PerlinSimplexNoise(2345u, 1) 在 (worldX * 0.0225f, worldZ * 0.0225f) 采样，
+// 精确对应实机 swamp_grass.png 调色板 (128/129 分界点 noiseVal ≈ -0.096f / -0.1f)：
+// noiseVal < -0.096f 为【深邃沼泽绿 (#4C763C)】，noiseVal >= -0.096f 为【枯萎橄榄褐 (#6A7039)】
+inline bool IsSwampDualToneBiome(std::string const& rawName) noexcept {
+    if (rawName.empty()) return false;
+    std::string lower = rawName;
+    for (char& c : lower) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+    return lower.find("swamp") != std::string::npos && lower.find("mangrove") == std::string::npos;
+}
+
+inline float HashGrid2D(int gx, int gz, uint32_t seed) noexcept {
+    uint32_t h = (uint32_t)gx * 374761393u + (uint32_t)gz * 668265263u + seed;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= (h >> 16);
+    return (float)(h & 0xFFFFu) / 65535.0f;
+}
+
+inline float SmoothValueNoise2D(float fx, float fz, uint32_t seed) noexcept {
+    int x0 = (int)std::floor(fx);
+    int z0 = (int)std::floor(fz);
+    float tx = fx - (float)x0;
+    float tz = fz - (float)z0;
+    float ux = tx * tx * (3.0f - 2.0f * tx);
+    float uz = tz * tz * (3.0f - 2.0f * tz);
+
+    float v00 = HashGrid2D(x0,     z0,     seed);
+    float v10 = HashGrid2D(x0 + 1, z0,     seed);
+    float v01 = HashGrid2D(x0,     z0 + 1, seed);
+    float v11 = HashGrid2D(x0 + 1, z0 + 1, seed);
+
+    float vx0 = v00 + (v10 - v00) * ux;
+    float vx1 = v01 + (v11 - v01) * ux;
+    return vx0 + (vx1 - vx0) * uz;
+}
+
+inline mce::Color ComputeSwampGrassColor(int worldX, int worldZ, bool smoothEdge = true) noexcept {
+    // 直接调用游戏引擎自身的 PerlinSimplexNoise(2345u, 1)，与实机 GrassTessellationPolicy / getMapGrassColor 1:1 对齐
+    static const PerlinSimplexNoise s_swampGrassNoise(2345u, 1);
+    float noiseVal = s_swampGrassNoise.getValue((float)worldX * 0.0225f, (float)worldZ * 0.0225f);
+
+    float t = 0.0f;
+    if (smoothEdge) {
+        // 对应实机 GrassTessellationPolicy 5x5 邻域平滑采样，在 -0.096f (swamp_grass.png 128/129 分界) 处做 ~2 格抗锯齿过渡
+        t = std::clamp((noiseVal - (-0.126f)) / 0.060f, 0.0f, 1.0f);
+        t = t * t * (3.0f - 2.0f * t);
+    } else {
+        t = (noiseVal < -0.096f) ? 0.0f : 1.0f;
+    }
+
+    // 深绿色 (实机沼泽深绿草地采样校准) vs 枯萎暖橄榄色
+    constexpr float kDeepGreenR = 0.205f, kDeepGreenG = 0.365f, kDeepGreenB = 0.172f;
+    constexpr float kWitheredR  = 0.285f, kWitheredG  = 0.300f, kWitheredB  = 0.130f;
+    return mce::Color(
+        kDeepGreenR + (kWitheredR - kDeepGreenR) * t,
+        kDeepGreenG + (kWitheredG - kDeepGreenG) * t,
+        kDeepGreenB + (kWitheredB - kDeepGreenB) * t,
+        1.0f
+    );
+}
+
+// [熔岩动态纹理色调校准] 还原实机熔岩池橙黄亮脉与暖橙基底的熔融层次，消除死板纯红失真
+inline mce::Color ApplyLavaPatternTint(int worldX, int worldZ) noexcept {
+    float n1 = SmoothValueNoise2D((float)worldX * 0.32f, (float)worldZ * 0.32f, 0x4C415641u);
+    float n2 = HashGrid2D(worldX, worldZ, 0x9E3779B9u);
+    float t  = std::clamp(n1 * 0.65f + n2 * 0.35f, 0.0f, 1.0f);
+
+    // 在暖橙基底 RGB(206, 89, 15) 与亮金橙脉络 RGB(232, 124, 36) 之间自然过渡（均值约 RGB(218, 105, 23)）
+    return mce::Color(
+        0.808f + 0.102f * t,
+        0.349f + 0.137f * t,
+        0.059f + 0.082f * t,
+        1.0f
+    );
+}
+
 inline void GetCellBiomeTint(BlockSource& region, int cellX, int cellZ, short sampleY,
                              BiomeTintTriple& outTriple, const BiomeTintTriple& fallbackTriple) {
     static thread_local std::unordered_map<uint32_t, BiomeTintTriple> s_cellMap;
@@ -1023,11 +1108,14 @@ inline void GetCellBiomeTint(BlockSource& region, int cellX, int cellZ, short sa
         return;
     }
 
+    int sampleWorldX = (cellX << 2) + 2;
+    int sampleWorldZ = (cellZ << 2) + 2;
     try {
-        auto const& b = region.getBiome(BlockPos((cellX << 2) + 2, (int)sampleY, (cellZ << 2) + 2));
+        auto const& b = region.getBiome(BlockPos(sampleWorldX, (int)sampleY, sampleWorldZ));
         std::string bName = b.mHash->getString();
         if (!bName.empty()) {
             getBiomeTints(bName, outTriple.grass, outTriple.foliage, outTriple.water);
+            outTriple.isSwampDualTone = IsSwampDualToneBiome(bName);
             s_cellMap[cellKey] = outTriple;
             return;
         }
@@ -1040,6 +1128,15 @@ inline void GetCellBiomeTint(BlockSource& region, int cellX, int cellZ, short sa
 inline void GetBlendedBiomeTints(BlockSource& region, int targetX, int targetZ, short sampleY,
                                 const BiomeTintTriple& fallbackTriple,
                                 mce::Color& grass, mce::Color& foliage, mce::Color& water) {
+    if (!MapRenderState::biomeBlending) {
+        BiomeTintTriple t00;
+        GetCellBiomeTint(region, targetX >> 2, targetZ >> 2, sampleY, t00, fallbackTriple);
+        grass   = t00.isSwampDualTone ? ComputeSwampGrassColor(targetX, targetZ, false) : t00.grass;
+        foliage = t00.foliage;
+        water   = t00.water;
+        return;
+    }
+
     float ux = ((float)targetX - 1.5f) * 0.25f;
     float uz = ((float)targetZ - 1.5f) * 0.25f;
     int cx0 = (int)std::floor(ux);
@@ -1055,8 +1152,18 @@ inline void GetBlendedBiomeTints(BlockSource& region, int targetX, int targetZ, 
     GetCellBiomeTint(region, cx0, cz1, sampleY, t01, fallbackTriple);
     GetCellBiomeTint(region, cx1, cz1, sampleY, t11, fallbackTriple);
 
+    // 沼泽群系草地直接按当前真实世界坐标 (targetX, targetZ) 逐格采样原版 PerlinSimplexNoise，杜绝 4x4 网格偏移与量化失真
+    if (t00.isSwampDualTone || t10.isSwampDualTone || t01.isSwampDualTone || t11.isSwampDualTone) {
+        mce::Color swampGrass = ComputeSwampGrassColor(targetX, targetZ, true);
+        if (t00.isSwampDualTone) t00.grass = swampGrass;
+        if (t10.isSwampDualTone) t10.grass = swampGrass;
+        if (t01.isSwampDualTone) t01.grass = swampGrass;
+        if (t11.isSwampDualTone) t11.grass = swampGrass;
+    }
+
     // 快速分支：四角群系色完全相同时(>95%情形)，直接返回无插值开销
     if (t00.grass.r == t10.grass.r && t00.grass.r == t01.grass.r && t00.grass.r == t11.grass.r &&
+        t00.grass.g == t10.grass.g && t00.grass.g == t01.grass.g && t00.grass.g == t11.grass.g &&
         t00.foliage.r == t10.foliage.r && t00.foliage.r == t01.foliage.r && t00.foliage.r == t11.foliage.r &&
         t00.water.r == t10.water.r && t00.water.r == t01.water.r && t00.water.r == t11.water.r) {
         grass   = t00.grass;
@@ -1189,6 +1296,25 @@ inline short SafeGetSurfaceY(BlockSource& region, int x, int z) noexcept {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // 部分加载区块触发 AV → 视为"未就绪"，调用方下次重试
         result = -32000;
+    }
+    return result;
+}
+
+// [安全光照查询] try/catch 包装的 getBrightnessPair 查询 (/EHa 模式下可捕获 SEH AV)，返回打包字节 (skyLight << 4) | blockLight
+inline uint8_t SafeGetPackedLight(BlockSource& region, int x, int y, int z, int intrinsicBlockLight = 0, bool defaultFullSky = true) noexcept {
+    uint8_t defSky = defaultFullSky ? 15 : 0;
+    uint8_t defBlk = (uint8_t)std::clamp(intrinsicBlockLight, 0, 15);
+    uint8_t result = (uint8_t)((defSky << 4) | defBlk);
+    try {
+        int clampedY = (y < -64) ? -64 : ((y > 319) ? 319 : y);
+        BrightnessPair bp = region.getBrightnessPair(BlockPos(x, clampedY, z));
+        uint8_t sl = *(reinterpret_cast<const uint8_t*>(&bp.sky));
+        uint8_t bl = *(reinterpret_cast<const uint8_t*>(&bp.block));
+        if (sl > 15) sl = 15;
+        if (bl > 15) bl = 15;
+        if ((int)bl < intrinsicBlockLight) bl = defBlk;
+        result = (uint8_t)((sl << 4) | bl);
+    } catch (...) {
     }
     return result;
 }
@@ -1357,7 +1483,7 @@ inline bool IsCaveOverlayBlockName(std::string const& rawName) noexcept {
     if (name.find("pale_hanging_moss") != std::string::npos) return true;
     if (name.find("pointed_dripstone") != std::string::npos) return true;
     if (name.find("amethyst_cluster") != std::string::npos || name.find("amethyst_bud") != std::string::npos) return true;
-    if (name.find("grass") != std::string::npos || name.find("fern") != std::string::npos) return true;
+    if ((name.find("grass") != std::string::npos && name.find("grass_block") == std::string::npos) || name.find("fern") != std::string::npos) return true;
     if (name.find("flower") != std::string::npos || name.find("bush") != std::string::npos) return true;
     if (name.find("leaves") != std::string::npos) return true;
     if (name.find("vine") != std::string::npos || name.find("lichen") != std::string::npos) return true;
@@ -1554,6 +1680,54 @@ inline bool DetectCaveStart(BlockSource& region, int playerX, int playerY, int p
     return true;
 }
 
+// [自动洞穴天花板矩阵检测] 支持按用户配置的尺寸检测头顶实心顶棚:
+//   autoCaveMode == -1: Smart (智能自适应多特征防误判检测)
+//   autoCaveMode ==  0: OFF   (关闭自动进入洞穴)
+//   autoCaveMode ==  1: 1x1   (半径 0，仅检测玩家正上方 1x1 柱)
+//   autoCaveMode ==  2: 3x3   (半径 1，检测玩家头顶 3x3 实心天花板矩阵)
+//   autoCaveMode ==  3: 5x5   (半径 2，检测玩家头顶 5x5 实心天花板矩阵)
+//   autoCaveMode ==  4: 7x7   (半径 3，检测玩家头顶 7x7 实心天花板矩阵)
+//   autoCaveMode ==  5: 9x9   (半径 4，检测玩家头顶 9x9 实心天花板矩阵)
+inline bool DetectCaveStartWithRoofSize(BlockSource& region, int playerX, int playerY, int playerZ,
+                                        int autoCaveMode, int& outCaveStartY) noexcept {
+    if (autoCaveMode == 0) return false;
+    if (autoCaveMode < 0) {
+        return DetectCaveStart(region, playerX, playerY, playerZ, outCaveStartY);
+    }
+    if (playerY <= -64 || playerY >= 315) return false;
+
+    int radius = std::clamp(autoCaveMode - 1, 0, 4);
+    int centerCeilingY = -1;
+
+    for (int dx = -radius; dx <= radius; dx++) {
+        for (int dz = -radius; dz <= radius; dz++) {
+            int cx = playerX + dx;
+            int cz = playerZ + dz;
+            short sY = SafeGetSurfaceY(region, cx, cz);
+            if (sY > -64 && sY != -32000 && sY <= playerY + 2) {
+                return false;
+            }
+            int maxScan = (sY > playerY + 2 && sY != -32000) ? std::min((int)sY, playerY + 80) : std::min(319, playerY + 80);
+            int colCeilingY = -1;
+            for (int y = playerY + 2; y <= maxScan; y++) {
+                if (!IsPassableCeilingBlock(region, cx, y, cz)) {
+                    colCeilingY = y;
+                    break;
+                }
+            }
+            if (colCeilingY == -1) {
+                return false;
+            }
+            if (dx == 0 && dz == 0) {
+                centerCeilingY = colCeilingY;
+            }
+        }
+    }
+
+    outCaveStartY = (centerCeilingY != -1) ? centerCeilingY : (playerY + 4);
+    return true;
+}
+
 // [洞穴亮度计算] 深度衰减亮度公式
 // 深度衰减亮度参数:
 //   legible=false (非清晰): finalBrightness = 0.375 + 0.625 * (1 - depth/caveDepth)
@@ -1569,23 +1743,51 @@ inline float ComputeCaveBrightness(int depth, int caveDepth) noexcept {
 }
 
 // [洞穴列扫描] 扫描单个 x,z 列, 从 startY 向下查找第一个紧邻空气的实心方块
-// 从 caveStart 向下扫描到 caveStart - caveDepth
+// 从 caveStart 向下扫描到 caveStart - caveDepth (或 fullDepthMode 全深度扫描至世界底部)
 // 核心逻辑: 只渲染洞穴空腔下方的方块 (洞穴地板/墙壁), 纯石头区域返回 false (透明)
 // 液体方块 (熔岩/水) 在空气下方时返回, 由 GetCaveLiquidColor 应用饱和色 (不受深度衰减)
-// 参数: region, x, z, startY(扫描起点Y), caveDepth(扫描深度)
+// 参数: region, x, z, startY(扫描起点Y), caveDepth(扫描深度), fullDepthMode(是否为 Full 全深度洞穴模式)
 // 输出: outBlockName(方块名), outBlockY(方块Y), outDepth(深度), outHasWater(是否含水)
 // 返回值: true=找到洞穴方块, false=列内无洞穴 (纯实心石头, 渲染为透明)
 inline bool ScanColumnCave(BlockSource& region, int x, int z, int startY, int caveDepth,
-                           std::string& outBlockName, int& outBlockY, int& outDepth, bool& outHasWater) noexcept {
+                           std::string& outBlockName, int& outBlockY, int& outDepth, bool& outHasWater,
+                           bool fullDepthMode = false) noexcept {
     outHasWater = false;
     int topY = startY;
     if (topY < -64) return false;
 
-    // 阶段一: 从 topY 向下找第一个"通道"方块(空气/水/植被等可穿透)
-    // 寻找玩家所处高度附近的洞穴通道空腔 (最多向下搜索 64 格)
+    int searchStartY = topY;
+    if (fullDepthMode && MapRenderState::currentDimensionId != 1) {
+        // Full 全深度模式 (主世界/末地):
+        // 先向下穿透地表表层 (跳过天空空气、树冠树叶、地表水体，并穿过至少 3 格实心岩层/土层)，
+        // 确保只抓取地壳下方的地下洞穴空腔，绝不把露天海床或普通地表误判为洞穴。
+        int solidRoofCount = 0;
+        int roofBottomY = -99999;
+        for (int y = topY; y >= -64; y--) {
+            try {
+                Block const& block = region.getBlock(BlockPos(x, y, z));
+                if (!IsCavePassableBlock(block)) {
+                    solidRoofCount++;
+                    if (solidRoofCount >= 3) {
+                        roofBottomY = y - 1;
+                        break;
+                    }
+                } else {
+                    solidRoofCount = 0;
+                }
+            } catch (...) {
+                continue;
+            }
+        }
+        if (roofBottomY == -99999 || roofBottomY < -64) return false;
+        searchStartY = roofBottomY;
+    }
+
+    // 阶段一: 从 searchStartY 向下找第一个"通道"方块(空气/水/植被等可穿透)
     int channelY = -99999;
-    int airSearchBottom = std::max(-64, topY - 64);
-    for (int y = topY; y >= airSearchBottom; y--) {
+    int airSearchBottom = fullDepthMode ? (MapRenderState::currentDimensionId == 1 ? 0 : -64)
+                                        : std::max(-64, searchStartY - 64);
+    for (int y = searchStartY; y >= airSearchBottom; y--) {
         try {
             Block const& block = region.getBlock(BlockPos(x, y, z));
             if (IsCavePassableBlock(block)) {
@@ -1599,9 +1801,9 @@ inline bool ScanColumnCave(BlockSource& region, int x, int z, int startY, int ca
     if (channelY == -99999) return false;  // 纯实体岩石列 = 透明(黑色背景)
 
     // 阶段二: 从通道Y向下找第一个非穿透方块(地板)
-    // 深度至少允许向下探测 64 格，确保巨型洞穴与深渊裂谷的地板能够被完整渲染
-    int maxFloorDepth = std::max(64, caveDepth);
-    int floorSearchBottom = std::max(-64, channelY - maxFloorDepth);
+    // 深度至少允许向下探测 64 格 (Full 模式下直达世界底端 -64)
+    int maxFloorDepth = fullDepthMode ? 384 : std::max(64, caveDepth);
+    int floorSearchBottom = fullDepthMode ? -64 : std::max(-64, channelY - maxFloorDepth);
     int depth = 0;
     bool hasWater = false;
     for (int y = channelY; y >= floorSearchBottom; y--, depth++) {
@@ -1618,7 +1820,7 @@ inline bool ScanColumnCave(BlockSource& region, int x, int z, int startY, int ca
                 outBlockName = GetHorizontalWoodName(outBlockName);
             }
             outBlockY = y;
-            outDepth = depth;
+            outDepth = fullDepthMode ? (depth + std::max(0, (searchStartY - channelY) / 6)) : depth;
             outHasWater = hasWater;
             return true;
         } catch (...) {
@@ -1646,7 +1848,7 @@ inline bool ScanColumnCave(BlockSource& region, int x, int z, int startY, int ca
 // [洞穴特殊方块颜色] 液体方块在洞穴中使用饱和颜色 (不受深度衰减)
 // 液体通过转换保持饱和色彩
 inline mce::Color GetCaveLiquidColor(std::string const& name) noexcept {
-    if (name.find("lava") != std::string::npos) return mce::Color(1.0f, 0.40f, 0.05f, 1.0f);
+    if (name.find("lava") != std::string::npos) return mce::Color(0.855f, 0.412f, 0.090f, 1.0f);
     if (name.find("water") != std::string::npos) return mce::Color(0.15f, 0.45f, 0.90f, 1.0f);
     return mce::Color(0, 0, 0, 0);  // 非液体
 }
@@ -1654,6 +1856,16 @@ inline mce::Color GetCaveLiquidColor(std::string const& name) noexcept {
 // [洞穴方块专用颜色] 比通用 getBlockColor 更精细, 识别洞穴常见方块并赋予准确颜色
 // 使洞穴地图色彩丰富: 矿石有对应颜色, 石头变种有区分, 深板岩为冷蓝灰
 inline mce::Color GetCaveBlockColor(std::string const& rawName) noexcept {
+    if (MapRenderState::blockColorMode == 1) {
+        return BlockColorMap::GetVanillaBlockColor(
+            rawName,
+            mce::Color(0.50f, 0.70f, 0.30f, 1.0f),
+            mce::Color(0.40f, 0.65f, 0.22f, 1.0f),
+            kDefaultWaterTint,
+            MapRenderState::biomeColorsInVanilla
+        );
+    }
+
     std::string name = rawName;
     for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
 
@@ -3445,11 +3657,12 @@ LL_TYPE_INSTANCE_HOOK(
                     bool isCave = (dimId == 1) || MapRenderState::g_caveModeActive;
 
                     // [极速加载核心] 进世界/切维度第 0 帧：立即从缓存预填当前位置小地图与直接推送纹理，杜绝黑块！
-                    MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCave, false, g_textureData);
+                    MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCave, false, g_textureData, g_mapLightsBack);
                     {
                         std::lock_guard<std::mutex> lock(g_mapDataMutex);
                         std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
                         std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                        std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                         g_lastRenderX = px;
                         g_lastRenderZ = pz;
                         g_textureCenterX = (float)px;
@@ -3544,6 +3757,19 @@ LL_TYPE_INSTANCE_HOOK(
         int pz = g_playerBlockZ;
         g_ticksSinceScan++;
 
+        if (MapRenderState::forceRescan.exchange(false)) {
+            g_currentScanX = px;
+            g_currentScanZ = pz;
+            g_ticksSinceScan = 0;
+            g_isScanning = true;
+            g_scanDimension = MapRenderState::currentDimensionId;
+            g_scanPhase = 0;
+            g_scanRadius = 0;
+            g_scanPerimeterIndex = 0;
+            g_scanBiomeEntries.clear();
+            g_caveDetectCooldown = 0;
+        }
+
         if (!g_isScanning && (std::abs(px - g_currentScanX) >= 8 || std::abs(pz - g_currentScanZ) >= 8 || g_ticksSinceScan > 50)) {
             int moveDistX = px - g_currentScanX;
             int moveDistZ = pz - g_currentScanZ;
@@ -3553,11 +3779,12 @@ LL_TYPE_INSTANCE_HOOK(
                 // 远距离跳转/传送：重新整幅预填
                 g_currentScanX = px;
                 g_currentScanZ = pz;
-                MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCaveMode, false, g_textureData);
+                MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCaveMode, false, g_textureData, g_mapLightsBack);
                 {
                     std::lock_guard<std::mutex> lock(g_mapDataMutex);
                     std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
                     std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                    std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                     g_lastRenderX = px;
                     g_lastRenderZ = pz;
                     g_textureCenterX = (float)px;
@@ -3569,6 +3796,7 @@ LL_TYPE_INSTANCE_HOOK(
                 // 平移现有网格与GPU纹理，并用缓存填补边缘空缺 (onlyIfMissing = true)
                 ShiftScanGrid(g_mapColorsBack, moveDistX, moveDistZ);
                 ShiftScanGrid(g_mapHeightsBack, moveDistX, moveDistZ);
+                ShiftScanGrid(g_mapLightsBack, moveDistX, moveDistZ, 0xF0);
                 {
                     std::lock_guard<std::mutex> lock(g_mapDataMutex);
                     ShiftTextureData(g_textureData, moveDistX, moveDistZ);
@@ -3577,11 +3805,12 @@ LL_TYPE_INSTANCE_HOOK(
                 }
                 g_currentScanX += moveDistX;
                 g_currentScanZ += moveDistZ;
-                MapCacheManager::PrefillMapGrid(g_currentScanX, g_currentScanZ, g_mapColorsBack, g_mapHeightsBack, isCaveMode, true, g_textureData);
+                MapCacheManager::PrefillMapGrid(g_currentScanX, g_currentScanZ, g_mapColorsBack, g_mapHeightsBack, isCaveMode, true, g_textureData, g_mapLightsBack);
                 {
                     std::lock_guard<std::mutex> lock(g_mapDataMutex);
                     std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
                     std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                    std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                     g_lastRenderX = g_currentScanX;
                     g_lastRenderZ = g_currentScanZ;
                     g_textureReadyToUpload.store(true);
@@ -3610,11 +3839,12 @@ LL_TYPE_INSTANCE_HOOK(
                 // 异常跳转/传送 (平移量超过缓冲区): 重新整幅预填
                 g_currentScanX = px;
                 g_currentScanZ = pz;
-                MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCaveMode, false, g_textureData);
+                MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCaveMode, false, g_textureData, g_mapLightsBack);
                 {
                     std::lock_guard<std::mutex> lock(g_mapDataMutex);
                     std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
                     std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                    std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                     g_lastRenderX = px;
                     g_lastRenderZ = pz;
                     g_textureCenterX = (float)px;
@@ -3629,6 +3859,7 @@ LL_TYPE_INSTANCE_HOOK(
                 // 平移后台缓冲与GPU纹理
                 ShiftScanGrid(g_mapColorsBack, shiftX, shiftZ);
                 ShiftScanGrid(g_mapHeightsBack, shiftX, shiftZ);
+                ShiftScanGrid(g_mapLightsBack, shiftX, shiftZ, 0xF0);
                 {
                     std::lock_guard<std::mutex> lock(g_mapDataMutex);
                     ShiftTextureData(g_textureData, shiftX, shiftZ);
@@ -3639,13 +3870,14 @@ LL_TYPE_INSTANCE_HOOK(
                 g_currentScanZ += shiftZ;
 
                 // [防黑条核心] 立即从缓存填补平移露出的边缘条带 (onlyIfMissing = true) 并写入纹理
-                MapCacheManager::PrefillMapGrid(g_currentScanX, g_currentScanZ, g_mapColorsBack, g_mapHeightsBack, isCaveMode, true, g_textureData);
+                MapCacheManager::PrefillMapGrid(g_currentScanX, g_currentScanZ, g_mapColorsBack, g_mapHeightsBack, isCaveMode, true, g_textureData, g_mapLightsBack);
 
                 // 同步前台缓冲，使小地图纹理中心紧密贴合玩家，彻底杜绝跑图边缘 UV 越界条纹
                 {
                     std::lock_guard<std::mutex> lock(g_mapDataMutex);
                     std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
                     std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                    std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                     g_lastRenderX = g_currentScanX;
                     g_lastRenderZ = g_currentScanZ;
                     g_textureReadyToUpload.store(true);
@@ -3660,14 +3892,41 @@ LL_TYPE_INSTANCE_HOOK(
         }
 
         // ==================== 洞穴地图检测 ====================
-        // 每帧检测玩家是否在地下洞穴中, 设置 g_caveModeActive 供渲染层使用
-        int effectiveCaveType = MapRenderState::g_caveModeType;
+        // 维度切换时同步该维度对应的洞穴模式类型 (若未单独覆盖则使用 Default Cave Mode Type)
+        if (MapRenderState::g_lastCaveDimensionId != MapRenderState::currentDimensionId) {
+            MapRenderState::g_lastCaveDimensionId = MapRenderState::currentDimensionId;
+            MapRenderState::SyncCaveModeTypeForDimension(MapRenderState::currentDimensionId);
+            MapRenderState::g_caveHasPendingToggle = false;
+        }
 
-        // [下界地图] 下界无天空光照 (hasSkylight=false), 永远视为洞穴模式
-        // 当 ambientLight < 0.25 且非末地 → 启用洞穴光照模式
+        // 检查当前维度是否在洞穴模式允许的维度白名单内
+        bool dimAllowed = MapRenderState::IsCaveModeAllowedInDimension(MapRenderState::currentDimensionId);
+        int effectiveCaveType = dimAllowed ? MapRenderState::g_caveModeType : 0;
+
+        // 当洞穴模式类型在 Layered 与 Full 之间切换时，若当前已在洞穴模式中则立即重启全图扫描
+        static int s_prevEffectiveCaveType = -1;
+        if (s_prevEffectiveCaveType != effectiveCaveType) {
+            bool shouldRestartCaveScan = (s_prevEffectiveCaveType > 0 && effectiveCaveType > 0 && MapRenderState::g_caveModeActive);
+            s_prevEffectiveCaveType = effectiveCaveType;
+            if (shouldRestartCaveScan) {
+                g_currentScanX = px;
+                g_currentScanZ = pz;
+                g_isScanning = true;
+                g_scanPhase = 0;
+                g_scanRadius = 0;
+                g_scanPerimeterIndex = 0;
+            }
+        }
+
+        // [下界地图] 下界无天空光照 (hasSkylight=false), 在允许下界洞穴且未关闭时视为洞穴模式
         if (MapRenderState::currentDimensionId == 1) {
-            MapRenderState::g_caveModeActive = true;
-            MapRenderState::g_caveStartY = 120;  // 下界天花板以下, 避开基岩层
+            MapRenderState::g_caveHasPendingToggle = false;
+            if (effectiveCaveType != 0) {
+                MapRenderState::g_caveModeActive = true;
+                MapRenderState::g_caveStartY = (effectiveCaveType == (int)MapRenderState::CaveModeType::Full) ? 122 : 120;
+            } else {
+                MapRenderState::g_caveModeActive = false;
+            }
         } else if (g_caveDetectCooldown > 0) {
             g_caveDetectCooldown--;
         }
@@ -3675,31 +3934,62 @@ LL_TYPE_INSTANCE_HOOK(
         if (effectiveCaveType != 0 && MapRenderState::currentDimensionId != 1 && g_caveDetectCooldown == 0) {
             try {
                 if (MapRenderState::g_caveTopYAuto) {
-                    // Auto 模式: 自动检测洞穴
+                    // Auto 模式: 按配置的自动天花板检测尺寸 (Smart / OFF / 1x1..9x9) 检测洞穴，并应用防闪烁计时器
                     BlockSource* regionPtr = this->getRegion();
                     if (regionPtr) {
                         int caveStartY = 0;
-                        bool inCave = DetectCaveStart(*regionPtr, px, (int)g_playerY, pz, caveStartY);
-                        // [防残留] 洞穴→地表切换时强制触发重扫, 清除缓存中的旧洞穴数据
-                        if (MapRenderState::g_caveModeActive && !inCave) {
-                            g_ticksSinceScan = 101;
-                        }
-                        MapRenderState::g_caveModeActive = inCave;
-                        if (inCave) {
-                            MapRenderState::g_caveStartY = caveStartY;
+                        bool inCave = DetectCaveStartWithRoofSize(
+                            *regionPtr, px, (int)g_playerY, pz, MapRenderState::g_autoCaveMode, caveStartY);
+                        if (inCave != MapRenderState::g_caveModeActive) {
+                            int toggleDelayMs = std::clamp(MapRenderState::g_caveModeToggleTimer, 0, 5000);
+                            bool canToggleNow = (toggleDelayMs <= 0);
+                            if (!canToggleNow) {
+                                auto nowTp = std::chrono::steady_clock::now();
+                                if (!MapRenderState::g_caveHasPendingToggle || MapRenderState::g_cavePendingTargetState != inCave) {
+                                    MapRenderState::g_caveHasPendingToggle = true;
+                                    MapRenderState::g_cavePendingTargetState = inCave;
+                                    MapRenderState::g_cavePendingSinceTime = nowTp;
+                                } else {
+                                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        nowTp - MapRenderState::g_cavePendingSinceTime).count();
+                                    if (elapsedMs >= toggleDelayMs) {
+                                        canToggleNow = true;
+                                    }
+                                }
+                            }
+                            if (canToggleNow) {
+                                MapRenderState::g_caveHasPendingToggle = false;
+                                // [防残留] 洞穴→地表切换时强制触发重扫, 清除缓存中的旧洞穴数据
+                                if (MapRenderState::g_caveModeActive && !inCave) {
+                                    g_ticksSinceScan = 101;
+                                }
+                                MapRenderState::g_caveModeActive = inCave;
+                                if (inCave) {
+                                    MapRenderState::g_caveStartY = caveStartY;
+                                }
+                            }
+                        } else {
+                            MapRenderState::g_caveHasPendingToggle = false;
+                            if (inCave) {
+                                MapRenderState::g_caveStartY = caveStartY;
+                            }
                         }
                     }
+                    g_caveDetectCooldown = MapRenderState::g_caveHasPendingToggle ? 1 : 5;
                 } else {
                     // 手动 Top Y 模式: 始终启用洞穴, 使用用户指定的 Top Y
+                    MapRenderState::g_caveHasPendingToggle = false;
                     MapRenderState::g_caveModeActive = true;
                     MapRenderState::g_caveStartY = MapRenderState::g_caveTopY;
+                    g_caveDetectCooldown = 5;
                 }
             } catch (...) {
                 MapRenderState::g_caveModeActive = false;
+                g_caveDetectCooldown = 5;
             }
-            g_caveDetectCooldown = 5;  // 每 5 帧检测一次 (约 0.25 秒)
         } else if (effectiveCaveType == 0 && MapRenderState::currentDimensionId != 1) {
-            // Off 模式 (仅主世界): 不启用洞穴渲染
+            // Off 模式或当前维度未列入洞穴白名单: 不启用洞穴渲染
+            MapRenderState::g_caveHasPendingToggle = false;
             MapRenderState::g_caveModeActive = false;
             // [防Off模式地表污染] 仍需检测玩家是否在地下洞穴中
             // 原因: SafeGetSurfaceY 在地下时可能返回洞穴天花板 Y (区块部分加载),
@@ -3740,11 +4030,12 @@ LL_TYPE_INSTANCE_HOOK(
 
             // [洞穴/地表极速平滑切换] 从对应缓存预填并立即更新前台与纹理，彻底杜绝切换瞬间的黑块与延迟
             bool newIsCave = MapRenderState::g_caveModeActive;
-            MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, newIsCave, false, g_textureData);
+            MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, newIsCave, false, g_textureData, g_mapLightsBack);
             {
                 std::lock_guard<std::mutex> lock(g_mapDataMutex);
                 std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
                 std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                 g_lastRenderX = px;
                 g_lastRenderZ = pz;
                 g_textureCenterX = (float)px;
@@ -3761,8 +4052,8 @@ LL_TYPE_INSTANCE_HOOK(
         }
 
         // [洞穴扫描] 玩家在地下且洞穴模式启用时, 执行洞穴列扫描代替地表扫描
-        // 从 caveStart 向下扫描 caveDepth 格
-        if (g_isScanning && MapRenderState::g_caveModeActive && (effectiveCaveType != 0 || MapRenderState::currentDimensionId == 1)) {
+        // 从 caveStart 向下扫描 caveDepth 格 (或 Full 全深度模式扫描全列)
+        if (g_isScanning && MapRenderState::g_caveModeActive && effectiveCaveType != 0) {
             try {
                 BlockSource* regionPtr = this->getRegion();
                 if (regionPtr) {
@@ -3770,14 +4061,19 @@ LL_TYPE_INSTANCE_HOOK(
                     auto scanStartTime = std::chrono::high_resolution_clock::now();
                     bool timeBudgetExceeded = false;
 
-                    // 洞穴扫描深度
+                    // 洞穴扫描深度与是否 Full 全深度模式
                     int caveDepth = MapRenderState::g_caveDepth;
+                    bool isFullCaveMode = (effectiveCaveType == (int)MapRenderState::CaveModeType::Full);
 
                     // 统一 Top Y 投影:
-                    // 所有列从同一高度向下解析, 避免相邻列跳到不同高度层产生杂色条纹。
+                    // Layered 模式下所有列从同一高度向下解析, 避免相邻列跳到不同高度层产生杂色条纹;
+                    // Full 模式下忽略 Top Y，从地壳下方 (或下界顶棚 122) 贯穿扫描至世界底端 (-64)。
                     int currentCaveTopY;
                     int currentCaveScanDepth;
-                    if (MapRenderState::currentDimensionId == 1) {
+                    if (isFullCaveMode) {
+                        currentCaveTopY = (MapRenderState::currentDimensionId == 1) ? 122 : 319;
+                        currentCaveScanDepth = (MapRenderState::currentDimensionId == 1) ? 80 : std::max(30, caveDepth);
+                    } else if (MapRenderState::currentDimensionId == 1) {
                         currentCaveTopY = std::clamp((int)g_playerY + 16, -64, 120);
                         currentCaveScanDepth = 80;
                     } else if (!MapRenderState::g_caveTopYAuto) {
@@ -3813,22 +4109,33 @@ LL_TYPE_INSTANCE_HOOK(
                             int arrZ    = dz + MAP_DATA_RADIUS;
 
                             int startY = currentCaveTopY;
+                            if (isFullCaveMode && MapRenderState::currentDimensionId != 1) {
+                                short surfY = SafeGetSurfaceY(region, targetX, targetZ);
+                                startY = (surfY > -64 && surfY != -32000) ? (int)surfY : 319;
+                            }
                             int scanDepth = currentCaveScanDepth;
 
                             std::string blockName;
                             int blockY = 0, depth = 0;
                             bool hasWater = false;
 
-                            if (startY > -64 && ScanColumnCave(region, targetX, targetZ, startY, scanDepth, blockName, blockY, depth, hasWater)) {
+                            if (startY > -64 && ScanColumnCave(region, targetX, targetZ, startY, scanDepth, blockName, blockY, depth, hasWater, isFullCaveMode)) {
                                 g_mapHeightsBack[arrX][arrZ] = (float)blockY;
 
                                 // 深洞: 有空气通道但指定深度内无地板，渲染深灰避免泄露地表色
                                 if (blockName == "__CAVE_DEEPHOLE__") {
                                     g_mapColorsBack[arrX][arrZ] = mce::Color(0.08f, 0.08f, 0.08f, 1.0f);
+                                    g_mapLightsBack[arrX][arrZ] = 0x00;
                                 } else {
+                                    int intrinsicLight = BlockColorMap::GetIntrinsicBlockLight(blockName);
+                                    g_mapLightsBack[arrX][arrZ] = SafeGetPackedLight(region, targetX, blockY + 1, targetZ, intrinsicLight, false);
+
                                     // 液体方块: 使用饱和颜色, 不应用深度衰减
                                     mce::Color liquidCol = GetCaveLiquidColor(blockName);
                                     if (liquidCol.a > 0.0f) {
+                                        if (blockName.find("lava") != std::string::npos && MapRenderState::blockColorMode == 0) {
+                                            liquidCol = ApplyLavaPatternTint(targetX, targetZ);
+                                        }
                                         g_mapColorsBack[arrX][arrZ] = liquidCol;
                                     } else {
                                         // 实心方块: 使用洞穴专用颜色表 (含矿石/石头变种/基岩等)
@@ -3854,6 +4161,7 @@ LL_TYPE_INSTANCE_HOOK(
                                 if (g_mapColorsBack[arrX][arrZ].a <= 0.01f) {
                                     g_mapColorsBack[arrX][arrZ] = mce::Color(0.0f, 0.0f, 0.0f, 0.0f);
                                     g_mapHeightsBack[arrX][arrZ] = 0.0f;
+                                    g_mapLightsBack[arrX][arrZ] = 0x00;
                                 }
                             }
 
@@ -3885,6 +4193,7 @@ LL_TYPE_INSTANCE_HOOK(
                         std::lock_guard<std::mutex> lock(g_mapDataMutex);
                         std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
                         std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                        std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                         g_lastRenderX = g_currentScanX;
                         g_lastRenderZ = g_currentScanZ;
                         g_mapDataUpdated.store(true);
@@ -3897,6 +4206,7 @@ LL_TYPE_INSTANCE_HOOK(
                                 std::lock_guard<std::mutex> lock(g_mapDataMutex);
                                 std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
                                 std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                                std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                                 g_lastRenderX = g_currentScanX;
                                 g_lastRenderZ = g_currentScanZ;
                                 g_mapDataUpdated.store(true);
@@ -3919,6 +4229,7 @@ LL_TYPE_INSTANCE_HOOK(
                                 std::lock_guard<std::mutex> lock(g_mapDataMutex);
                                 std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
                                 std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                                std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                                 g_lastRenderX = g_currentScanX;
                                 g_lastRenderZ = g_currentScanZ;
                                 g_mapDataUpdated.store(true);
@@ -3978,13 +4289,20 @@ LL_TYPE_INSTANCE_HOOK(
 
                             // [防黑块核心] 只有在合法世界高度区间才更新高度与方块采样；区块未就绪时绝不置零或损坏已有地形
                             if (topY > -64 && topY < 320) {
+                                int highestLightSampleY = (int)topY;
+                                int maxIntrinsicLight = 0;
+
                                 g_mapHeightsBack[arrX][arrZ] = (float)topY;
                                 Block const& block = region.getBlock(BlockPos(targetX, topY - 1, targetZ));
                                 Block const* currentBlockPtr = &block;
                                 std::string blockName = currentBlockPtr->getTypeName();
 
-                                // [屏障与隐形技术方块向下穿透] 屏障(barrier)等在展台或地图上应完全透明，自动透出底下的真实地表方块
-                                while (topY > -64 && IsInvisibleOrTechnicalOverlay(blockName)) {
+                                // [屏障/隐形方块/禁用染色玻璃/禁用花朵向下穿透]
+                                while (topY > -64 && (
+                                    (currentBlockPtr && currentBlockPtr->isAir()) ||
+                                    IsInvisibleOrTechnicalOverlay(blockName) ||
+                                    (!MapRenderState::loadFlowers && BlockColorMap::IsFlowerBlock(blockName)) ||
+                                    (!MapRenderState::displayStainedGlass && BlockColorMap::IsGlassOrStainedGlassBlock(blockName)))) {
                                     topY--;
                                     try {
                                         currentBlockPtr = &region.getBlock(BlockPos(targetX, topY - 1, targetZ));
@@ -3996,10 +4314,6 @@ LL_TYPE_INSTANCE_HOOK(
                                 g_mapHeightsBack[arrX][arrZ] = (float)topY;
 
                                 // [防地表灰石污染] 检测到石头类方块时, 回退查缓存地表Y重新读取
-                                // 原因: 部分加载区块 SafeGetSurfaceY 可能返回洞穴天花板Y而非真实地表Y,
-                                //       读取到石头/深板岩等写入缓存, 在地表大地图显示为灰色块状污染。
-                                // 修复: 若缓存中有更高的地表Y (差值>=15), 用缓存Y重新读取地表方块(如草),
-                                //       覆盖灰石数据。无缓存时不干预(可能是合法石头地表)。
                                 if (IsStoneLikeBlock(blockName)) {
                                     int16_t cachedY = MapCacheManager::GetCachedSurfaceHeight(targetX, targetZ);
                                     if (cachedY != MapCacheManager::HEIGHT_UNKNOWN && cachedY > (int16_t)topY + 15) {
@@ -4015,111 +4329,221 @@ LL_TYPE_INSTANCE_HOOK(
                                     }
                                 }
 
-                                if (blockName.find("snow") != std::string::npos) {
-                                    g_mapColorsBack[arrX][arrZ] = mce::Color(0.95f, 0.98f, 1.0f, 1.0f);
-                                } else {
-                                    Block const& blockAbove = region.getBlock(BlockPos(targetX, topY, targetZ));
-                                    std::string aboveName = blockAbove.getTypeName();
+                                struct OverlayLayer {
+                                    mce::Color color;
+                                };
+                                OverlayLayer overlays[8];
+                                int overlayCount = 0;
+                                int waterDepth = 0;
+                                std::string lastOverlayName = "";
 
-                                    if (IsInvisibleOrTechnicalOverlay(aboveName)) {
-                                        // 隐形或空气类技术方块，跳过替换，保留底层真实地表方块
-                                    } else if (aboveName.find("snow") != std::string::npos) {
-                                        g_mapColorsBack[arrX][arrZ] = mce::Color(0.95f, 0.98f, 1.0f, 1.0f);
-                                        blockName = "";
-                                    } else {
-                                        blockName = aboveName;
-                                        currentBlockPtr = &blockAbove;
-                                    }
-
-                                    if (MapRenderState::adjustHeightForShortBlocks && MapRenderState::IsShortBlock(blockName)) {
-                                        g_mapHeightsBack[arrX][arrZ] = (float)(topY - 1);
-                                    } else {
-                                        g_mapHeightsBack[arrX][arrZ] = (float)topY;
-                                    }
-
-                                    if (!blockName.empty()) {
-                                        // [原木横截面 vs 树皮侧面判定]
-                                        // 若方块为原木/菌柄且处于水平放置状态 (X或Z轴)，从上方俯视显露的是树皮侧面而非年轮横截面，
-                                        // 将 _log 映射为 _wood (或 _stem 映射为 _hyphae)，使地图渲染准确还原真实深色树皮外观
-                                        if (currentBlockPtr && IsPillarLogOrStem(blockName)) {
-                                            if (IsBlockPillarHorizontal(*currentBlockPtr)) {
-                                                blockName = GetHorizontalWoodName(blockName);
-                                            }
-                                        }
-                                        int cellX = targetX >> 2;
-                                        int cellZ = targetZ >> 2;
-                                        if (cellX != s_biomeCellX || cellZ != s_biomeCellZ) {
-                                            s_biomeCellX = cellX; s_biomeCellZ = cellZ;
-                                            try {
-                                                auto const& biome = region.getBiome(BlockPos(targetX, topY - 1, targetZ));
-                                                std::string newBiomeName = biome.mHash->getString();
-                                                if (s_biomeName != newBiomeName) {
-                                                    s_biomeName = newBiomeName;
-                                                    s_biomeNameHash = Fnv1aHash(s_biomeName);
-                                                    getBiomeTints(s_biomeName, s_cachedGrass, s_cachedFoliage, s_cachedWater);
-                                                }
-                                                g_scanBiomeEntries.push_back({cellX, cellZ, newBiomeName});
-                                            } catch (...) {
-                                                if (!s_biomeName.empty()) { s_biomeName = ""; s_biomeNameHash = 0; }
-                                            }
-                                        }
-
-                                        BiomeTintTriple curFallbackTriple{s_cachedGrass, s_cachedFoliage, s_cachedWater};
-
-                                        if (IsBiomeTintedBlock(blockName)) {
-                                            // [群系平滑过渡] 草地、植被与树叶平滑插值渲染
-                                            mce::Color bGrass, bFoliage, bWater;
-                                            GetBlendedBiomeTints(region, targetX, targetZ, topY - 1, curFallbackTriple, bGrass, bFoliage, bWater);
-                                            g_mapColorsBack[arrX][arrZ] = getBlockColor(blockName, bGrass, bFoliage, bWater);
+                                // 1. 检查 topY 位置的上层附着方块 (雪片、花朵、草丛、地毯、玻璃板等)
+                                if (topY < 320 && blockName.find("snow") == std::string::npos) {
+                                    try {
+                                        Block const& blockAbove = region.getBlock(BlockPos(targetX, topY, targetZ));
+                                        std::string aboveName = blockAbove.getTypeName();
+                                        if (blockAbove.isAir() ||
+                                            IsInvisibleOrTechnicalOverlay(aboveName) ||
+                                            (!MapRenderState::loadFlowers && BlockColorMap::IsFlowerBlock(aboveName)) ||
+                                            (!MapRenderState::displayStainedGlass && BlockColorMap::IsGlassOrStainedGlassBlock(aboveName))) {
+                                            // 忽略隐形方块或已关闭显示的花朵/染色玻璃
                                         } else {
-                                            // [性能] 非染色方块使用 s_globalColorCache 快速命中
-                                            static std::unordered_map<uint64_t, mce::Color> s_globalColorCache;
-                                            if (s_globalColorCache.size() > 65536) s_globalColorCache.clear();
+                                            int abvLight = BlockColorMap::GetIntrinsicBlockLight(aboveName);
+                                            if (abvLight > maxIntrinsicLight) maxIntrinsicLight = abvLight;
 
-                                            uint64_t blockHash = Fnv1aHash(blockName);
-                                            auto it = s_globalColorCache.find(blockHash);
-
-                                            if (it != s_globalColorCache.end()) {
-                                                g_mapColorsBack[arrX][arrZ] = it->second;
+                                            mce::Color aboveOvCol;
+                                            float aboveOvAlpha = 0.0f;
+                                            if (BlockColorMap::GetTranslucentOverlayColor(aboveName, aboveOvCol, aboveOvAlpha)) {
+                                                aboveOvCol.a = aboveOvAlpha;
+                                                overlays[overlayCount++] = { aboveOvCol };
+                                                lastOverlayName = aboveName;
                                             } else {
-                                                mce::Color calculatedColor = getBlockColor(blockName, s_cachedGrass, s_cachedFoliage, s_cachedWater);
-                                                s_globalColorCache[blockHash] = calculatedColor;
-                                                g_mapColorsBack[arrX][arrZ] = calculatedColor;
+                                                blockName = aboveName;
+                                                currentBlockPtr = &blockAbove;
                                             }
+                                        }
+                                    } catch (...) {}
+                                }
+
+                                // 2. 多层半透明方块叠加 (Overlay) 与水层深度穿透系统：
+                                // 当遇到半透明方块 (染色玻璃/冰/黏液块/蜂蜜块等) 或水体时，收集半透明层并继续向下寻找实心底板
+                                int floorY = (int)topY - 1;
+                                while (floorY > -64) {
+                                    int curIntrinsic = BlockColorMap::GetIntrinsicBlockLight(blockName);
+                                    if (curIntrinsic > maxIntrinsicLight) maxIntrinsicLight = curIntrinsic;
+
+                                    mce::Color ovCol;
+                                    float ovAlpha = 0.0f;
+
+                                    if ((currentBlockPtr && currentBlockPtr->isAir()) ||
+                                        IsInvisibleOrTechnicalOverlay(blockName) ||
+                                        (!MapRenderState::loadFlowers && BlockColorMap::IsFlowerBlock(blockName)) ||
+                                        (!MapRenderState::displayStainedGlass && BlockColorMap::IsGlassOrStainedGlassBlock(blockName))) {
+                                        floorY--;
+                                    } else if (currentBlockPtr && IsCaveWaterBlock(*currentBlockPtr)) {
+                                        waterDepth++;
+                                        floorY--;
+                                    } else if (BlockColorMap::GetTranslucentOverlayColor(blockName, ovCol, ovAlpha)) {
+                                        ovCol.a = ovAlpha;
+                                        if (blockName != lastOverlayName && overlayCount < 8) {
+                                            overlays[overlayCount++] = { ovCol };
+                                            lastOverlayName = blockName;
+                                        }
+                                        floorY--;
+                                    } else if (waterDepth > 0 && currentBlockPtr && IsCavePassableBlock(*currentBlockPtr)) {
+                                        floorY--;
+                                    } else if (overlayCount > 0 && currentBlockPtr && (
+                                               GetCaveMaterialType(*currentBlockPtr) == ChiyanMapMaterialType::Air ||
+                                               GetCaveMaterialType(*currentBlockPtr) == ChiyanMapMaterialType::Plant ||
+                                               GetCaveMaterialType(*currentBlockPtr) == ChiyanMapMaterialType::NonSolid ||
+                                               GetCaveMaterialType(*currentBlockPtr) == ChiyanMapMaterialType::StructureVoid ||
+                                               GetCaveMaterialType(*currentBlockPtr) == ChiyanMapMaterialType::Fire)) {
+                                        // 半透明玻璃下方的空气、矮草/藤蔓、火把/按钮/拉杆/绊线等非实心附着物继续向下穿透，同时保留下方的树冠、原木与地毯
+                                        floorY--;
+                                    } else {
+                                        break;
+                                    }
+                                    try {
+                                        currentBlockPtr = &region.getBlock(BlockPos(targetX, floorY, targetZ));
+                                        blockName = currentBlockPtr->getTypeName();
+                                    } catch (...) {
+                                        break;
+                                    }
+                                }
+
+                                // 更新用于地貌阴影计算的高度值
+                                if (waterDepth > 0) {
+                                    g_mapHeightsBack[arrX][arrZ] = (float)floorY;
+                                } else if (MapRenderState::adjustHeightForShortBlocks && MapRenderState::IsShortBlock(blockName)) {
+                                    g_mapHeightsBack[arrX][arrZ] = (float)floorY;
+                                } else {
+                                    g_mapHeightsBack[arrX][arrZ] = (float)(floorY + 1);
+                                }
+
+                                // 更新生物群系染色缓存 (4x4 网格)
+                                int cellX = targetX >> 2;
+                                int cellZ = targetZ >> 2;
+                                if (cellX != s_biomeCellX || cellZ != s_biomeCellZ) {
+                                    s_biomeCellX = cellX; s_biomeCellZ = cellZ;
+                                    try {
+                                        auto const& biome = region.getBiome(BlockPos(targetX, std::clamp(floorY, -64, 319), targetZ));
+                                        std::string newBiomeName = biome.mHash->getString();
+                                        if (s_biomeName != newBiomeName) {
+                                            s_biomeName = newBiomeName;
+                                            s_biomeNameHash = Fnv1aHash(s_biomeName);
+                                            getBiomeTints(s_biomeName, s_cachedGrass, s_cachedFoliage, s_cachedWater);
+                                        }
+                                        g_scanBiomeEntries.push_back({cellX, cellZ, newBiomeName});
+                                    } catch (...) {
+                                        if (!s_biomeName.empty()) { s_biomeName = ""; s_biomeNameHash = 0; }
+                                    }
+                                }
+
+                                // 3. 计算底层实心方块的基础颜色
+                                mce::Color finalColor(0.08f, 0.08f, 0.08f, 1.0f);
+                                bool curIsSwamp = IsSwampDualToneBiome(s_biomeName);
+                                BiomeTintTriple curFallbackTriple{s_cachedGrass, s_cachedFoliage, s_cachedWater, curIsSwamp};
+                                if (curIsSwamp) {
+                                    curFallbackTriple.grass = ComputeSwampGrassColor(targetX, targetZ, MapRenderState::biomeBlending);
+                                }
+                                mce::Color bGrass = curFallbackTriple.grass, bFoliage = s_cachedFoliage, bWater = s_cachedWater;
+                                bool blendedComputed = false;
+
+                                if (blockName.find("snow") != std::string::npos && MapRenderState::blockColorMode == 0) {
+                                    finalColor = mce::Color(0.95f, 0.98f, 1.0f, 1.0f);
+                                } else if (blockName.find("lava") != std::string::npos &&
+                                           blockName.find("cauldron") == std::string::npos &&
+                                           MapRenderState::blockColorMode == 0) {
+                                    finalColor = ApplyLavaPatternTint(targetX, targetZ);
+                                } else if (!blockName.empty()) {
+                                    if (currentBlockPtr && IsPillarLogOrStem(blockName)) {
+                                        if (IsBlockPillarHorizontal(*currentBlockPtr)) {
+                                            blockName = GetHorizontalWoodName(blockName);
+                                        }
+                                    }
+
+                                    if (IsBiomeTintedBlock(blockName)) {
+                                        GetBlendedBiomeTints(region, targetX, targetZ, (short)std::clamp(floorY, -64, 319), curFallbackTriple, bGrass, bFoliage, bWater);
+                                        blendedComputed = true;
+                                        finalColor = getBlockColor(blockName, bGrass, bFoliage, bWater);
+                                    } else {
+                                        static std::unordered_map<uint64_t, mce::Color> s_globalColorCache;
+                                        static int s_lastColorMode = -1;
+                                        static bool s_lastVanillaBiome = true;
+                                        if (s_lastColorMode != MapRenderState::blockColorMode ||
+                                            s_lastVanillaBiome != MapRenderState::biomeColorsInVanilla ||
+                                            s_globalColorCache.size() > 65536) {
+                                            s_globalColorCache.clear();
+                                            s_lastColorMode = MapRenderState::blockColorMode;
+                                            s_lastVanillaBiome = MapRenderState::biomeColorsInVanilla;
+                                        }
+
+                                        uint64_t blockHash = Fnv1aHash(blockName);
+                                        auto it = s_globalColorCache.find(blockHash);
+                                        if (it != s_globalColorCache.end()) {
+                                            finalColor = it->second;
+                                        } else {
+                                            mce::Color calculatedColor = getBlockColor(blockName, s_cachedGrass, s_cachedFoliage, s_cachedWater);
+                                            s_globalColorCache[blockHash] = calculatedColor;
+                                            finalColor = calculatedColor;
                                         }
                                     }
                                 }
-                                // 移植0.3.4水域渲染：水面方块向下穿透水层找海床，海床色+水色叠加
-                                // 原实现直接返回纯水色(waterCol)，无海床底色，深海区呈纯蓝缺乏层次。
-                                // 0.3.4: 检测 topY-1 为水体材质 → 向下64格找首个非穿透方块(海床) →
-                                //        海床原色 + 0.65 alpha 水色叠加，保留海床纹理同时覆盖水色。
-                                if (IsCaveWaterBlock(block)) {
-                                    int seaFloor = (int)topY - 1;
-                                    int surfaceY = seaFloor + 1;
-                                    while (seaFloor > -64 && (surfaceY - seaFloor) < 64) {
-                                        try {
-                                            Block const& seaFloorBlock = region.getBlock(BlockPos(targetX, seaFloor, targetZ));
-                                            if (!IsCavePassableBlock(seaFloorBlock)) break;
-                                        } catch (...) { break; }
-                                        seaFloor--;
-                                    }
-                                    g_mapHeightsBack[arrX][arrZ] = (float)seaFloor;
-                                    try {
-                                        Block const& seaFloorBlock = region.getBlock(BlockPos(targetX, seaFloor, targetZ));
-                                        std::string sfName = seaFloorBlock.getTypeName();
-                                        if (IsPillarLogOrStem(sfName) && IsBlockPillarHorizontal(seaFloorBlock)) {
-                                            sfName = GetHorizontalWoodName(sfName);
+
+                                // 4. 水体叠加 (支持水深透明度动态渐变 + 生物群系水色混合 + 原版模式固定水色)
+                                if (waterDepth > 0) {
+                                    mce::Color waterCol = s_cachedWater;
+                                    if (MapRenderState::blockColorMode == 1 && !MapRenderState::biomeColorsInVanilla) {
+                                        waterCol = mce::Color(64.0f / 255.0f, 64.0f / 255.0f, 1.0f, 1.0f);
+                                    } else if (MapRenderState::biomeBlending) {
+                                        if (!blendedComputed) {
+                                            GetBlendedBiomeTints(region, targetX, targetZ, (short)std::clamp(floorY, -64, 319), curFallbackTriple, bGrass, bFoliage, bWater);
+                                            blendedComputed = true;
                                         }
-                                        mce::Color seaFloorColor = getBlockColor(
-                                            sfName,
-                                            s_cachedGrass, s_cachedFoliage, s_cachedWater
-                                        );
-                                        g_mapColorsBack[arrX][arrZ] = BlendWaterOverFloor(seaFloorColor, s_cachedWater);
-                                    } catch (...) {
-                                        g_mapColorsBack[arrX][arrZ] = BlendWaterOverFloor(
-                                            mce::Color(0.08f, 0.08f, 0.08f, 1.0f), s_cachedWater
-                                        );
+                                        waterCol = bWater;
                                     }
+                                    float waterAlpha = std::clamp(0.48f + (float)waterDepth * 0.022f, 0.50f, 0.86f);
+                                    finalColor = mce::Color(
+                                        finalColor.r * (1.0f - waterAlpha) + waterCol.r * waterAlpha,
+                                        finalColor.g * (1.0f - waterAlpha) + waterCol.g * waterAlpha,
+                                        finalColor.b * (1.0f - waterAlpha) + waterCol.b * waterAlpha,
+                                        1.0f
+                                    );
+                                }
+
+                                // 5. 多层半透明方块由下至上逐层 Alpha 混合 (染色玻璃、冰、黏液块、蜂蜜块等)
+                                if (overlayCount > 0 && finalColor.a <= 0.01f) {
+                                    // 若底层一直到世界底部均为空气，使用柔和深色基底而非纯黑，确保半透明玻璃质感可见
+                                    finalColor = mce::Color(0.22f, 0.25f, 0.22f, 1.0f);
+                                }
+                                float remainingBgWeight = 1.0f;
+                                for (int ovIdx = overlayCount - 1; ovIdx >= 0; --ovIdx) {
+                                    const mce::Color& ov = overlays[ovIdx].color;
+                                    float a = std::clamp(ov.a, 0.0f, 0.45f);
+                                    // 多层半透明块叠加时限制累积不透明度上限 (最高不超过 52%，始终保留至少 48% 底层地形细节)
+                                    if (remainingBgWeight * (1.0f - a) < 0.48f) {
+                                        a = std::max(0.0f, 1.0f - (0.48f / std::max(remainingBgWeight, 0.01f)));
+                                    }
+                                    remainingBgWeight *= (1.0f - a);
+                                    finalColor.r = finalColor.r * (1.0f - a) + ov.r * a;
+                                    finalColor.g = finalColor.g * (1.0f - a) + ov.g * a;
+                                    finalColor.b = finalColor.b * (1.0f - a) + ov.b * a;
+                                    finalColor.a = 1.0f;
+                                }
+
+                                g_mapColorsBack[arrX][arrZ] = finalColor;
+
+                                // 6. 采样方块光照与天空光照 (供大地图/小地图光照与昼夜系统使用)
+                                int floorIntrinsic = BlockColorMap::GetIntrinsicBlockLight(blockName);
+                                if (floorIntrinsic > maxIntrinsicLight) maxIntrinsicLight = floorIntrinsic;
+                                uint8_t lightFloor = SafeGetPackedLight(region, targetX, std::clamp(floorY + 1, -64, 319), targetZ, maxIntrinsicLight, true);
+                                if (waterDepth > 0 || overlayCount > 0) {
+                                    uint8_t lightTop = SafeGetPackedLight(region, targetX, std::clamp(highestLightSampleY, -64, 319), targetZ, maxIntrinsicLight, true);
+                                    int skyMax = std::max((lightFloor >> 4) & 0x0F, (lightTop >> 4) & 0x0F);
+                                    int blkMax = std::max(lightFloor & 0x0F, lightTop & 0x0F);
+                                    g_mapLightsBack[arrX][arrZ] = (uint8_t)((skyMax << 4) | blkMax);
+                                } else {
+                                    g_mapLightsBack[arrX][arrZ] = lightFloor;
                                 }
                             } else {
                                 // topY <= -64 或 -32000 (区块未就绪/加载中):
@@ -4154,6 +4578,7 @@ LL_TYPE_INSTANCE_HOOK(
                         std::lock_guard<std::mutex> lock(g_mapDataMutex);
                         std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
                         std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                        std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                         g_lastRenderX = g_currentScanX;
                         g_lastRenderZ = g_currentScanZ;
                         g_mapDataUpdated.store(true);
@@ -4166,6 +4591,7 @@ LL_TYPE_INSTANCE_HOOK(
                                 std::lock_guard<std::mutex> lock(g_mapDataMutex);
                                 std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
                                 std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                                std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                                 g_lastRenderX = g_currentScanX;
                                 g_lastRenderZ = g_currentScanZ;
                                 g_mapDataUpdated.store(true);
@@ -4216,6 +4642,7 @@ LL_TYPE_INSTANCE_HOOK(
                                         std::lock_guard<std::mutex> lock(g_mapDataMutex);
                                         std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
                                         std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                                        std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
                                         g_lastRenderX = g_currentScanX;
                                         g_lastRenderZ = g_currentScanZ;
                                         g_mapDataUpdated.store(true);

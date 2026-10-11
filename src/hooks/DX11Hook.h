@@ -1121,10 +1121,11 @@ namespace DX11Hook {
     }
 
     inline void BakingWorkerFunc() {
-        // [性能] 使用 static 局部变量避免栈溢出 (三块缓冲合计约 6MB, 远超默认 1MB 栈大小)
+        // [性能] 使用 static 局部变量避免栈溢出 (缓冲合计约 6.3MB, 远超默认 1MB 栈大小)
         // 仅有一个持久化 worker 线程, 不会并发访问, static 安全。
         static mce::Color localColors[MAP_DATA_SIZE][MAP_DATA_SIZE];
         static float localHeights[MAP_DATA_SIZE][MAP_DATA_SIZE];
+        static uint8_t localLights[MAP_DATA_SIZE][MAP_DATA_SIZE];
         static uint8_t bakedData[MAP_DATA_SIZE * MAP_DATA_SIZE * 4];
 
         while (true) {
@@ -1145,9 +1146,14 @@ namespace DX11Hook {
                 std::lock_guard<std::mutex> lock(g_mapDataMutex);
                 std::memcpy(localColors, g_mapColors, sizeof(localColors));
                 std::memcpy(localHeights, g_mapHeights, sizeof(localHeights));
+                std::memcpy(localLights, g_mapLights, sizeof(localLights));
                 centerX = static_cast<float>(g_lastRenderX);
                 centerZ = static_cast<float>(g_lastRenderZ);
             }
+
+            bool isCave = (MapRenderState::currentDimensionId == 1 || MapRenderState::g_caveModeActive);
+            int curDim = MapRenderState::currentDimensionId;
+            bool enableLighting = MapRenderState::mapLighting;
 
             for (int x = 0; x < MAP_DATA_SIZE; x++) {
                 for (int z = 0; z < MAP_DATA_SIZE; z++) {
@@ -1165,11 +1171,17 @@ namespace DX11Hook {
                             currentY, northY, westY, northWestY,
                             MapRenderState::terrainSlopes,
                             MapRenderState::terrainDepth,
-                            (MapRenderState::currentDimensionId == 1 || MapRenderState::g_caveModeActive)
+                            isCave,
+                            localLights[x][z]
                         );
-                        bakedData[index]     = (uint8_t)(std::clamp(col.r * shade, 0.0f, 1.0f) * 255.0f);
-                        bakedData[index + 1] = (uint8_t)(std::clamp(col.g * shade, 0.0f, 1.0f) * 255.0f);
-                        bakedData[index + 2] = (uint8_t)(std::clamp(col.b * shade, 0.0f, 1.0f) * 255.0f);
+                        float fr = std::clamp(col.r * shade, 0.0f, 1.0f);
+                        float fg = std::clamp(col.g * shade, 0.0f, 1.0f);
+                        float fb = std::clamp(col.b * shade, 0.0f, 1.0f);
+                        MapRenderState::ApplyMapLighting(fr, fg, fb, localLights[x][z], isCave, curDim, enableLighting, false);
+
+                        bakedData[index]     = (uint8_t)(std::clamp(fr, 0.0f, 1.0f) * 255.0f);
+                        bakedData[index + 1] = (uint8_t)(std::clamp(fg, 0.0f, 1.0f) * 255.0f);
+                        bakedData[index + 2] = (uint8_t)(std::clamp(fb, 0.0f, 1.0f) * 255.0f);
                         bakedData[index + 3] = (uint8_t)(col.a * 255.0f);
                     } else {
                         bakedData[index] = bakedData[index+1] = bakedData[index+2] = bakedData[index+3] = 0;
@@ -1194,6 +1206,15 @@ namespace DX11Hook {
         // [关闭期安全] 烘焙线程在 shutdown() 50ms 等待窗口内可能仍在运行；若退出阶段已开始，
         // 不再启动新烘焙任务（防止 Detached 线程在进程静态析构阶段访问全局静态缓冲）。
         if (MapRenderState::g_isShuttingDown.load()) return;
+
+        static int s_lastMinimapLightStep = -1;
+        static bool s_lastMinimapLighting = true;
+        int curLightStep = MapRenderState::GetCurrentLightStep(MapRenderState::currentDimensionId);
+        if (curLightStep != s_lastMinimapLightStep || s_lastMinimapLighting != MapRenderState::mapLighting) {
+            s_lastMinimapLightStep = curLightStep;
+            s_lastMinimapLighting = MapRenderState::mapLighting;
+            g_mapDataUpdated.store(true);
+        }
 
         if (g_mapDataUpdated.load() && !g_textureBaking.load()) {
             g_textureBaking.store(true);
@@ -3026,6 +3047,68 @@ namespace DX11Hook {
                 LanguageManager::SaveConfig();
             }
 
+            const char* blockColorModes[] = {
+                LanguageManager::GetText("BLOCK_COLORS_ACCURATE"),
+                LanguageManager::GetText("BLOCK_COLORS_VANILLA")
+            };
+            int curBlockColorMode = std::clamp(MapRenderState::blockColorMode, 0, 1);
+            {
+                float btnSize = ImGui::GetFrameHeight();
+                float totalAvail = ImGui::GetContentRegionAvail().x;
+                float labelW = ImGui::CalcTextSize(LanguageManager::GetText("BLOCK_COLORS")).x;
+                float comboW = std::clamp(totalAvail - labelW - btnSize - 16.0f * curScale, 120.0f * curScale, 190.0f * curScale);
+
+                ImGui::SetNextItemWidth(comboW);
+                if (ImGui::Combo("##BlockColorsCombo", &curBlockColorMode, blockColorModes, 2)) {
+                    MapRenderState::blockColorMode = curBlockColorMode;
+                    MapRenderState::forceRescan.store(true);
+                    LanguageManager::SaveConfig();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("\u21BA##BlockColorsReset", ImVec2(btnSize, btnSize))) {
+                    MapRenderState::blockColorMode = 0;
+                    MapRenderState::forceRescan.store(true);
+                    LanguageManager::SaveConfig();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s (%s)", LanguageManager::GetText("RESET"), LanguageManager::GetText("BLOCK_COLORS_ACCURATE"));
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", LanguageManager::GetText("BLOCK_COLORS"));
+            }
+
+            ImGui::BeginDisabled(MapRenderState::blockColorMode != 1);
+            if (ImGui::Checkbox(LanguageManager::GetText("BIOME_COLORS_IN_VANILLA"), &MapRenderState::biomeColorsInVanilla)) {
+                MapRenderState::forceRescan.store(true);
+                LanguageManager::SaveConfig();
+            }
+            ImGui::EndDisabled();
+
+            if (ImGui::Checkbox(LanguageManager::GetText("MAP_LIGHTING"), &MapRenderState::mapLighting)) {
+                MapCacheManager::MarkAllLoadedRegionsDirty();
+                g_mapDataUpdated.store(true);
+                LanguageManager::SaveConfig();
+            }
+
+            if (ImGui::Checkbox(LanguageManager::GetText("DISPLAY_STAINED_GLASS"), &MapRenderState::displayStainedGlass)) {
+                MapRenderState::forceRescan.store(true);
+                LanguageManager::SaveConfig();
+            }
+
+            if (ImGui::Checkbox(LanguageManager::GetText("LOAD_FLOWERS"), &MapRenderState::loadFlowers)) {
+                MapRenderState::forceRescan.store(true);
+                LanguageManager::SaveConfig();
+            }
+
+            if (ImGui::Checkbox(LanguageManager::GetText("BIOME_BLENDING"), &MapRenderState::biomeBlending)) {
+                MapRenderState::forceRescan.store(true);
+                LanguageManager::SaveConfig();
+            }
+
+            if (ImGui::Checkbox(LanguageManager::GetText("OPENING_ANIMATION"), &MapRenderState::openingAnimation)) {
+                LanguageManager::SaveConfig();
+            }
+
             ImGui::Spacing();
         }
         ImGui::End();
@@ -4020,6 +4103,16 @@ namespace DX11Hook {
             MapRenderState::clearGPUCache.store(false);
         }
 
+        // [昼夜与光照动态刷新] 当天空光照步进等级或地图光照开关变化时，标记已加载区域重新烘焙光照
+        static int s_lastBigMapLightStep = -1;
+        static bool s_lastBigMapLighting = true;
+        int curBigMapLightStep = MapRenderState::GetCurrentLightStep(viewDim);
+        if (curBigMapLightStep != s_lastBigMapLightStep || s_lastBigMapLighting != MapRenderState::mapLighting) {
+            s_lastBigMapLightStep = curBigMapLightStep;
+            s_lastBigMapLighting = MapRenderState::mapLighting;
+            MapCacheManager::MarkAllLoadedRegionsDirty();
+        }
+
         // [主世界地表与洞穴切换] 当查看主世界(viewDim == 0)时，由 bigMapOverworldCave 决定显示地表还是洞穴地图；
         // 下界(viewDim == 1)固定为洞穴模式(isCave = true)；末地(viewDim == 2)为常规地表(isCave = false)。
         bool isCave = (viewDim == 1) || (viewDim == 0 && MapRenderState::bigMapOverworldCave);
@@ -4093,17 +4186,40 @@ namespace DX11Hook {
 
         float cx = io.DisplaySize.x * 0.5f;
         float cy = io.DisplaySize.y * 0.5f;
-        
+
+        // 实时记录当前大地图真实视野范围，供 PNG 导出 (Force Full Map: 关) 使用
+        float baseMinWx = g_smoothPX - (cx + MapRenderState::bigMapOffsetX) / MapRenderState::bigMapZoom;
+        float baseMaxWx = g_smoothPX + (cx - MapRenderState::bigMapOffsetX) / MapRenderState::bigMapZoom;
+        float baseMinWz = g_smoothPZ - (cy + MapRenderState::bigMapOffsetZ) / MapRenderState::bigMapZoom;
+        float baseMaxWz = g_smoothPZ + (cy - MapRenderState::bigMapOffsetZ) / MapRenderState::bigMapZoom;
+        MapRenderState::exportViewMinX = (int)std::floor(baseMinWx);
+        MapRenderState::exportViewMaxX = (int)std::ceil(baseMaxWx);
+        MapRenderState::exportViewMinZ = (int)std::floor(baseMinWz);
+        MapRenderState::exportViewMaxZ = (int)std::ceil(baseMaxWz);
+
+        // [打开地图过渡动画] 开启时，打开全屏大地图前 0.22 秒执行三次缓出平滑缩放过渡动画
+        float savedBigMapZoom = MapRenderState::bigMapZoom;
+        float savedBigMapOffsetX = MapRenderState::bigMapOffsetX;
+        float savedBigMapOffsetZ = MapRenderState::bigMapOffsetZ;
+        if (MapRenderState::openingAnimation) {
+            auto nowAnim = std::chrono::steady_clock::now();
+            float elapsedSec = std::chrono::duration<float>(nowAnim - MapRenderState::g_bigMapOpenTime).count();
+            constexpr float kAnimDuration = 0.22f;
+            if (elapsedSec >= 0.0f && elapsedSec < kAnimDuration) {
+                float t = elapsedSec / kAnimDuration;
+                float invT = 1.0f - t;
+                float easeOutCubic = 1.0f - invT * invT * invT;
+                float animScale = 0.72f + 0.28f * easeOutCubic;
+                MapRenderState::bigMapZoom = savedBigMapZoom * animScale;
+                MapRenderState::bigMapOffsetX = savedBigMapOffsetX * animScale;
+                MapRenderState::bigMapOffsetZ = savedBigMapOffsetZ * animScale;
+            }
+        }
+
         float minWx = g_smoothPX - (cx + MapRenderState::bigMapOffsetX) / MapRenderState::bigMapZoom;
         float maxWx = g_smoothPX + (cx - MapRenderState::bigMapOffsetX) / MapRenderState::bigMapZoom;
         float minWz = g_smoothPZ - (cy + MapRenderState::bigMapOffsetZ) / MapRenderState::bigMapZoom;
         float maxWz = g_smoothPZ + (cy - MapRenderState::bigMapOffsetZ) / MapRenderState::bigMapZoom;
-
-        // 实时记录当前大地图视野范围，供 PNG 导出 (Force Full Map: 关) 使用
-        MapRenderState::exportViewMinX = (int)std::floor(minWx);
-        MapRenderState::exportViewMaxX = (int)std::ceil(maxWx);
-        MapRenderState::exportViewMinZ = (int)std::floor(minWz);
-        MapRenderState::exportViewMaxZ = (int)std::ceil(maxWz);
 
         int startRx = (int)std::floor(minWx / 256.0f);
         int endRx   = (int)std::floor(maxWx / 256.0f);
@@ -4164,7 +4280,7 @@ namespace DX11Hook {
             // 解决大地图区块持久化延迟导致的“大地图刷新滞后、破坏/放置方块数分钟才显示”的问题
             // 达到与小地图完全一致的毫秒级实时刷新响应，且仅增 1 个 DrawCall，0 性能开销，绝对不掉帧
             // 注意：仅当大地图当前查看层与实时扫描层一致时才进行覆叠（例如查看主世界洞穴时，玩家也必须在地下洞穴模式中）
-            bool liveIsCave = (currentDim == 1) || (currentDim == 0 && MapRenderState::g_caveModeActive);
+            bool liveIsCave = MapRenderState::g_caveModeActive;
             if (viewDim == currentDim && g_mapTextureView && (isCave == liveIsCave)) {
                 float texMinX = g_textureCenterX - 256.0f;
                 float texMinZ = g_textureCenterZ - 256.0f;
@@ -4548,7 +4664,7 @@ namespace DX11Hook {
         float mFontSize = ImGui::GetFontSize();
         
         char infoBuf[256];
-        snprintf(infoBuf, sizeof(infoBuf), LanguageManager::GetText("BIGMAP_TITLE"), MapRenderState::bigMapZoom);
+        snprintf(infoBuf, sizeof(infoBuf), LanguageManager::GetText("BIGMAP_TITLE"), savedBigMapZoom);
         draw_list->AddText(mFont, mFontSize, ImVec2(20.0f * curScale, 20.0f * curScale), IM_COL32(255, 200, 50, 255), infoBuf, NULL, 0.0f, NULL);
         draw_list->AddText(mFont, mFontSize, ImVec2(20.0f * curScale, 20.0f * curScale + mFontSize + 5.0f * curScale), IM_COL32(200, 200, 200, 255), LanguageManager::GetText("BIGMAP_HELP"), NULL, 0.0f, NULL);
 
@@ -4616,6 +4732,11 @@ namespace DX11Hook {
                 }
             }
         }
+
+        // 还原打开地图过渡动画前的真实缩放与偏移状态，确保按钮操作与配置保存不受动画缩放影响
+        MapRenderState::bigMapZoom = savedBigMapZoom;
+        MapRenderState::bigMapOffsetX = savedBigMapOffsetX;
+        MapRenderState::bigMapOffsetZ = savedBigMapOffsetZ;
         
         // ==========================================
         // [维度快捷切换按钮] 供玩家快速切换浏览主世界/下界/末地大地图
@@ -7730,25 +7851,129 @@ namespace DX11Hook {
         float curScale = MapRenderState::globalUIScale;
         if (curScale < 0.1f) curScale = 1.0f;
 
-        ImGui::SetNextWindowSizeConstraints(ImVec2(460.0f * curScale, 100.0f * curScale), ImVec2(460.0f * curScale, 1000.0f * curScale));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f * curScale, 100.0f * curScale), ImVec2(480.0f * curScale, 1000.0f * curScale));
         ImGui::SetNextWindowPos(ImVec2(50.0f * curScale, 50.0f * curScale), ImGuiCond_FirstUseEver);
 
         ImGuiWindowFlags winFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize;
         if (ImGui::Begin(LanguageManager::GetText("CAVE_SETTINGS"), &MapRenderState::showCaveSettings, winFlags)) {
 
-            // === Cave Mode Type (下拉选择) ===
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_MODE_TYPE"));
-            ImGui::SameLine(200.0f * curScale);
             const char* caveTypeNames[] = {
                 LanguageManager::GetText("CAVE_MODE_OFF"),
-                LanguageManager::GetText("CAVE_MODE_LAYERED")
+                LanguageManager::GetText("CAVE_MODE_LAYERED"),
+                LanguageManager::GetText("CAVE_MODE_FULL")
             };
-            ImGui::SetNextItemWidth(220.0f * curScale);
-            if (ImGui::Combo("##CaveModeType", &MapRenderState::g_caveModeType, caveTypeNames, 2)) {
+
+            // === Cave Mode Type (当前维度洞穴模式类型: Off / Layered / Full) ===
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_MODE_TYPE"));
+            ImGui::SameLine(210.0f * curScale);
+            int curCaveType = std::clamp(MapRenderState::g_caveModeType, 0, 2);
+            ImGui::SetNextItemWidth(230.0f * curScale);
+            if (ImGui::Combo("##CaveModeType", &curCaveType, caveTypeNames, 3)) {
+                MapRenderState::SetDimensionCaveModeType(MapRenderState::currentDimensionId, curCaveType);
                 LanguageManager::SaveConfig();
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 440.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
             ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), "%s", LanguageManager::GetText("CAVE_MODE_DESC"));
+            ImGui::PopTextWrapPos();
+
+            ImGui::Spacing();
+
+            // === Default Cave Mode Type (各维度默认洞穴类型: Off / Layered / Full) ===
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_DEFAULT_TYPE"));
+            ImGui::SameLine(210.0f * curScale);
+            int defCaveType = std::clamp(MapRenderState::g_defaultCaveModeType, 0, 2);
+            ImGui::SetNextItemWidth(230.0f * curScale);
+            if (ImGui::Combo("##DefaultCaveModeType", &defCaveType, caveTypeNames, 3)) {
+                int oldDefault = MapRenderState::g_defaultCaveModeType;
+                MapRenderState::g_defaultCaveModeType = defCaveType;
+                int curDim = MapRenderState::currentDimensionId;
+                if (curDim >= 0 && curDim < 3 &&
+                    (MapRenderState::g_dimCaveModeTypes[curDim] < 0 || MapRenderState::g_dimCaveModeTypes[curDim] == oldDefault)) {
+                    MapRenderState::g_dimCaveModeTypes[curDim] = -1;
+                    MapRenderState::SyncCaveModeTypeForDimension(curDim);
+                }
+                LanguageManager::SaveConfig();
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), "%s", LanguageManager::GetText("CAVE_DEFAULT_TYPE_DESC"));
+            ImGui::PopTextWrapPos();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // === Cave Mode Allowed Dimensions (洞穴模式维度白名单) ===
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_ALLOWED_DIMS"));
+            ImGui::SameLine(210.0f * curScale);
+            if (ImGui::Checkbox(LanguageManager::GetText("WP_TAB_OVERWORLD"), &MapRenderState::g_caveAllowedOverworld)) {
+                LanguageManager::SaveConfig();
+            }
+            ImGui::SameLine();
+            if (ImGui::Checkbox(LanguageManager::GetText("WP_TAB_NETHER"), &MapRenderState::g_caveAllowedNether)) {
+                LanguageManager::SaveConfig();
+            }
+            ImGui::SameLine();
+            if (ImGui::Checkbox(LanguageManager::GetText("WP_TAB_END"), &MapRenderState::g_caveAllowedEnd)) {
+                LanguageManager::SaveConfig();
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_ALLOWED_DIMS_DESC"));
+            ImGui::PopTextWrapPos();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // === Auto Cave Mode Roof Size (自动洞穴天花板检测尺寸: Smart / OFF / 1x1 / 3x3 / 5x5 / 7x7 / 9x9) ===
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_AUTO_ROOF_SIZE"));
+            ImGui::SameLine(210.0f * curScale);
+            const char* autoRoofOptions[] = {
+                LanguageManager::GetText("CAVE_AUTO_ROOF_SMART"),
+                LanguageManager::GetText("CAVE_AUTO_ROOF_OFF"),
+                "1x1",
+                "3x3",
+                "5x5",
+                "7x7",
+                "9x9"
+            };
+            int autoRoofIdx = std::clamp(MapRenderState::g_autoCaveMode + 1, 0, 6);
+            ImGui::SetNextItemWidth(230.0f * curScale);
+            if (ImGui::Combo("##CaveAutoRoofSize", &autoRoofIdx, autoRoofOptions, 7)) {
+                MapRenderState::g_autoCaveMode = autoRoofIdx - 1;
+                LanguageManager::SaveConfig();
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_AUTO_ROOF_DESC"));
+            ImGui::PopTextWrapPos();
+
+            ImGui::Spacing();
+
+            // === Cave Mode Toggle Timer (防闪烁切换冷却计时器 ms) ===
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOGGLE_TIMER"));
+            ImGui::SameLine(210.0f * curScale);
+            int toggleTimer = MapRenderState::g_caveModeToggleTimer;
+            ImGui::SetNextItemWidth(140.0f * curScale);
+            if (ImGui::SliderInt("##CaveToggleTimer", &toggleTimer, 0, 5000, "%d ms")) {
+                MapRenderState::g_caveModeToggleTimer = toggleTimer;
+                LanguageManager::SaveConfig();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(65.0f * curScale);
+            if (ImGui::InputInt("##CaveToggleTimerIn", &toggleTimer, 100, 500, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                toggleTimer = std::clamp(toggleTimer, 0, 5000);
+                MapRenderState::g_caveModeToggleTimer = toggleTimer;
+                LanguageManager::SaveConfig();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("\u21BA##ResetToggleTimer", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
+                MapRenderState::g_caveModeToggleTimer = 1000;
+                LanguageManager::SaveConfig();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s (1000 ms)", LanguageManager::GetText("RESET"));
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOGGLE_TIMER_DESC"));
             ImGui::PopTextWrapPos();
 
             ImGui::Spacing();
@@ -7757,13 +7982,13 @@ namespace DX11Hook {
 
             // === Cave Mode Top Y (auto / 手动) ===
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOP_Y_MODE"));
-            ImGui::SameLine(200.0f * curScale);
+            ImGui::SameLine(210.0f * curScale);
             const char* topYModes[] = {
                 LanguageManager::GetText("CAVE_TOP_Y_AUTO"),
                 LanguageManager::GetText("CAVE_TOP_Y_MANUAL")
             };
             int topYModeIdx = MapRenderState::g_caveTopYAuto ? 0 : 1;
-            ImGui::SetNextItemWidth(220.0f * curScale);
+            ImGui::SetNextItemWidth(230.0f * curScale);
             if (ImGui::Combo("##CaveTopYMode", &topYModeIdx, topYModes, 2)) {
                 MapRenderState::g_caveTopYAuto = (topYModeIdx == 0);
                 LanguageManager::SaveConfig();
@@ -7773,7 +7998,7 @@ namespace DX11Hook {
 
             // === Top Y: 滑块 + 输入框(带+-微调) + 重置 ===
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOP_Y"));
-            ImGui::SameLine(200.0f * curScale);
+            ImGui::SameLine(210.0f * curScale);
             int topY = MapRenderState::g_caveTopY;
             ImGui::SetNextItemWidth(140.0f * curScale);
             if (ImGui::SliderInt("##CaveTopY", &topY, -64, 320, "%d")) {
@@ -7781,7 +8006,7 @@ namespace DX11Hook {
                 LanguageManager::SaveConfig();
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(55.0f * curScale);
+            ImGui::SetNextItemWidth(65.0f * curScale);
             if (ImGui::InputInt("##CaveTopYIn", &topY, 1, 5, ImGuiInputTextFlags_EnterReturnsTrue)) {
                 topY = (topY < -64) ? -64 : (topY > 320) ? 320 : topY;
                 MapRenderState::g_caveTopY = topY;
@@ -7795,7 +8020,7 @@ namespace DX11Hook {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s (64)", LanguageManager::GetText("RESET"));
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 440.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOP_Y_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -7805,7 +8030,7 @@ namespace DX11Hook {
 
             // === Cave Depth: 滑块 + 输入框(带+-微调) + 重置 ===
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_DEPTH"));
-            ImGui::SameLine(200.0f * curScale);
+            ImGui::SameLine(210.0f * curScale);
             int depth = MapRenderState::g_caveDepth;
             ImGui::SetNextItemWidth(140.0f * curScale);
             if (ImGui::SliderInt("##CaveDepth", &depth, 1, 64, "%d")) {
@@ -7813,7 +8038,7 @@ namespace DX11Hook {
                 LanguageManager::SaveConfig();
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(55.0f * curScale);
+            ImGui::SetNextItemWidth(65.0f * curScale);
             if (ImGui::InputInt("##CaveDepthIn", &depth, 1, 5, ImGuiInputTextFlags_EnterReturnsTrue)) {
                 depth = (depth < 1) ? 1 : (depth > 64) ? 64 : depth;
                 MapRenderState::g_caveDepth = depth;
@@ -7827,7 +8052,7 @@ namespace DX11Hook {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s (30)", LanguageManager::GetText("RESET"));
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 440.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_DEPTH_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -7839,7 +8064,7 @@ namespace DX11Hook {
             if (ImGui::Checkbox(LanguageManager::GetText("CAVE_LEGIBLE"), &MapRenderState::g_legibleCaveMaps)) {
                 LanguageManager::SaveConfig();
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 440.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_LEGIBLE_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -8436,6 +8661,18 @@ namespace DX11Hook {
             ImGui::Separator();
             ImGui::Spacing();
 
+            // 3.5 夜间模式导出 (Nighttime) - 模拟夜间光照与光源发光效果导出 PNG
+            if (ImGui::Checkbox(LanguageManager::GetText("EXPORT_NIGHTTIME"), &MapRenderState::exportNighttime)) {
+                LanguageManager::SaveConfig();
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 480.0f * curScale);
+            ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "%s", LanguageManager::GetText("EXPORT_NIGHTTIME_DESC"));
+            ImGui::PopTextWrapPos();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
             // 4. 单张图像最大尺寸 (Max Single Image Size: 0=不限制, 1..90 区域) - 持久保存
             ImGui::BeginDisabled(MapRenderState::exportMultipleImages);
             char maxSizeValBuf[64];
@@ -8823,6 +9060,7 @@ namespace DX11Hook {
                 static bool s_wasBigMapActive = false;
                 if (MapRenderState::showBigMap) {
                     if (!s_wasBigMapActive) {
+                        MapRenderState::g_bigMapOpenTime = std::chrono::steady_clock::now();
                         if (MapRenderState::bigMapViewDimensionId < 0) {
                             MapRenderState::bigMapOverworldCave = (MapRenderState::currentDimensionId == 0 && MapRenderState::g_caveModeActive);
                         }

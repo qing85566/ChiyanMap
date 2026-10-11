@@ -23,6 +23,7 @@ namespace MapCacheManager {
     struct RegionData {
         uint8_t colors[REGION_SIZE * REGION_SIZE * 4] = {0};
         int16_t heights[REGION_SIZE * REGION_SIZE];              // 地表Y缓存, 供传送时查询
+        uint8_t lightLevels[REGION_SIZE * REGION_SIZE];          // 打包光照缓存: (skyLight << 4) | blockLight
         std::vector<std::string> biomeTable;                    // 生物群系名称表 (去重)
         uint8_t biomeCells[BIOME_CELLS_PER_REGION * BIOME_CELLS_PER_REGION] = {0}; // 生物群系索引
         bool dirty = false;
@@ -32,6 +33,7 @@ namespace MapCacheManager {
 
         RegionData() {
             std::fill(std::begin(heights), std::end(heights), HEIGHT_UNKNOWN);
+            std::fill(std::begin(lightLevels), std::end(lightLevels), (uint8_t)0xF0);
         }
     };
 
@@ -108,11 +110,13 @@ namespace MapCacheManager {
 
     void Init();
     void Shutdown();
-    void UpdateFromScan(int targetDim, int centerX, int centerZ, mce::Color scanColors[MAP_DATA_SIZE][MAP_DATA_SIZE], float scanHeights[MAP_DATA_SIZE][MAP_DATA_SIZE], bool isCave = false);
+    void UpdateFromScan(int targetDim, int centerX, int centerZ, mce::Color scanColors[MAP_DATA_SIZE][MAP_DATA_SIZE], float scanHeights[MAP_DATA_SIZE][MAP_DATA_SIZE], bool isCave = false, uint8_t (*scanLights)[MAP_DATA_SIZE] = nullptr);
     bool FetchRegionTextureData(uint64_t hash, uint8_t* outBuffer, bool forceCopy = false);
 
     // [新增] 当 GPU 繁忙时，退回纹理更新请求
     void MarkTextureDirty(uint64_t hash);
+    // [新增] 当光影/昼夜参数变化时，标记所有已加载区域重新烘焙纹理
+    void MarkAllLoadedRegionsDirty();
 
     // [新增] 跨界热重载引擎
     void SwitchWorld(const std::string& worldId, int dimensionId, const std::string& targetMapId = "");
@@ -147,12 +151,14 @@ namespace MapCacheManager {
     // isCave: 是否为洞穴/下界模式
     // onlyIfMissing: 若为 true，仅填充未探索/透明像素 (alpha <= 0.01f)，保留已有数据
     // outTextureData: 可选，直接预填充 DX11 纹理字节缓冲 (RGBA8)，实现 0 延迟秒开
+    // outLights: 可选，同步预填充光照网格
     void PrefillMapGrid(int centerX, int centerZ, 
                         mce::Color outColors[MAP_DATA_SIZE][MAP_DATA_SIZE], 
                         float outHeights[MAP_DATA_SIZE][MAP_DATA_SIZE], 
                         bool isCave, 
                         bool onlyIfMissing = false,
-                        uint8_t* outTextureData = nullptr);
+                        uint8_t* outTextureData = nullptr,
+                        uint8_t (*outLights)[MAP_DATA_SIZE] = nullptr);
 
     // [PNG导出] 实时预览计算结果 (供 ImGui 面板动态展示无损放大倍率与输出尺寸)
     struct ExportPreviewInfo {
