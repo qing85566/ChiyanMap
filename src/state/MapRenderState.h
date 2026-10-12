@@ -9,6 +9,8 @@
 #include <cmath>
 #include <mc/deps/core/math/Color.h>
 
+inline std::atomic<bool> g_mapDataUpdated{true};
+
 namespace MapRenderState {
     inline std::atomic<int> frameCallCount{0};
     inline int lastFrameTotalCalls{1};
@@ -21,6 +23,19 @@ namespace MapRenderState {
     inline bool bigMapShowDisabledWaypoints = true; // 全屏大地图显示已禁用的路径点 (半透明，持久化)
     inline bool showChunkGrid = false;     // 区块网格显示开关 (小地图 + 大地图共用，图标按钮切换，持久化)
     inline bool bigMapShowHoverBox = true; // 全屏大地图鼠标悬停区块选框显示开关 (持久化)
+
+    // [P1] 内嵌折叠路径点抽屉与镜头对齐状态 (持久化)
+    inline bool bigMapWaypointDrawerOpen = false;  // 大地图路径点抽屉是否展开 (持久化)
+    inline bool bigMapCloseDrawerAfterHop = false; // 镜头跳转后是否自动关闭抽屉 (对应 Xaero 的 CLOSE_WAYPOINTS_AFTER_HOP，持久化)
+
+    // [P1] 镜头平滑跳转与平移对齐状态 (Camera Hopping / Pan Animation)
+    inline bool cameraHopActive = false;
+    inline float cameraHopStartOffsetX = 0.0f;
+    inline float cameraHopStartOffsetZ = 0.0f;
+    inline float cameraHopTargetOffsetX = 0.0f;
+    inline float cameraHopTargetOffsetZ = 0.0f;
+    inline std::chrono::steady_clock::time_point cameraHopStartTime;
+    inline float cameraHopDuration = 0.35f;
 
     // [光标位置记忆与恢复] 记录离开全屏大地图时的光标屏幕坐标，在切回大地图时精准恢复，确保光标静止不动
     struct SavedCursorPos { long x = -1; long y = -1; };
@@ -296,6 +311,7 @@ namespace MapRenderState {
         Hotkey toggleSeedMap     = { 0x4B, 0 }; // K: 切换种子全知地图
         Hotkey enlargeMinimap    = { 0x58, 0 }; // X: 放大小地图 (默认 X 键，避免与原版 Z 键状态效果界面冲突)
         Hotkey centerCamera      = { 0x20, 0 }; // Space: 大地图视角居中对齐玩家
+        Hotkey selectExportArea  = { 0x10, 0 }; // Shift: 框选导出高清 PNG (默认 Shift 键)
 
         // 系统预设默认值 (单一来源，供"单行重置"与"全部重置"共用)
         static constexpr HotkeyBindings Defaults() {
@@ -309,7 +325,8 @@ namespace MapRenderState {
                 { 0x09, 0 },
                 { 0x4B, 0 },
                 { 0x58, 0 },
-                { 0x20, 0 }
+                { 0x20, 0 },
+                { 0x10, 0 }
             };
         }
     };
@@ -351,6 +368,10 @@ namespace MapRenderState {
     inline float minZoomForLocalWaypoints = 0.0f; // 0.0f ~ 2.0f
     // [路径点文字背景底板开关] 控制是否为路径点名称文字渲染半透明背景底板框 (默认开启，持久化)
     inline bool renderWaypointBackgrounds = true;
+    // [路径点智能防遮挡] 当多个路径点文字在屏幕上发生矩形碰撞时，智能隐藏次要文字仅保留图标 (默认开启，持久化)
+    inline bool declutterWaypointLabels = true;
+    // [远景自动隐藏普通标签] 当大地图缩小到远景全局俯瞰视角(Zoom < 0.35x)时，普通路径点自动只保留图标点，隐藏长名称以防遮挡地图 (默认开启，持久化)
+    inline bool autoHideLabelsOnFarZoom = true;
 
     // [大地图生物图标缩放] (持久化保存)
     inline float bigMapEntityScale = 1.0f; // 0.5x ~ 2.5x
@@ -731,6 +752,91 @@ namespace MapRenderState {
         g *= gMult;
         b *= bMult;
     }
+
+    // ==================== 全局与分面板默认设置重置 ====================
+    inline void ResetMiniMapSettingsToDefaults() {
+        showMiniMap = true;
+        isSquareMap = false;
+        rotateMiniMap = false;
+        miniMapScale = 1.0f;
+        miniMapOffsetX = 0.0f;
+        miniMapOffsetY = 0.0f;
+        miniMapZoomRadius = 50.0f;
+        showWaypointsOnMinimap = true;
+        showRadar = true;
+        showCompass = true;
+        compassScale = 1.0f;
+        playerArrowScale = 1.0f;
+        infoShowBackground = true;
+        infoShowCoords = true;
+        infoShowNetherCoords = false;
+        infoShowFacing = false;
+        infoShowBiome = true;
+        infoShowTime = false;
+        timeFormat24h = true;
+        infoShowLight = false;
+        infoShowChunkCoords = false;
+        radarHeightIndicators = true;
+        entityDepth = true;
+        alwaysShowNametags = true;
+        entityHeightLimit = 0;
+        radarShowPlayers = true;
+        radarShowHostile = true;
+        radarShowFriendly = true;
+        radarShowItems = false;
+        autoRemoveDeathpoints = true;
+        enlargeMinimapToggle = false;
+        showWaypointDistance = false;
+        renderWaypointBackgrounds = true;
+        declutterWaypointLabels = true;
+        ::g_mapDataUpdated.store(true);
+    }
+
+    inline void ResetBigMapSettingsToDefaults() {
+        bigMapShowHoverBox = true;
+        bigMapShowEntities = false;
+        bigMapEntityScale = 1.0f;
+        bigMapShowMarkers = true;
+        bigMapShowDisabledWaypoints = true;
+        bigMapWaypointScale = 1.0f;
+        minZoomForLocalWaypoints = 0.0f;
+        renderWaypointBackgrounds = true;
+        declutterWaypointLabels = true;
+        autoHideLabelsOnFarZoom = true;
+        showChunkGrid = false;
+        showFootsteps = true;
+        showZoomButtons = true;
+        playerArrowColor = 0;
+        playerArrowScale = 1.0f;
+        terrainSlopes = 2;
+        terrainDepth = true;
+        adjustHeightForShortBlocks = true;
+        blockColorMode = 0;
+        biomeColorsInVanilla = true;
+        mapLighting = true;
+        displayStainedGlass = true;
+        loadFlowers = true;
+        biomeBlending = true;
+        openingAnimation = true;
+        g_loadNewChunks = true;
+        g_updateChunks = true;
+        g_mapWritingDistance = 0;
+        g_ignoreHeightmaps = false;
+        g_multiLevelPyramid = true;
+        g_maxLoadedRegions = 512;
+        clearGPUCache.store(true);
+        forceRescan.store(true);
+        ::g_mapDataUpdated.store(true);
+    }
+
+    inline void ResetAllSettingsToDefaults() {
+        ResetMiniMapSettingsToDefaults();
+        ResetBigMapSettingsToDefaults();
+        globalUIScale = GetOptimalUIScale();
+        bigMapWaypointDrawerOpen = false;
+        bigMapCloseDrawerAfterHop = false;
+        g_hotkeys = HotkeyBindings::Defaults();
+    }
 }
 
 // 【全球探索级】：匹配 16 区块能见度的究极扫描半径（513x513个方块）！
@@ -763,8 +869,7 @@ inline std::mutex g_radarMutex;
 extern std::atomic<bool> g_radarUpdated;
 inline std::atomic<uint64_t> g_radarGeneration{1};
 inline std::atomic<bool> g_tabHeld{false};
-extern std::vector<RadarEntity> g_radarEntities;
-inline std::atomic<bool> g_mapDataUpdated{true}; 
+extern std::vector<RadarEntity> g_radarEntities; 
 
 // 前台缓冲（仅供显卡渲染读取，绝不闪烁）
 extern mce::Color g_mapColors[MAP_DATA_SIZE][MAP_DATA_SIZE];
