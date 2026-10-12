@@ -36,7 +36,7 @@ target("ChiyanMap")
     add_ldflags("/DELAYLOAD:dwmapi.dll", "/DELAYLOAD:imm32.dll", "/DELAYLOAD:LeviLamina.dll")
     add_shflags("/DELAYLOAD:dwmapi.dll", "/DELAYLOAD:imm32.dll", "/DELAYLOAD:LeviLamina.dll")
     set_kind("shared")
-    set_languages("c++20")
+    set_languages("c++23")
     set_symbols("debug")
     
     add_headerfiles("src/**.h")
