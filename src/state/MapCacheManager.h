@@ -30,6 +30,7 @@ namespace MapCacheManager {
         bool textureDirty = true;
         int dimId = -1;                                         // 所属维度 ID (0=Overworld, 1=Nether, 2=End)
         std::string saveDir = "";                               // 所属持久化目录 (带尾部分隔符)
+        uint64_t lastAccessTick = 0;                            // 最近访问逻辑时钟 (供 Max Loaded Regions LRU 内存淘汰使用)
 
         RegionData() {
             std::fill(std::begin(heights), std::end(heights), HEIGHT_UNKNOWN);
@@ -64,10 +65,29 @@ namespace MapCacheManager {
         rz = (int)(int32_t)(uint32_t)(h & 0xFFFFFFFFu);
     }
 
+    // [四叉树多级金字塔 BranchLeveledRegion]
+    // level=1: 2x2 区域合并 (512x512 方块 -> 256x256 纹理)
+    // level=2: 4x4 区域合并 (1024x1024 方块 -> 256x256 纹理)
+    inline uint64_t GetBranchHash(int level, int brx, int brz, bool isCave = false) {
+        uint64_t h = ((uint64_t)((uint32_t)brx & 0x1FFFFFFFu) << 32) | (uint32_t)brz;
+        h |= ((uint64_t)(level & 0x3) << 61);
+        if (isCave) h |= 0x8000000000000000ULL;
+        return h;
+    }
+    inline void DecodeBranchHash(uint64_t h, int& level, int& brx, int& brz, bool& isCave) {
+        isCave = (h & 0x8000000000000000ULL) != 0;
+        level = (int)((h >> 61) & 0x3);
+        uint32_t rx_raw = (uint32_t)((h >> 32) & 0x1FFFFFFFu);
+        if (rx_raw & 0x10000000u) rx_raw |= 0xE0000000u; // 符号扩展 29→32 位
+        brx = (int)(int32_t)rx_raw;
+        brz = (int)(int32_t)(uint32_t)(h & 0xFFFFFFFFu);
+    }
+
     extern std::unordered_map<uint64_t, RegionData*> g_loadedRegions;
     extern std::vector<uint64_t> g_loadQueue; // [性能核心] 异步加载请求队列
     extern std::mutex g_cacheMutex;
     extern std::atomic<bool> g_running;
+    extern std::atomic<uint64_t> g_accessTickCounter;
     extern std::thread* g_ioThread;
     extern std::binary_semaphore g_ioDone;
     extern std::string g_cacheDir;
@@ -113,10 +133,27 @@ namespace MapCacheManager {
     void UpdateFromScan(int targetDim, int centerX, int centerZ, mce::Color scanColors[MAP_DATA_SIZE][MAP_DATA_SIZE], float scanHeights[MAP_DATA_SIZE][MAP_DATA_SIZE], bool isCave = false, uint8_t (*scanLights)[MAP_DATA_SIZE] = nullptr);
     bool FetchRegionTextureData(uint64_t hash, uint8_t* outBuffer, bool forceCopy = false);
 
+    // [四叉树多级金字塔] 检查并烘焙降采样分支纹理 (Level 1 = 2x2 区域, Level 2 = 4x4 区域)
+    bool IsBranchPyramidDirty(uint64_t branchHash);
+    bool FetchBranchPyramidTextureData(uint64_t branchHash, uint8_t* outBuffer, bool forceCopy = false);
+    void MarkBranchPyramidDirtyForRegion(int rx, int rz, bool isCave);
+
     // [新增] 当 GPU 繁忙时，退回纹理更新请求
     void MarkTextureDirty(uint64_t hash);
     // [新增] 当光影/昼夜参数变化时，标记所有已加载区域重新烘焙纹理
     void MarkAllLoadedRegionsDirty();
+
+    // [区域重载与转换操作]
+    // 重载所有区域 (MapFullReloader): 从磁盘重新加载当前维度的所有区域并触发重新扫描与烘焙
+    int ReloadAllRegions();
+    // 重载当前视野区域 (Reload Viewed Regions): 重新从磁盘加载当前大地图视口范围内的区域并触发重扫
+    int ReloadViewedRegions(int minRx, int maxRx, int minRz, int maxRz, bool isCave);
+    // 转换/另存所有区域为独立地图副本 (Convert All Regions -> cm_converted)
+    bool ConvertAllRegionsToMap(std::string& outNewMapId, std::string& outNewMapName, int& outCopiedFiles);
+
+    // [多级缓存架构统计与跨进程文件锁状态]
+    size_t GetLoadedRegionCount();
+    bool IsCacheLockedByAnotherProcess();
 
     // [新增] 跨界热重载引擎
     void SwitchWorld(const std::string& worldId, int dimensionId, const std::string& targetMapId = "");

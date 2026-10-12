@@ -547,6 +547,24 @@ namespace MapRenderState {
     inline std::chrono::steady_clock::time_point g_bigMapOpenTime = std::chrono::steady_clock::now();
     inline std::atomic<bool> forceRescan{false}; // 渲染取色/过滤设置变更时触发立即重扫
 
+    // ==================== 地图数据源、读写控制与多级缓存架构 ====================
+    inline bool g_loadNewChunks = true;        // 加载新区块 (Load New Chunks): 是否记录尚未探索过的新区块/新像素
+    inline bool g_updateChunks = true;         // 更新已探索区块 (Update Chunks): 是否更新已存在缓存的区块 (关闭后对已探索区域只读保护)
+    inline int  g_mapWritingDistance = 0;      // 地图写入最大距离限制 (Map Writing Distance): 0 = 无限制(跟随完整扫描半径), 1 ~ 32 区块
+    inline bool g_ignoreHeightmaps = false;    // 忽略服务端高度图 (Ignore Server Heightmaps): 开启后强制从高处向下逐格扫描真实顶面方块
+    inline int  g_maxLoadedRegions = 512;      // 内存最大驻留区域数 (Max Loaded Regions): 64 ~ 4096 (超出后自动按 LRU 淘汰落盘释放内存)
+    inline bool g_multiLevelPyramid = true;    // 四叉树多级金字塔纹理 (BranchLeveledRegion LOD): 大幅缩小时自动合并 2x2 / 4x4 区域降采样渲染
+
+    // 当前全屏大地图视口覆盖的区域范围 (供 Reload Viewed Regions 使用)
+    inline int g_viewedMinRx = 0;
+    inline int g_viewedMaxRx = 0;
+    inline int g_viewedMinRz = 0;
+    inline int g_viewedMaxRz = 0;
+
+    // 区域重载/转换操作状态反馈
+    inline std::string g_regionOpStatusText = "";
+    inline std::chrono::steady_clock::time_point g_regionOpStatusTime = std::chrono::steady_clock::now();
+
     // ==================== 探索足迹与个性化 ====================
     inline bool showFootsteps = true;
     inline int playerArrowColor = 0; // 0=Red, 1=White, 2=Green, 3=Blue, 4=Yellow, 5=Purple, 6=Black, 7=Cyan

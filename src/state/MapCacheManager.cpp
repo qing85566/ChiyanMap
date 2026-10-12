@@ -21,6 +21,7 @@ namespace MapCacheManager {
     std::vector<uint64_t> g_loadQueue;
     std::mutex g_cacheMutex;
     std::atomic<bool> g_running{false};
+    std::atomic<uint64_t> g_accessTickCounter{1};
     // 协程退出同步信号：Init 时为 0（被占用），协程结束时 release；Shutdown 时 acquire 等待退出
     std::binary_semaphore g_ioDone{0};
     
@@ -28,6 +29,66 @@ namespace MapCacheManager {
     std::string g_cacheDir = "";
     static int s_currentLoadedDimId = -999;
     static std::string s_currentLoadedMapId = "default";
+
+    // [四叉树多级金字塔 BranchLeveledRegion] 脏状态表 (受 g_cacheMutex 保护)
+    static std::unordered_map<uint64_t, bool> s_branchDirtyMap;
+
+    // [跨进程文件锁保护] .cache.lock 独占写句柄与冲突状态
+    static HANDLE s_cacheLockHandle = INVALID_HANDLE_VALUE;
+    static std::atomic<bool> s_cacheLockedByAnotherProcess{false};
+
+    static void ReleaseCacheLock() {
+        if (s_cacheLockHandle != INVALID_HANDLE_VALUE) {
+            CloseHandle(s_cacheLockHandle);
+            s_cacheLockHandle = INVALID_HANDLE_VALUE;
+        }
+        s_cacheLockedByAnotherProcess.store(false);
+    }
+
+    static void AcquireCacheLock(const std::filesystem::path& dimCacheDir) {
+        ReleaseCacheLock();
+        try {
+            std::filesystem::path lockDir = dimCacheDir.has_parent_path() ? dimCacheDir.parent_path() : dimCacheDir;
+            std::error_code ec;
+            std::filesystem::create_directories(lockDir, ec);
+            std::filesystem::path lockPath = lockDir / ".cache.lock";
+            // 允许其他进程只读共享 (FILE_SHARE_READ)，独占写锁并在进程退出/崩溃时由内核自动清理 (FILE_FLAG_DELETE_ON_CLOSE)
+            HANDLE h = CreateFileW(
+                lockPath.wstring().c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                NULL,
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE,
+                NULL
+            );
+            if (h != INVALID_HANDLE_VALUE) {
+                s_cacheLockHandle = h;
+                s_cacheLockedByAnotherProcess.store(false);
+                std::string pidStr = "PID=" + std::to_string(GetCurrentProcessId()) + "\n";
+                DWORD written = 0;
+                WriteFile(h, pidStr.data(), (DWORD)pidStr.size(), &written, NULL);
+                FlushFileBuffers(h);
+            } else if (GetLastError() == ERROR_SHARING_VIOLATION || GetLastError() == ERROR_LOCK_VIOLATION) {
+                s_cacheLockedByAnotherProcess.store(true);
+                chiyan_map::ChiyanMap::getInstance().getSelf().getLogger().warn(
+                    "[ChiyanMap] Cache directory '{}' is locked by another game process (.cache.lock). Entering safe read-only disk mode.",
+                    lockDir.string()
+                );
+            }
+        } catch (...) {}
+    }
+
+    static void MarkBranchPyramidDirtyForRegionUnlocked(int rx, int rz, bool isCave) {
+        for (int drx = 0; drx <= 1; ++drx) {
+            for (int drz = 0; drz <= 1; ++drz) {
+                int crx = rx + drx;
+                int crz = rz + drz;
+                s_branchDirtyMap[GetBranchHash(1, crx >> 1, crz >> 1, isCave)] = true;
+                s_branchDirtyMap[GetBranchHash(2, crx >> 2, crz >> 2, isCave)] = true;
+            }
+        }
+    }
 
     int GetLoadedDimensionId() {
         return s_currentLoadedDimId;
@@ -338,31 +399,38 @@ namespace MapCacheManager {
             // 避免 SwitchWorld 并发赋值 g_cacheDir 时的 std::string use-after-free
             for (uint64_t hash : toLoad) {
                 int rx, rz; DecodeRegionHash(hash, rx, rz);
-                std::string dir = currentDir + GetRegionSubdir(IsCaveHash(hash));
+                bool isCave = IsCaveHash(hash);
+                std::string dir = currentDir + GetRegionSubdir(isCave);
                 std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
 
                 RegionData* newRegion = new RegionData();
                 newRegion->dimId = loadedDimId;
                 newRegion->saveDir = dir;
-                LoadRegionFromFile(filePath, *newRegion, IsCaveHash(hash));
+                LoadRegionFromFile(filePath, *newRegion, isCave);
                 newRegion->textureDirty = true;
+                newRegion->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
 
                 {
                     std::lock_guard<std::mutex> lock(g_cacheMutex);
                     // 核心防护：若在读取期间维度已被并发切换，坚决丢弃旧维度加载结果，杜绝污染新维度
                     if (s_currentLoadedDimId == loadedDimId && g_cacheDir == currentDir) {
-                        if (g_loadedRegions[hash] == nullptr) g_loadedRegions[hash] = newRegion;
-                        else delete newRegion;
+                        if (g_loadedRegions[hash] == nullptr) {
+                            g_loadedRegions[hash] = newRegion;
+                            MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
+                        } else {
+                            delete newRegion;
+                        }
                     } else {
                         delete newRegion;
                     }
                 }
             }
 
-            // 通道 2：低频保存（地表）
+            // 通道 2：低频保存与 LRU 内存上限控制 (Max Loaded Regions)
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - lastSaveTime).count() >= 2) {
                 lastSaveTime = now;
+                bool lockedByOther = s_cacheLockedByAnotherProcess.load();
                 std::vector<std::pair<uint64_t, RegionData>> regionsToSave;
                 {
                     std::lock_guard<std::mutex> lock(g_cacheMutex);
@@ -374,7 +442,9 @@ namespace MapCacheManager {
                             if (pair.second->dimId < 0) {
                                 pair.second->dimId = s_currentLoadedDimId;
                             }
-                            regionsToSave.push_back({pair.first, *pair.second});
+                            if (!lockedByOther) {
+                                regionsToSave.push_back({pair.first, *pair.second});
+                            }
                             pair.second->dirty = false;
                         }
                     }
@@ -402,6 +472,37 @@ namespace MapCacheManager {
                         WriteBiomeSection(out, item.second);
                         // [新增] 光照数据段
                         out.write((char*)item.second.lightLevels, sizeof(item.second.lightLevels));
+                    }
+                }
+
+                // 通道 3：[Max Loaded Regions] 当内存驻留 RegionData 数量超过上限时，按 LRU 淘汰最久未访问的已落盘区域
+                {
+                    std::lock_guard<std::mutex> lock(g_cacheMutex);
+                    size_t maxAllowed = (size_t)std::clamp(MapRenderState::g_maxLoadedRegions, 64, 4096);
+                    size_t residentCount = 0;
+                    for (const auto& pair : g_loadedRegions) {
+                        if (pair.second != nullptr) residentCount++;
+                    }
+                    if (residentCount > maxAllowed) {
+                        std::vector<std::pair<uint64_t, uint64_t>> candidates; // (lastAccessTick, hash)
+                        candidates.reserve(residentCount);
+                        for (const auto& pair : g_loadedRegions) {
+                            if (pair.second != nullptr && !pair.second->dirty && !pair.second->textureDirty) {
+                                candidates.push_back({pair.second->lastAccessTick, pair.first});
+                            }
+                        }
+                        std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+                            return a.first < b.first;
+                        });
+                        size_t toEvict = std::min(residentCount - maxAllowed, candidates.size());
+                        for (size_t i = 0; i < toEvict; ++i) {
+                            uint64_t evictHash = candidates[i].second;
+                            auto it = g_loadedRegions.find(evictHash);
+                            if (it != g_loadedRegions.end() && it->second != nullptr && !it->second->dirty) {
+                                delete it->second;
+                                g_loadedRegions.erase(it);
+                            }
+                        }
                     }
                 }
             }
@@ -743,16 +844,23 @@ namespace MapCacheManager {
         // [自愈引擎] 自动检测并净化下界/末地中被主世界数据污染的历史缓存文件 (如 birch_forest_mutated 等)
         CleanupCorruptedDimensionCache(cacheDir, dimensionId);
 
+        // [跨进程文件锁保护] 获取/更新 .cache.lock，检测是否有其它客户端进程正在写入同一地图缓存
+        AcquireCacheLock(cacheDir);
+        s_branchDirtyMap.clear();
+
         // 末尾保留分隔符以兼容现有 currentDir + "region_..." 字符串拼接
         g_cacheDir = cacheDir.string() + "/";
 
         // [预加载] 扫描磁盘上的 region 文件并排队异步加载, 使全屏大地图能立即显示已有数据
         // 而不是从黑屏开始逐步加载。扫描地表(dim_<n>/)和洞穴(dim_<n>/cave/)两个目录。
+        // 遵循 Max Loaded Regions 内存驻留上限，超出部分在大地图浏览平移时按需流式加载。
+        size_t maxPreload = (size_t)std::clamp(MapRenderState::g_maxLoadedRegions, 64, 4096);
         auto preloadDir = [&](const std::string& subdir, bool isCave) {
             auto fullDir = cacheDir / subdir;
             std::error_code ec2;
             if (!std::filesystem::is_directory(fullDir, ec2)) return;
             for (auto const& entry : std::filesystem::directory_iterator(fullDir, ec2)) {
+                if (g_loadedRegions.size() >= maxPreload) break;
                 if (!entry.is_regular_file()) continue;
                 std::string filename = entry.path().filename().string();
                 if (filename.rfind("region_", 0) != 0) continue;
@@ -799,7 +907,7 @@ namespace MapCacheManager {
         g_ioDone.acquire();
 
         // [持久化] 游戏关闭时保存所有脏区域 (含下界/末地), 避免退出时数据丢失
-        if (!g_cacheDir.empty()) {
+        if (!g_cacheDir.empty() && !s_cacheLockedByAnotherProcess.load()) {
             for (auto& pair : g_loadedRegions) {
                 if (pair.second && pair.second->dirty) {
                     int rx, rz; DecodeRegionHash(pair.first, rx, rz);
@@ -832,9 +940,12 @@ namespace MapCacheManager {
         for (auto& pair : g_loadedRegions) if(pair.second) delete pair.second;
         g_loadedRegions.clear();
         g_loadQueue.clear();
+        s_branchDirtyMap.clear();
+        ReleaseCacheLock();
     }
 
     void UpdateFromScan(int targetDim, int centerX, int centerZ, mce::Color scanColors[MAP_DATA_SIZE][MAP_DATA_SIZE], float scanHeights[MAP_DATA_SIZE][MAP_DATA_SIZE], bool isCave, uint8_t (*scanLights)[MAP_DATA_SIZE]) {
+        if (!MapRenderState::g_loadNewChunks && !MapRenderState::g_updateChunks) return;
         std::lock_guard<std::mutex> lock(g_cacheMutex);
         if (g_cacheDir.empty()) return; // 未进世界前禁止写入
         // [严格维度防护] 拒绝写入不属于当前加载维度或玩家物理维度的扫描数据，彻底阻断跨维度污染
@@ -844,9 +955,17 @@ namespace MapCacheManager {
         std::string expectedDimStr = "dim_" + std::to_string(targetDim);
         if (g_cacheDir.find(expectedDimStr) == std::string::npos) return;
         int startX = centerX - MAP_DATA_RADIUS; int startZ = centerZ - MAP_DATA_RADIUS;
+        int maxWriteDist = (MapRenderState::g_mapWritingDistance > 0)
+            ? std::min(MAP_DATA_RADIUS, MapRenderState::g_mapWritingDistance * 16)
+            : MAP_DATA_RADIUS;
 
         for (int z = 0; z < MAP_DATA_SIZE; z++) {
+            int dz = z - MAP_DATA_RADIUS;
+            if (std::abs(dz) > maxWriteDist) continue;
             for (int x = 0; x < MAP_DATA_SIZE; x++) {
+                int dx = x - MAP_DATA_RADIUS;
+                if (std::abs(dx) > maxWriteDist) continue;
+
                 mce::Color c = scanColors[x][z];
                 if (c.a <= 0.01f) continue;
 
@@ -877,6 +996,11 @@ namespace MapCacheManager {
                 float currentY = scanHeights[x][z];
                 int index = (localZ * REGION_SIZE + localX) * 4;
 
+                // [地图写入控制开关] 缓存级二次校验 Load New Chunks / Update Chunks
+                bool wasExplored = (region->colors[index + 3] >= 10);
+                if (!wasExplored && !MapRenderState::g_loadNewChunks) continue;
+                if (wasExplored && !MapRenderState::g_updateChunks) continue;
+
                 // 核心修复：region->colors 严格存储无阴影的基础原始颜色，杜绝保存与重载过程中的光影衰减循环
                 region->colors[index + 0] = (uint8_t)(std::clamp(c.r, 0.0f, 1.0f) * 255.0f);
                 region->colors[index + 1] = (uint8_t)(std::clamp(c.g, 0.0f, 1.0f) * 255.0f);
@@ -892,6 +1016,8 @@ namespace MapCacheManager {
 
                 region->dirty = true;
                 region->textureDirty = true;
+                region->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
+                MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
             }
         }
     }
@@ -1035,22 +1161,138 @@ namespace MapCacheManager {
             return false;
         } else {
             RegionData* region = it->second;
-            if (region && (forceCopy || region->textureDirty)) {
-                int rx, rz;
-                DecodeRegionHash(hash, rx, rz);
-                bool isCave = IsCaveHash(hash);
-                ShadeRegionBuffer(region, outBuffer, rx, rz, isCave, false);
-                region->textureDirty = false;
-                return true;
+            if (region) {
+                region->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
+                if (forceCopy || region->textureDirty) {
+                    int rx, rz;
+                    DecodeRegionHash(hash, rx, rz);
+                    bool isCave = IsCaveHash(hash);
+                    ShadeRegionBuffer(region, outBuffer, rx, rz, isCave, false);
+                    region->textureDirty = false;
+                    return true;
+                }
             }
         }
         return false;
     }
 
+    void MarkBranchPyramidDirtyForRegion(int rx, int rz, bool isCave) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
+    }
+
+    bool IsBranchPyramidDirty(uint64_t branchHash) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        auto it = s_branchDirtyMap.find(branchHash);
+        if (it == s_branchDirtyMap.end()) return true;
+        return it->second;
+    }
+
+    bool FetchBranchPyramidTextureData(uint64_t branchHash, uint8_t* outBuffer, bool forceCopy) {
+        if (!outBuffer) return false;
+        int level = 1, brx = 0, brz = 0;
+        bool isCave = false;
+        DecodeBranchHash(branchHash, level, brx, brz, isCave);
+        if (level < 1 || level > 2) return false;
+
+        int span = (1 << level); // Level 1 -> 2x2, Level 2 -> 4x4
+        int subTileSize = REGION_SIZE / span; // 128 or 64
+
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        bool branchDirty = true;
+        auto dirtyIt = s_branchDirtyMap.find(branchHash);
+        if (dirtyIt != s_branchDirtyMap.end()) {
+            branchDirty = dirtyIt->second;
+        }
+
+        // 检查所有子叶子区域，若未加载则异步排队加载，若已加载则更新 LRU 时间戳
+        bool hasAnyLoadedChild = false;
+        RegionData* childPtrs[16] = {nullptr};
+        for (int dz = 0; dz < span; ++dz) {
+            for (int dx = 0; dx < span; ++dx) {
+                int rx = brx * span + dx;
+                int rz = brz * span + dz;
+                uint64_t childHash = GetRegionHash(rx, rz, isCave);
+                auto it = g_loadedRegions.find(childHash);
+                if (it == g_loadedRegions.end()) {
+                    if (g_loadQueue.size() < 256) {
+                        g_loadedRegions[childHash] = nullptr;
+                        g_loadQueue.push_back(childHash);
+                    }
+                } else if (it->second != nullptr) {
+                    it->second->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
+                    childPtrs[dz * span + dx] = it->second;
+                    hasAnyLoadedChild = true;
+                }
+            }
+        }
+
+        if (!forceCopy && !branchDirty) {
+            return false;
+        }
+
+        std::memset(outBuffer, 0, REGION_SIZE * REGION_SIZE * 4);
+        if (!hasAnyLoadedChild) {
+            s_branchDirtyMap[branchHash] = false;
+            return true;
+        }
+
+        alignas(8) static uint8_t s_childShaded[REGION_SIZE * REGION_SIZE * 4];
+        for (int dz = 0; dz < span; ++dz) {
+            for (int dx = 0; dx < span; ++dx) {
+                RegionData* childReg = childPtrs[dz * span + dx];
+                if (!childReg) continue;
+
+                int rx = brx * span + dx;
+                int rz = brz * span + dz;
+                ShadeRegionBuffer(childReg, s_childShaded, rx, rz, isCave, false);
+
+                int dstOffsetX = dx * subTileSize;
+                int dstOffsetZ = dz * subTileSize;
+                for (int sz = 0; sz < subTileSize; ++sz) {
+                    int srcBaseZ = sz * span;
+                    for (int sx = 0; sx < subTileSize; ++sx) {
+                        int srcBaseX = sx * span;
+                        uint32_t sumR = 0, sumG = 0, sumB = 0, sumA = 0, validCount = 0;
+                        for (int kz = 0; kz < span; ++kz) {
+                            int rowOffset = ((srcBaseZ + kz) * REGION_SIZE + srcBaseX) * 4;
+                            for (int kx = 0; kx < span; ++kx) {
+                                int pIdx = rowOffset + kx * 4;
+                                uint8_t pa = s_childShaded[pIdx + 3];
+                                if (pa >= 10) {
+                                    sumR += s_childShaded[pIdx + 0];
+                                    sumG += s_childShaded[pIdx + 1];
+                                    sumB += s_childShaded[pIdx + 2];
+                                    sumA += pa;
+                                    validCount++;
+                                }
+                            }
+                        }
+                        if (validCount > 0) {
+                            int dstIdx = ((dstOffsetZ + sz) * REGION_SIZE + (dstOffsetX + sx)) * 4;
+                            outBuffer[dstIdx + 0] = (uint8_t)(sumR / validCount);
+                            outBuffer[dstIdx + 1] = (uint8_t)(sumG / validCount);
+                            outBuffer[dstIdx + 2] = (uint8_t)(sumB / validCount);
+                            outBuffer[dstIdx + 3] = (uint8_t)(sumA / (uint32_t)(span * span));
+                        }
+                    }
+                }
+            }
+        }
+
+        s_branchDirtyMap[branchHash] = false;
+        return true;
+    }
+
     void MarkTextureDirty(uint64_t hash) {
         std::lock_guard<std::mutex> lock(g_cacheMutex);
         auto it = g_loadedRegions.find(hash);
-        if (it != g_loadedRegions.end() && it->second) it->second->textureDirty = true;
+        if (it != g_loadedRegions.end() && it->second) {
+            it->second->textureDirty = true;
+            int rx, rz;
+            DecodeRegionHash(hash, rx, rz);
+            MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, IsCaveHash(hash));
+        }
     }
 
     void MarkAllLoadedRegionsDirty() {
@@ -1058,8 +1300,231 @@ namespace MapCacheManager {
         for (auto& pair : g_loadedRegions) {
             if (pair.second) {
                 pair.second->textureDirty = true;
+                int rx, rz;
+                DecodeRegionHash(pair.first, rx, rz);
+                MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, IsCaveHash(pair.first));
             }
         }
+        for (auto& bpair : s_branchDirtyMap) {
+            bpair.second = true;
+        }
+    }
+
+    static void FlushDirtyRegionsUnlocked() {
+        if (g_cacheDir.empty() || s_cacheLockedByAnotherProcess.load()) return;
+        for (auto& pair : g_loadedRegions) {
+            if (pair.second && pair.second->dirty) {
+                int rx, rz;
+                DecodeRegionHash(pair.first, rx, rz);
+                std::string dir = pair.second->saveDir.empty()
+                    ? (g_cacheDir + GetRegionSubdir(IsCaveHash(pair.first)))
+                    : pair.second->saveDir;
+                int regDim = pair.second->dimId >= 0 ? pair.second->dimId : s_currentLoadedDimId;
+                bool safeToSave = true;
+                if (regDim == 0 && (dir.find("dim_1") != std::string::npos || dir.find("dim_2") != std::string::npos)) safeToSave = false;
+                if (regDim == 1 && (dir.find("dim_0") != std::string::npos || dir.find("dim_2") != std::string::npos)) safeToSave = false;
+                if (regDim == 2 && (dir.find("dim_0") != std::string::npos || dir.find("dim_1") != std::string::npos)) safeToSave = false;
+                if (safeToSave && !dir.empty()) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(dir, ec);
+                    std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
+                    std::ofstream out(filePath, std::ios::binary);
+                    if (out) {
+                        out.write((char*)pair.second->colors, sizeof(pair.second->colors));
+                        out.write((char*)pair.second->heights, sizeof(pair.second->heights));
+                        WriteBiomeSection(out, *pair.second);
+                        out.write((char*)pair.second->lightLevels, sizeof(pair.second->lightLevels));
+                        pair.second->dirty = false;
+                    }
+                }
+            }
+        }
+    }
+
+    int ReloadAllRegions() {
+        int reloadedCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_cacheMutex);
+            if (g_cacheDir.empty()) return 0;
+            FlushDirtyRegionsUnlocked();
+            for (auto& pair : g_loadedRegions) {
+                if (pair.second) delete pair.second;
+            }
+            g_loadedRegions.clear();
+            g_loadQueue.clear();
+            s_branchDirtyMap.clear();
+
+            std::filesystem::path cacheDir(g_cacheDir);
+            size_t maxPreload = (size_t)std::clamp(MapRenderState::g_maxLoadedRegions, 64, 4096);
+            auto preloadDir = [&](const std::string& subdir, bool isCave) {
+                auto fullDir = cacheDir / subdir;
+                std::error_code ec;
+                if (!std::filesystem::is_directory(fullDir, ec)) return;
+                for (auto const& entry : std::filesystem::directory_iterator(fullDir, ec)) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string filename = entry.path().filename().string();
+                    if (filename.rfind("region_", 0) != 0) continue;
+                    int rx = 0, rz = 0;
+                    if (filename.size() > 8 && filename.compare(0, 7, "region_") == 0) {
+                        size_t pos = 7;
+                        bool negX = false;
+                        if (pos < filename.size() && filename[pos] == '-') { negX = true; pos++; }
+                        while (pos < filename.size() && filename[pos] >= '0' && filename[pos] <= '9') {
+                            rx = rx * 10 + (filename[pos] - '0'); pos++;
+                        }
+                        if (negX) rx = -rx;
+                        if (pos < filename.size() && filename[pos] == '_') {
+                            pos++;
+                            bool negZ = false;
+                            if (pos < filename.size() && filename[pos] == '-') { negZ = true; pos++; }
+                            while (pos < filename.size() && filename[pos] >= '0' && filename[pos] <= '9') {
+                                rz = rz * 10 + (filename[pos] - '0'); pos++;
+                            }
+                            if (negZ) rz = -rz;
+                        } else { continue; }
+                        reloadedCount++;
+                        if (g_loadedRegions.size() < maxPreload) {
+                            uint64_t hash = GetRegionHash(rx, rz, isCave);
+                            if (g_loadedRegions.find(hash) == g_loadedRegions.end()) {
+                                g_loadedRegions[hash] = nullptr;
+                                g_loadQueue.push_back(hash);
+                            }
+                        }
+                    }
+                }
+            };
+            preloadDir("", false);
+            preloadDir("cave", true);
+        }
+        MapRenderState::clearGPUCache.store(true);
+        MapRenderState::forceRescan.store(true);
+        InvalidateExportPreview();
+        return reloadedCount;
+    }
+
+    int ReloadViewedRegions(int minRx, int maxRx, int minRz, int maxRz, bool isCave) {
+        if (minRx > maxRx) std::swap(minRx, maxRx);
+        if (minRz > maxRz) std::swap(minRz, maxRz);
+        // 限制单次视野重载跨度防止极端缩小时卡顿
+        if (maxRx - minRx > 32) { int mid = (minRx + maxRx) / 2; minRx = mid - 16; maxRx = mid + 16; }
+        if (maxRz - minRz > 32) { int mid = (minRz + maxRz) / 2; minRz = mid - 16; maxRz = mid + 16; }
+
+        int reloadedCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_cacheMutex);
+            if (g_cacheDir.empty()) return 0;
+            FlushDirtyRegionsUnlocked();
+            std::string dir = g_cacheDir + GetRegionSubdir(isCave);
+            for (int rz = minRz; rz <= maxRz; ++rz) {
+                for (int rx = minRx; rx <= maxRx; ++rx) {
+                    uint64_t hash = GetRegionHash(rx, rz, isCave);
+                    std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
+                    std::error_code ec;
+                    bool fileExists = std::filesystem::exists(filePath, ec);
+                    auto it = g_loadedRegions.find(hash);
+                    if (it != g_loadedRegions.end() && it->second != nullptr) {
+                        if (fileExists) {
+                            LoadRegionFromFile(filePath, *(it->second), isCave);
+                        }
+                        it->second->textureDirty = true;
+                        it->second->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
+                        MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
+                        reloadedCount++;
+                    } else if (fileExists) {
+                        if (it == g_loadedRegions.end()) {
+                            g_loadedRegions[hash] = nullptr;
+                            g_loadQueue.push_back(hash);
+                        }
+                        MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
+                        reloadedCount++;
+                    }
+                }
+            }
+        }
+        MapRenderState::forceRescan.store(true);
+        InvalidateExportPreview();
+        return reloadedCount;
+    }
+
+    bool ConvertAllRegionsToMap(std::string& outNewMapId, std::string& outNewMapName, int& outCopiedFiles) {
+        outCopiedFiles = 0;
+        if (MapRenderState::currentWorldId.empty()) return false;
+
+        std::string worldId = MapRenderState::currentWorldId;
+        std::string srcMapId = MultiworldManager::GetActiveMapId();
+        {
+            std::lock_guard<std::mutex> lock(g_cacheMutex);
+            FlushDirtyRegionsUnlocked();
+        }
+
+        // 生成唯一的转换副本名称与 ID (例如 cm_converted_1)
+        auto existingMaps = MultiworldManager::GetMapList();
+        int convIndex = (int)existingMaps.size();
+        for (int attempt = 0; attempt < 1000; ++attempt) {
+            std::string candidateName = "cm_converted_" + std::to_string(convIndex + attempt);
+            std::string candidateId = "cm_converted_" + std::to_string(convIndex + attempt);
+            bool conflict = false;
+            for (const auto& m : existingMaps) {
+                if (m.name == candidateName || m.id == candidateId) {
+                    conflict = true;
+                    break;
+                }
+            }
+            if (!conflict) {
+                outNewMapName = candidateName;
+                outNewMapId = candidateId;
+                break;
+            }
+        }
+        if (outNewMapId.empty() || !MultiworldManager::CreateMap(outNewMapName, outNewMapId)) {
+            return false;
+        }
+
+        // 完整复制所有维度 (dim_0, dim_1, dim_2) 的地表与洞穴 region_*.bin 缓存文件到新的独立地图实例
+        for (int dim = 0; dim <= 2; ++dim) {
+            std::filesystem::path srcDimDir = MultiworldManager::GetMapCacheDir(worldId, srcMapId, dim);
+            std::filesystem::path dstDimDir = MultiworldManager::GetMapCacheDir(worldId, outNewMapId, dim);
+            std::error_code ec;
+            if (!std::filesystem::is_directory(srcDimDir, ec)) continue;
+
+            std::filesystem::create_directories(dstDimDir, ec);
+            std::filesystem::create_directories(dstDimDir / "cave", ec);
+
+            auto copySubdir = [&](const std::filesystem::path& sDir, const std::filesystem::path& dDir) {
+                std::error_code ecSub;
+                if (!std::filesystem::is_directory(sDir, ecSub)) return;
+                for (const auto& entry : std::filesystem::directory_iterator(sDir, ecSub)) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string fn = entry.path().filename().string();
+                    if (fn.rfind("region_", 0) == 0 && fn.ends_with(".bin")) {
+                        std::filesystem::copy_file(
+                            entry.path(),
+                            dDir / fn,
+                            std::filesystem::copy_options::overwrite_existing,
+                            ecSub
+                        );
+                        if (!ecSub) outCopiedFiles++;
+                    }
+                }
+            };
+            copySubdir(srcDimDir, dstDimDir);
+            copySubdir(srcDimDir / "cave", dstDimDir / "cave");
+        }
+
+        return true;
+    }
+
+    size_t GetLoadedRegionCount() {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        size_t count = 0;
+        for (const auto& pair : g_loadedRegions) {
+            if (pair.second != nullptr) count++;
+        }
+        return count;
+    }
+
+    bool IsCacheLockedByAnotherProcess() {
+        return s_cacheLockedByAnotherProcess.load();
     }
 
     int16_t GetCachedSurfaceHeight(int worldX, int worldZ, bool isCave) {

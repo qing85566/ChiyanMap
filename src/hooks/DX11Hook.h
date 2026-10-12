@@ -246,6 +246,8 @@ namespace DX11Hook {
 
     inline std::unordered_map<uint64_t, ID3D11Texture2D*> g_regionTextures;
     inline std::unordered_map<uint64_t, ID3D11ShaderResourceView*> g_regionSRVs;
+    inline std::unordered_map<uint64_t, ID3D11Texture2D*> g_branchTextures;
+    inline std::unordered_map<uint64_t, ID3D11ShaderResourceView*> g_branchSRVs;
 
     // ==========================================
     // [另辟蹊径] Windows Raw Input 硬件级欺骗器
@@ -424,6 +426,10 @@ namespace DX11Hook {
         g_regionSRVs.clear();
         for(auto& p : g_regionTextures) if(p.second) p.second->Release();
         g_regionTextures.clear();
+        for(auto& p : g_branchSRVs) if(p.second) p.second->Release();
+        g_branchSRVs.clear();
+        for(auto& p : g_branchTextures) if(p.second) p.second->Release();
+        g_branchTextures.clear();
         EntityIconManager::ReleaseAll();
         if (g_imguiInitialized) {
             if (g_mapTextureView) { g_mapTextureView->Release(); g_mapTextureView = nullptr; }
@@ -2343,6 +2349,7 @@ namespace DX11Hook {
             } else if (it->second != nullptr) {
                 isLoaded = true;
                 isLoadedAndDirty = it->second->textureDirty;
+                it->second->lastAccessTick = MapCacheManager::g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
@@ -2396,6 +2403,55 @@ namespace DX11Hook {
                 }
             } else if (g_regionTextures[hash] != nullptr) {
                 g_pd3dDeviceContext->UpdateSubresource(g_regionTextures[hash], 0, NULL, tempBuffer, 256 * 4, 0);
+            }
+        }
+    }
+
+    // [四叉树多级金字塔 BranchLeveledRegion] 构建/更新 Level 1 (2x2区域) 或 Level 2 (4x4区域) 合并纹理
+    inline void UpdateBranchTexture(uint64_t branchHash, int& texCount) {
+        if (!g_pd3dDevice || !g_pd3dDeviceContext) return;
+
+        bool isKnown = (g_branchTextures.find(branchHash) != g_branchTextures.end());
+        if (isKnown && !MapCacheManager::IsBranchPyramidDirty(branchHash)) {
+            return;
+        }
+        if (!isKnown && texCount >= 6) return;
+
+        alignas(8) static uint8_t tempBranchBuffer[256 * 256 * 4];
+        if (MapCacheManager::FetchBranchPyramidTextureData(branchHash, tempBranchBuffer, !isKnown)) {
+            bool isEmpty = true;
+            uint64_t* ptr64 = (uint64_t*)tempBranchBuffer;
+            for (int i = 0; i < (256 * 256 * 4) / 8; ++i) {
+                if (ptr64[i] != 0) { isEmpty = false; break; }
+            }
+
+            if (!isKnown || (isKnown && g_branchTextures[branchHash] == nullptr && !isEmpty)) {
+                if (isEmpty) {
+                    g_branchTextures[branchHash] = nullptr;
+                    g_branchSRVs[branchHash] = nullptr;
+                } else {
+                    texCount++;
+                    D3D11_TEXTURE2D_DESC desc = {};
+                    desc.Width = 256; desc.Height = 256;
+                    desc.MipLevels = 1; desc.ArraySize = 1;
+                    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+                    D3D11_SUBRESOURCE_DATA initData = {};
+                    initData.pSysMem = tempBranchBuffer;
+                    initData.SysMemPitch = 256 * 4;
+
+                    ID3D11Texture2D* tex = nullptr;
+                    ID3D11ShaderResourceView* srv = nullptr;
+                    if (SUCCEEDED(g_pd3dDevice->CreateTexture2D(&desc, &initData, &tex))) {
+                        g_pd3dDevice->CreateShaderResourceView(tex, NULL, &srv);
+                        g_branchTextures[branchHash] = tex;
+                        g_branchSRVs[branchHash] = srv;
+                    }
+                }
+            } else if (g_branchTextures[branchHash] != nullptr) {
+                g_pd3dDeviceContext->UpdateSubresource(g_branchTextures[branchHash], 0, NULL, tempBranchBuffer, 256 * 4, 0);
             }
         }
     }
@@ -3107,6 +3163,177 @@ namespace DX11Hook {
 
             if (ImGui::Checkbox(LanguageManager::GetText("OPENING_ANIMATION"), &MapRenderState::openingAnimation)) {
                 LanguageManager::SaveConfig();
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // 3. 地图数据源、读写控制与多级缓存架构
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("MAP_DATA_CACHE_SETTINGS"));
+            ImGui::Separator();
+
+            if (ImGui::Checkbox(LanguageManager::GetText("LOAD_NEW_CHUNKS"), &MapRenderState::g_loadNewChunks)) {
+                LanguageManager::SaveConfig();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", LanguageManager::GetText("LOAD_NEW_CHUNKS_DESC"));
+            }
+
+            if (ImGui::Checkbox(LanguageManager::GetText("UPDATE_CHUNKS"), &MapRenderState::g_updateChunks)) {
+                LanguageManager::SaveConfig();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", LanguageManager::GetText("UPDATE_CHUNKS_DESC"));
+            }
+
+            {
+                float btnSize = ImGui::GetFrameHeight();
+                float totalAvail = ImGui::GetContentRegionAvail().x;
+                float labelW = ImGui::CalcTextSize(LanguageManager::GetText("MAP_WRITING_DISTANCE")).x;
+                float sliderW = std::clamp(totalAvail - labelW - btnSize - 16.0f * curScale, 110.0f * curScale, 180.0f * curScale);
+
+                int writeDist = std::clamp(MapRenderState::g_mapWritingDistance, 0, 32);
+                char writeDistFmt[64];
+                if (writeDist == 0) {
+                    snprintf(writeDistFmt, sizeof(writeDistFmt), "%s", LanguageManager::GetText("ENTITY_HEIGHT_LIMIT_UNLIMITED"));
+                } else {
+                    snprintf(writeDistFmt, sizeof(writeDistFmt), "%d Chunks (%dm)", writeDist, writeDist * 16);
+                }
+                ImGui::SetNextItemWidth(sliderW);
+                if (ImGui::SliderInt("##MapWritingDistSlider", &writeDist, 0, 32, writeDistFmt)) {
+                    MapRenderState::g_mapWritingDistance = writeDist;
+                    LanguageManager::SaveConfig();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", LanguageManager::GetText("MAP_WRITING_DISTANCE_DESC"));
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("\u21BA##MapWritingDistReset", ImVec2(btnSize, btnSize))) {
+                    MapRenderState::g_mapWritingDistance = 0;
+                    LanguageManager::SaveConfig();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s (%s)", LanguageManager::GetText("RESET"), LanguageManager::GetText("ENTITY_HEIGHT_LIMIT_UNLIMITED"));
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", LanguageManager::GetText("MAP_WRITING_DISTANCE"));
+            }
+
+            if (ImGui::Checkbox(LanguageManager::GetText("IGNORE_HEIGHTMAPS"), &MapRenderState::g_ignoreHeightmaps)) {
+                MapRenderState::forceRescan.store(true);
+                LanguageManager::SaveConfig();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", LanguageManager::GetText("IGNORE_HEIGHTMAPS_DESC"));
+            }
+
+            if (ImGui::Checkbox(LanguageManager::GetText("MULTI_LEVEL_PYRAMID"), &MapRenderState::g_multiLevelPyramid)) {
+                MapRenderState::clearGPUCache.store(true);
+                LanguageManager::SaveConfig();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", LanguageManager::GetText("MULTI_LEVEL_PYRAMID_DESC"));
+            }
+
+            {
+                float btnSize = ImGui::GetFrameHeight();
+                float totalAvail = ImGui::GetContentRegionAvail().x;
+                float labelW = ImGui::CalcTextSize(LanguageManager::GetText("MAX_LOADED_REGIONS")).x;
+                float sliderW = std::clamp(totalAvail - labelW - btnSize - 16.0f * curScale, 110.0f * curScale, 180.0f * curScale);
+
+                int maxRegions = std::clamp(MapRenderState::g_maxLoadedRegions, 64, 4096);
+                ImGui::SetNextItemWidth(sliderW);
+                if (ImGui::SliderInt("##MaxLoadedRegionsSlider", &maxRegions, 64, 4096, "%d")) {
+                    MapRenderState::g_maxLoadedRegions = maxRegions;
+                    LanguageManager::SaveConfig();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", LanguageManager::GetText("MAX_LOADED_REGIONS_DESC"));
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("\u21BA##MaxLoadedRegionsReset", ImVec2(btnSize, btnSize))) {
+                    MapRenderState::g_maxLoadedRegions = 512;
+                    LanguageManager::SaveConfig();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s (512)", LanguageManager::GetText("RESET"));
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", LanguageManager::GetText("MAX_LOADED_REGIONS"));
+            }
+
+            // 实时显示当前驻留区域数与跨进程文件锁状态
+            {
+                size_t loadedCount = MapCacheManager::GetLoadedRegionCount();
+                bool lockedByOther = MapCacheManager::IsCacheLockedByAnotherProcess();
+                ImGui::TextDisabled(
+                    LanguageManager::GetText("CACHE_MEMORY_STATUS"),
+                    (int)loadedCount,
+                    MapRenderState::g_maxLoadedRegions,
+                    lockedByOther ? LanguageManager::GetText("CACHE_LOCK_READONLY") : LanguageManager::GetText("CACHE_LOCK_ACTIVE")
+                );
+            }
+
+            ImGui::Spacing();
+            {
+                float availW = ImGui::GetContentRegionAvail().x;
+                float spacing = ImGui::GetStyle().ItemSpacing.x;
+                float halfW = (availW - spacing) * 0.5f;
+                int viewDim = MapRenderState::GetEffectiveViewDimensionId();
+                bool viewIsCave = (viewDim == 1) || (viewDim == 0 && MapRenderState::bigMapOverworldCave);
+
+                if (ImGui::Button(LanguageManager::GetText("RELOAD_ALL_REGIONS"), ImVec2(halfW, 0))) {
+                    int cnt = MapCacheManager::ReloadAllRegions();
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), LanguageManager::GetText("RELOAD_ALL_REGIONS_DONE"), cnt);
+                    MapRenderState::g_regionOpStatusText = buf;
+                    MapRenderState::g_regionOpStatusTime = std::chrono::steady_clock::now();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", LanguageManager::GetText("RELOAD_ALL_REGIONS_DESC"));
+                }
+
+                ImGui::SameLine();
+                if (ImGui::Button(LanguageManager::GetText("RELOAD_VIEWED_REGIONS"), ImVec2(halfW, 0))) {
+                    int cnt = MapCacheManager::ReloadViewedRegions(
+                        MapRenderState::g_viewedMinRx,
+                        MapRenderState::g_viewedMaxRx,
+                        MapRenderState::g_viewedMinRz,
+                        MapRenderState::g_viewedMaxRz,
+                        viewIsCave
+                    );
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), LanguageManager::GetText("RELOAD_VIEWED_REGIONS_DONE"), cnt);
+                    MapRenderState::g_regionOpStatusText = buf;
+                    MapRenderState::g_regionOpStatusTime = std::chrono::steady_clock::now();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", LanguageManager::GetText("RELOAD_VIEWED_REGIONS_DESC"));
+                }
+
+                if (ImGui::Button(LanguageManager::GetText("CONVERT_ALL_REGIONS"), ImVec2(availW, 0))) {
+                    std::string newId, newName;
+                    int copiedFiles = 0;
+                    if (MapCacheManager::ConvertAllRegionsToMap(newId, newName, copiedFiles)) {
+                        char buf[256];
+                        snprintf(buf, sizeof(buf), LanguageManager::GetText("CONVERT_ALL_REGIONS_DONE"), newName.c_str(), copiedFiles);
+                        MapRenderState::g_regionOpStatusText = buf;
+                        MapRenderState::g_regionOpStatusTime = std::chrono::steady_clock::now();
+                    }
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", LanguageManager::GetText("CONVERT_ALL_REGIONS_DESC"));
+                }
+
+                if (!MapRenderState::g_regionOpStatusText.empty()) {
+                    float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - MapRenderState::g_regionOpStatusTime).count();
+                    if (elapsed < 6.0f) {
+                        ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "%s", MapRenderState::g_regionOpStatusText.c_str());
+                    } else {
+                        MapRenderState::g_regionOpStatusText.clear();
+                    }
+                }
             }
 
             ImGui::Spacing();
@@ -4100,6 +4327,10 @@ namespace DX11Hook {
             g_regionSRVs.clear();
             for(auto& p : g_regionTextures) if(p.second) p.second->Release();
             g_regionTextures.clear();
+            for(auto& p : g_branchSRVs) if(p.second) p.second->Release();
+            g_branchSRVs.clear();
+            for(auto& p : g_branchTextures) if(p.second) p.second->Release();
+            g_branchTextures.clear();
             MapRenderState::clearGPUCache.store(false);
         }
 
@@ -4226,6 +4457,12 @@ namespace DX11Hook {
         int startRz = (int)std::floor(minWz / 256.0f);
         int endRz   = (int)std::floor(maxWz / 256.0f);
 
+        // 记录当前视口覆盖的 Region 范围，供 Reload Viewed Regions 使用
+        MapRenderState::g_viewedMinRx = startRx;
+        MapRenderState::g_viewedMaxRx = endRx;
+        MapRenderState::g_viewedMinRz = startRz;
+        MapRenderState::g_viewedMaxRz = endRz;
+
         int texturesCreatedThisFrame = 0;
         {
             // [统一渲染] 所有维度(地表/洞穴/下界/末地)均使用缓存区域纹理
@@ -4233,7 +4470,7 @@ namespace DX11Hook {
             // UpdateMapTexture 仍为小地图提供实时纹理
             UpdateMapTexture();
 
-            // [地表模式] 渲染缓存区域纹理 (原有逻辑)
+            // [显存 GC] 定期释放远离视野的叶子区域与多级金字塔分支纹理
             static int s_vramGcTimer = 0;
             if (++s_vramGcTimer > 600) {
                 s_vramGcTimer = 0;
@@ -4251,26 +4488,96 @@ namespace DX11Hook {
                     g_regionTextures.erase(k);
                     MapCacheManager::MarkTextureDirty(k);
                 }
+
+                std::vector<uint64_t> branchKeysToErase;
+                for (auto& p : g_branchSRVs) {
+                    int bLevel = 1, brx = 0, brz = 0;
+                    bool bCave = false;
+                    MapCacheManager::DecodeBranchHash(p.first, bLevel, brx, brz, bCave);
+                    int minChildRx = brx * (1 << bLevel);
+                    int maxChildRx = minChildRx + (1 << bLevel) - 1;
+                    int minChildRz = brz * (1 << bLevel);
+                    int maxChildRz = minChildRz + (1 << bLevel) - 1;
+                    if (maxChildRx < startRx - 20 || minChildRx > endRx + 20 ||
+                        maxChildRz < startRz - 20 || minChildRz > endRz + 20) {
+                        branchKeysToErase.push_back(p.first);
+                    }
+                }
+                for (uint64_t bk : branchKeysToErase) {
+                    if (g_branchSRVs[bk]) g_branchSRVs[bk]->Release();
+                    g_branchSRVs.erase(bk);
+                    if (g_branchTextures[bk]) g_branchTextures[bk]->Release();
+                    g_branchTextures.erase(bk);
+                }
             }
 
             draw_list->AddCallback(PointSamplerCallback, nullptr);
 
+            // [四叉树多级金字塔 BranchLeveledRegion]
+            // 当开启多级金字塔且大地图大幅缩小 (< 0.5x) 时，自动切换至 Level 1 (2x2) 或 Level 2 (4x4) 降采样合并纹理，
+            // 将 DrawCall 缩减至 1/4 ~ 1/16 并消除缩小采样摩尔纹噪点。
+            bool useBranchPyramid = MapRenderState::g_multiLevelPyramid && (MapRenderState::bigMapZoom < 0.5f);
+            if (useBranchPyramid) {
+                int pyramidLevel = (MapRenderState::bigMapZoom < 0.25f) ? 2 : 1;
+                int span = (1 << pyramidLevel);
+                float branchWorldSize = 256.0f * (float)span;
+                int startBrx = startRx >> pyramidLevel;
+                int endBrx   = endRx >> pyramidLevel;
+                int startBrz = startRz >> pyramidLevel;
+                int endBrz   = endRz >> pyramidLevel;
+
+                for (int brx = startBrx; brx <= endBrx; ++brx) {
+                    for (int brz = startBrz; brz <= endBrz; ++brz) {
+                        uint64_t branchHash = MapCacheManager::GetBranchHash(pyramidLevel, brx, brz, isCave);
+                        UpdateBranchTexture(branchHash, texturesCreatedThisFrame);
+
+                        auto bIt = g_branchSRVs.find(branchHash);
+                        if (bIt != g_branchSRVs.end()) {
+                            if (bIt->second != nullptr) {
+                                float sx_min = std::floor(cx + (brx * branchWorldSize - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                                float sy_min = std::floor(cy + (brz * branchWorldSize - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                                float sx_max = std::floor(cx + ((brx + 1) * branchWorldSize - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                                float sy_max = std::floor(cy + ((brz + 1) * branchWorldSize - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                                draw_list->AddImage((void*)bIt->second, ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
+                            }
+                        } else {
+                            // 分支纹理尚未在当前帧建好时，平滑回退显示已驻留的子叶子区域纹理，零闪烁过渡
+                            for (int dz = 0; dz < span; ++dz) {
+                                for (int dx = 0; dx < span; ++dx) {
+                                    int rx = brx * span + dx;
+                                    int rz = brz * span + dz;
+                                    uint64_t leafHash = MapCacheManager::GetRegionHash(rx, rz, isCave);
+                                    auto lIt = g_regionSRVs.find(leafHash);
+                                    if (lIt != g_regionSRVs.end() && lIt->second != nullptr) {
+                                        float sx_min = std::floor(cx + (rx * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                                        float sy_min = std::floor(cy + (rz * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                                        float sx_max = std::floor(cx + ((rx + 1) * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                                        float sy_max = std::floor(cy + ((rz + 1) * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                                        draw_list->AddImage((void*)lIt->second, ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
                 for (int rx = startRx; rx <= endRx; rx++) {
-                for (int rz = startRz; rz <= endRz; rz++) {
-                    // [洞穴/下界隔离] 洞穴或下界模式下请求/绘制对应缓存纹理, 避免相互污染
-                    uint64_t hash = MapCacheManager::GetRegionHash(rx, rz, isCave);
-                    UpdateRegionTexture(hash, texturesCreatedThisFrame);
+                    for (int rz = startRz; rz <= endRz; rz++) {
+                        // [洞穴/下界隔离] 洞穴或下界模式下请求/绘制对应缓存纹理, 避免相互污染
+                        uint64_t hash = MapCacheManager::GetRegionHash(rx, rz, isCave);
+                        UpdateRegionTexture(hash, texturesCreatedThisFrame);
 
-                    if (g_regionSRVs.find(hash) != g_regionSRVs.end()) {
-                        // 【渲染管线减负】只有包含实际像素的非空贴图才会被加入 ImGui 的 DrawCall 绘制队列！
-                        // 极大减负显卡在微缩大地图时的渲染压力，实现绝对满帧体验。
-                        if (g_regionSRVs[hash] != nullptr) {
-                            float sx_min = std::floor(cx + (rx * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
-                            float sy_min = std::floor(cy + (rz * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
-                            float sx_max = std::floor(cx + ((rx + 1) * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
-                            float sy_max = std::floor(cy + ((rz + 1) * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                        if (g_regionSRVs.find(hash) != g_regionSRVs.end()) {
+                            // 【渲染管线减负】只有包含实际像素的非空贴图才会被加入 ImGui 的 DrawCall 绘制队列！
+                            // 极大减负显卡在微缩大地图时的渲染压力，实现绝对满帧体验。
+                            if (g_regionSRVs[hash] != nullptr) {
+                                float sx_min = std::floor(cx + (rx * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                                float sy_min = std::floor(cy + (rz * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                                float sx_max = std::floor(cx + ((rx + 1) * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                                float sy_max = std::floor(cy + ((rz + 1) * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
 
-                            draw_list->AddImage((void*)g_regionSRVs[hash], ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
+                                draw_list->AddImage((void*)g_regionSRVs[hash], ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
+                            }
                         }
                     }
                 }
@@ -7851,7 +8158,7 @@ namespace DX11Hook {
         float curScale = MapRenderState::globalUIScale;
         if (curScale < 0.1f) curScale = 1.0f;
 
-        ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f * curScale, 100.0f * curScale), ImVec2(480.0f * curScale, 1000.0f * curScale));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(520.0f * curScale, 100.0f * curScale), ImVec2(520.0f * curScale, 1000.0f * curScale));
         ImGui::SetNextWindowPos(ImVec2(50.0f * curScale, 50.0f * curScale), ImGuiCond_FirstUseEver);
 
         ImGuiWindowFlags winFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize;
@@ -7872,7 +8179,7 @@ namespace DX11Hook {
                 MapRenderState::SetDimensionCaveModeType(MapRenderState::currentDimensionId, curCaveType);
                 LanguageManager::SaveConfig();
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), "%s", LanguageManager::GetText("CAVE_MODE_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -7894,7 +8201,7 @@ namespace DX11Hook {
                 }
                 LanguageManager::SaveConfig();
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), "%s", LanguageManager::GetText("CAVE_DEFAULT_TYPE_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -7916,7 +8223,7 @@ namespace DX11Hook {
             if (ImGui::Checkbox(LanguageManager::GetText("WP_TAB_END"), &MapRenderState::g_caveAllowedEnd)) {
                 LanguageManager::SaveConfig();
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_ALLOWED_DIMS_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -7942,7 +8249,7 @@ namespace DX11Hook {
                 MapRenderState::g_autoCaveMode = autoRoofIdx - 1;
                 LanguageManager::SaveConfig();
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_AUTO_ROOF_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -7952,13 +8259,13 @@ namespace DX11Hook {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOGGLE_TIMER"));
             ImGui::SameLine(210.0f * curScale);
             int toggleTimer = MapRenderState::g_caveModeToggleTimer;
-            ImGui::SetNextItemWidth(140.0f * curScale);
+            ImGui::SetNextItemWidth(125.0f * curScale);
             if (ImGui::SliderInt("##CaveToggleTimer", &toggleTimer, 0, 5000, "%d ms")) {
                 MapRenderState::g_caveModeToggleTimer = toggleTimer;
                 LanguageManager::SaveConfig();
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(65.0f * curScale);
+            ImGui::SetNextItemWidth(105.0f * curScale);
             if (ImGui::InputInt("##CaveToggleTimerIn", &toggleTimer, 100, 500, ImGuiInputTextFlags_EnterReturnsTrue)) {
                 toggleTimer = std::clamp(toggleTimer, 0, 5000);
                 MapRenderState::g_caveModeToggleTimer = toggleTimer;
@@ -7972,7 +8279,7 @@ namespace DX11Hook {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s (1000 ms)", LanguageManager::GetText("RESET"));
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOGGLE_TIMER_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -8000,13 +8307,13 @@ namespace DX11Hook {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOP_Y"));
             ImGui::SameLine(210.0f * curScale);
             int topY = MapRenderState::g_caveTopY;
-            ImGui::SetNextItemWidth(140.0f * curScale);
+            ImGui::SetNextItemWidth(125.0f * curScale);
             if (ImGui::SliderInt("##CaveTopY", &topY, -64, 320, "%d")) {
                 MapRenderState::g_caveTopY = topY;
                 LanguageManager::SaveConfig();
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(65.0f * curScale);
+            ImGui::SetNextItemWidth(105.0f * curScale);
             if (ImGui::InputInt("##CaveTopYIn", &topY, 1, 5, ImGuiInputTextFlags_EnterReturnsTrue)) {
                 topY = (topY < -64) ? -64 : (topY > 320) ? 320 : topY;
                 MapRenderState::g_caveTopY = topY;
@@ -8020,7 +8327,7 @@ namespace DX11Hook {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s (64)", LanguageManager::GetText("RESET"));
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_TOP_Y_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -8032,13 +8339,13 @@ namespace DX11Hook {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("CAVE_DEPTH"));
             ImGui::SameLine(210.0f * curScale);
             int depth = MapRenderState::g_caveDepth;
-            ImGui::SetNextItemWidth(140.0f * curScale);
+            ImGui::SetNextItemWidth(125.0f * curScale);
             if (ImGui::SliderInt("##CaveDepth", &depth, 1, 64, "%d")) {
                 MapRenderState::g_caveDepth = depth;
                 LanguageManager::SaveConfig();
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(65.0f * curScale);
+            ImGui::SetNextItemWidth(105.0f * curScale);
             if (ImGui::InputInt("##CaveDepthIn", &depth, 1, 5, ImGuiInputTextFlags_EnterReturnsTrue)) {
                 depth = (depth < 1) ? 1 : (depth > 64) ? 64 : depth;
                 MapRenderState::g_caveDepth = depth;
@@ -8052,7 +8359,7 @@ namespace DX11Hook {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s (30)", LanguageManager::GetText("RESET"));
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_DEPTH_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -8064,7 +8371,7 @@ namespace DX11Hook {
             if (ImGui::Checkbox(LanguageManager::GetText("CAVE_LEGIBLE"), &MapRenderState::g_legibleCaveMaps)) {
                 LanguageManager::SaveConfig();
             }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 450.0f * curScale);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 490.0f * curScale);
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", LanguageManager::GetText("CAVE_LEGIBLE_DESC"));
             ImGui::PopTextWrapPos();
 
@@ -8489,6 +8796,57 @@ namespace DX11Hook {
             if (ImGui::Button(LanguageManager::GetText("CREATE_NEW_MAP"), ImVec2(130.0f * curScale, 26.0f * curScale))) {
                 MapRenderState::newMapNameInput[0] = '\0';
                 MapRenderState::showNewMapModal = true;
+            }
+
+            // 区域重载与独立副本另存快捷栏
+            {
+                int viewDim = MapRenderState::GetEffectiveViewDimensionId();
+                bool viewIsCave = (viewDim == 1) || (viewDim == 0 && MapRenderState::bigMapOverworldCave);
+                if (ImGui::Button(LanguageManager::GetText("RELOAD_ALL_REGIONS"), ImVec2(0.0f, 24.0f * curScale))) {
+                    int cnt = MapCacheManager::ReloadAllRegions();
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), LanguageManager::GetText("RELOAD_ALL_REGIONS_DONE"), cnt);
+                    MapRenderState::g_regionOpStatusText = buf;
+                    MapRenderState::g_regionOpStatusTime = std::chrono::steady_clock::now();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("RELOAD_ALL_REGIONS_DESC"));
+
+                ImGui::SameLine();
+                if (ImGui::Button(LanguageManager::GetText("RELOAD_VIEWED_REGIONS"), ImVec2(0.0f, 24.0f * curScale))) {
+                    int cnt = MapCacheManager::ReloadViewedRegions(
+                        MapRenderState::g_viewedMinRx,
+                        MapRenderState::g_viewedMaxRx,
+                        MapRenderState::g_viewedMinRz,
+                        MapRenderState::g_viewedMaxRz,
+                        viewIsCave
+                    );
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), LanguageManager::GetText("RELOAD_VIEWED_REGIONS_DONE"), cnt);
+                    MapRenderState::g_regionOpStatusText = buf;
+                    MapRenderState::g_regionOpStatusTime = std::chrono::steady_clock::now();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("RELOAD_VIEWED_REGIONS_DESC"));
+
+                ImGui::SameLine();
+                if (ImGui::Button(LanguageManager::GetText("CONVERT_ALL_REGIONS"), ImVec2(0.0f, 24.0f * curScale))) {
+                    std::string newId, newName;
+                    int copiedFiles = 0;
+                    if (MapCacheManager::ConvertAllRegionsToMap(newId, newName, copiedFiles)) {
+                        char buf[256];
+                        snprintf(buf, sizeof(buf), LanguageManager::GetText("CONVERT_ALL_REGIONS_DONE"), newName.c_str(), copiedFiles);
+                        MapRenderState::g_regionOpStatusText = buf;
+                        MapRenderState::g_regionOpStatusTime = std::chrono::steady_clock::now();
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("CONVERT_ALL_REGIONS_DESC"));
+
+                if (!MapRenderState::g_regionOpStatusText.empty()) {
+                    float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - MapRenderState::g_regionOpStatusTime).count();
+                    if (elapsed < 6.0f) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "%s", MapRenderState::g_regionOpStatusText.c_str());
+                    }
+                }
             }
 
             ImGui::Spacing();

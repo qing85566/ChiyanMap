@@ -1293,6 +1293,21 @@ inline short SafeGetSurfaceY(BlockSource& region, int x, int z) noexcept {
         // includeUnloaded=true 保留原行为（对已加载区块返回真实 Y，对完全未加载返回 ≤-64）
         // 部分加载区块的 NULL subchunk AV 由 __except 兜底
         result = region.getAboveTopSolidBlock(x, z, true, true);
+        if (MapRenderState::g_ignoreHeightmaps && result != -32000) {
+            int maxY = (MapRenderState::currentDimensionId == 1) ? 127 : 319;
+            int minY = (MapRenderState::currentDimensionId == 0) ? -64 : 0;
+            short scanResult = -64;
+            for (int y = maxY; y >= minY; --y) {
+                Block const& b = region.getBlock(BlockPos(x, y, z));
+                if (!b.isAir()) {
+                    scanResult = (short)(y + 1);
+                    break;
+                }
+            }
+            if (scanResult > -64) {
+                result = scanResult;
+            }
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // 部分加载区块触发 AV → 视为"未就绪"，调用方下次重试
         result = -32000;
@@ -3760,6 +3775,20 @@ LL_TYPE_INSTANCE_HOOK(
         if (MapRenderState::forceRescan.exchange(false)) {
             g_currentScanX = px;
             g_currentScanZ = pz;
+            bool isCaveMode = (MapRenderState::currentDimensionId == 1) || MapRenderState::g_caveModeActive;
+            MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCaveMode, false, g_textureData, g_mapLightsBack);
+            {
+                std::lock_guard<std::mutex> lock(g_mapDataMutex);
+                std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
+                g_lastRenderX = px;
+                g_lastRenderZ = pz;
+                g_textureCenterX = (float)px;
+                g_textureCenterZ = (float)pz;
+                g_textureReadyToUpload.store(true);
+                g_mapDataUpdated.store(true);
+            }
             g_ticksSinceScan = 0;
             g_isScanning = true;
             g_scanDimension = MapRenderState::currentDimensionId;
@@ -4091,8 +4120,12 @@ LL_TYPE_INSTANCE_HOOK(
                         currentCaveScanDepth = caveDepth;
                     }
 
-                    int minR = (g_scanPhase == 0) ? 0 : (SCAN_INNER_RADIUS + 1);
-                    int maxR = (g_scanPhase == 0) ? SCAN_INNER_RADIUS : MAP_DATA_RADIUS;
+                    int effectiveMaxRadius = (MapRenderState::g_mapWritingDistance > 0)
+                        ? std::min(MAP_DATA_RADIUS, MapRenderState::g_mapWritingDistance * 16)
+                        : MAP_DATA_RADIUS;
+                    int effectiveInnerRadius = std::min(SCAN_INNER_RADIUS, effectiveMaxRadius);
+                    int minR = (g_scanPhase == 0) ? 0 : (effectiveInnerRadius + 1);
+                    int maxR = (g_scanPhase == 0) ? effectiveInnerRadius : effectiveMaxRadius;
                     if (g_scanRadius < minR) g_scanRadius = minR;
 
                     while (g_scanRadius <= maxR && !timeBudgetExceeded) {
@@ -4107,6 +4140,16 @@ LL_TYPE_INSTANCE_HOOK(
                             int targetZ = g_currentScanZ + dz;
                             int arrX    = dx + MAP_DATA_RADIUS;
                             int arrZ    = dz + MAP_DATA_RADIUS;
+
+                            // [地图写入控制开关] Load New Chunks / Update Chunks 过滤
+                            if (!MapRenderState::g_loadNewChunks || !MapRenderState::g_updateChunks) {
+                                bool alreadyExplored = (g_mapColorsBack[arrX][arrZ].a > 0.01f);
+                                if ((!alreadyExplored && !MapRenderState::g_loadNewChunks) ||
+                                    (alreadyExplored && !MapRenderState::g_updateChunks)) {
+                                    g_scanPerimeterIndex++;
+                                    continue;
+                                }
+                            }
 
                             int startY = currentCaveTopY;
                             if (isFullCaveMode && MapRenderState::currentDimensionId != 1) {
@@ -4200,7 +4243,7 @@ LL_TYPE_INSTANCE_HOOK(
                     }
 
                     if (g_scanRadius > maxR) {
-                        if (g_scanPhase == 0) {
+                        if (g_scanPhase == 0 && effectiveInnerRadius < effectiveMaxRadius) {
                             // Phase 0 核心视野扫描完成：立即提交前台，切换至 Phase 1 外围扫描
                             {
                                 std::lock_guard<std::mutex> lock(g_mapDataMutex);
@@ -4217,7 +4260,7 @@ LL_TYPE_INSTANCE_HOOK(
                                 SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, true, g_scanBiomeEntries);
                             }
                             g_scanPhase = 1;
-                            g_scanRadius = SCAN_INNER_RADIUS + 1;
+                            g_scanRadius = effectiveInnerRadius + 1;
                             g_scanPerimeterIndex = 0;
                         } else {
                             // Phase 1 全图扫描完成
@@ -4267,8 +4310,12 @@ LL_TYPE_INSTANCE_HOOK(
                     auto scanStartTime = std::chrono::high_resolution_clock::now();
                     bool timeBudgetExceeded = false;
 
-                    int minR = (g_scanPhase == 0) ? 0 : (SCAN_INNER_RADIUS + 1);
-                    int maxR = (g_scanPhase == 0) ? SCAN_INNER_RADIUS : MAP_DATA_RADIUS;
+                    int effectiveMaxRadius = (MapRenderState::g_mapWritingDistance > 0)
+                        ? std::min(MAP_DATA_RADIUS, MapRenderState::g_mapWritingDistance * 16)
+                        : MAP_DATA_RADIUS;
+                    int effectiveInnerRadius = std::min(SCAN_INNER_RADIUS, effectiveMaxRadius);
+                    int minR = (g_scanPhase == 0) ? 0 : (effectiveInnerRadius + 1);
+                    int maxR = (g_scanPhase == 0) ? effectiveInnerRadius : effectiveMaxRadius;
                     if (g_scanRadius < minR) g_scanRadius = minR;
 
                     while (g_scanRadius <= maxR && !timeBudgetExceeded) {
@@ -4283,6 +4330,16 @@ LL_TYPE_INSTANCE_HOOK(
                             int targetZ = g_currentScanZ + dz;
                             int arrX    = dx + MAP_DATA_RADIUS;
                             int arrZ    = dz + MAP_DATA_RADIUS;
+
+                            // [地图写入控制开关] Load New Chunks / Update Chunks 过滤
+                            if (!MapRenderState::g_loadNewChunks || !MapRenderState::g_updateChunks) {
+                                bool alreadyExplored = (g_mapColorsBack[arrX][arrZ].a > 0.01f);
+                                if ((!alreadyExplored && !MapRenderState::g_loadNewChunks) ||
+                                    (alreadyExplored && !MapRenderState::g_updateChunks)) {
+                                    g_scanPerimeterIndex++;
+                                    continue;
+                                }
+                            }
 
                             // [安全] 使用 SafeGetSurfaceY (SEH 包装)，防止部分加载区块 AV 崩溃
                             short topY = SafeGetSurfaceY(region, targetX, targetZ);
@@ -4585,7 +4642,7 @@ LL_TYPE_INSTANCE_HOOK(
                     }
 
                     if (g_scanRadius > maxR) {
-                        if (g_scanPhase == 0) {
+                        if (g_scanPhase == 0 && effectiveInnerRadius < effectiveMaxRadius) {
                             // Phase 0 核心视野扫描完成：立即原子提交前台，切换至 Phase 1 外围扫描
                             {
                                 std::lock_guard<std::mutex> lock(g_mapDataMutex);
@@ -4613,7 +4670,7 @@ LL_TYPE_INSTANCE_HOOK(
                             }
 
                             g_scanPhase = 1;
-                            g_scanRadius = SCAN_INNER_RADIUS + 1;
+                            g_scanRadius = effectiveInnerRadius + 1;
                             g_scanPerimeterIndex = 0;
                         } else {
                             // Phase 1 全图扫描完成
