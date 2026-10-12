@@ -1,6 +1,7 @@
 #include "state/WaypointManager.h"
 #include "state/MultiworldManager.h"
 #include "state/LanguageManager.h"
+#include "state/MapRenderState.h"
 #include <fstream>
 #include <filesystem>
 #include <random>
@@ -13,6 +14,7 @@ using json = nlohmann::json;
 namespace WaypointManager {
     std::vector<Waypoint> g_waypoints;
     std::set<std::string> g_customFolders;
+    std::set<std::string> g_customSets;
     std::mutex g_wpMutex;
     Waypoint g_lastDeletedWaypoint;
     bool g_hasDeletedWaypoint = false;
@@ -49,6 +51,14 @@ namespace WaypointManager {
             return "mods/ChiyanMap/waypoints/" + g_worldId + "_folders.json";
         }
         return "mods/ChiyanMap/waypoints/" + g_worldId + "_" + g_currentMapId + "_folders.json";
+    }
+
+    // 生成路径点集合(Waypoint Sets)存档文件名
+    std::string SetsFile() {
+        if (g_currentMapId.empty() || g_currentMapId == "default") {
+            return "mods/ChiyanMap/waypoints/" + g_worldId + "_sets.json";
+        }
+        return "mods/ChiyanMap/waypoints/" + g_worldId + "_" + g_currentMapId + "_sets.json";
     }
 
     // 读取单个维度的路径点并标记所属维度
@@ -93,11 +103,18 @@ namespace WaypointManager {
                 wp.pinned = item.value("pinned", false);
                 wp.isTemporary = item.value("isTemporary", false);
                 wp.folder = item.value("folder", "");
+                wp.set = item.value("set", "");
+                if (wp.set.empty()) {
+                    wp.set = "gui.xaero_default";
+                }
                 wp.createdAt = item.value("createdAt", (uint64_t)0);
                 wp.order = item.value("order", (int)g_waypoints.size());
                 wp.isCave = item.value("isCave", (int8_t)-1);
                 if (!wp.folder.empty()) {
                     g_customFolders.insert(wp.folder);
+                }
+                if (!wp.set.empty() && wp.set != "gui.xaero_default") {
+                    g_customSets.insert(wp.set);
                 }
                 g_waypoints.push_back(wp);
             }
@@ -127,6 +144,7 @@ namespace WaypointManager {
             obj["pinned"] = wp.pinned;
             obj["isTemporary"] = wp.isTemporary;
             obj["folder"] = wp.folder;
+            obj["set"] = wp.set;
             obj["createdAt"] = wp.createdAt;
             obj["order"] = wp.order;
             obj["isCave"] = (int)wp.isCave;
@@ -159,12 +177,28 @@ namespace WaypointManager {
             fOut << fList.dump(4);
             fOut.close();
         }
+
+        // 保存路径点集合配置
+        std::set<std::string> allSets = g_customSets;
+        for (const auto& wp : g_waypoints) {
+            if (!wp.set.empty() && wp.set != "gui.xaero_default") allSets.insert(wp.set);
+        }
+        json sList = json::array();
+        for (const auto& s : allSets) {
+            if (!s.empty()) sList.push_back(s);
+        }
+        std::ofstream sOut(SetsFile());
+        if (sOut.is_open()) {
+            sOut << sList.dump(4);
+            sOut.close();
+        }
     }
 
     void LoadWaypoints() {
         std::lock_guard<std::mutex> lock(g_wpMutex);
         g_waypoints.clear();
         g_customFolders.clear();
+        g_customSets.clear();
 
         // 加载文件夹元数据
         std::string fPath = FoldersFile();
@@ -194,7 +228,48 @@ namespace WaypointManager {
                     for (const auto& item : fList) {
                         if (item.is_string()) {
                             std::string s = item.get<std::string>();
-                            if (!s.empty()) g_customFolders.insert(s);
+                            if (!s.empty()) {
+                                g_customFolders.insert(s);
+                                g_customSets.insert(s);
+                            }
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+
+        // 加载集合元数据 (若存在则覆盖合并)
+        std::string sPath = SetsFile();
+        if (!std::filesystem::exists(sPath)) {
+            std::string rawLevelId = g_worldId;
+            size_t sPos = rawLevelId.find("_S");
+            if (sPos != std::string::npos) rawLevelId = rawLevelId.substr(0, sPos);
+            std::error_code ec;
+            std::string wpDir = "mods/ChiyanMap/waypoints";
+            if (std::filesystem::is_directory(wpDir, ec)) {
+                for (auto const& entry : std::filesystem::directory_iterator(wpDir, ec)) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string fn = entry.path().filename().string();
+                    if (fn.rfind(rawLevelId, 0) == 0 && fn.ends_with("_sets.json")) {
+                        sPath = entry.path().string();
+                        break;
+                    }
+                }
+            }
+        }
+        if (std::filesystem::exists(sPath)) {
+            try {
+                std::ifstream sIn(sPath);
+                if (sIn.is_open()) {
+                    json sList;
+                    sIn >> sList;
+                    for (const auto& item : sList) {
+                        if (item.is_string()) {
+                            std::string s = item.get<std::string>();
+                            if (!s.empty() && s != "gui.xaero_default") {
+                                g_customSets.insert(s);
+                                g_customFolders.insert(s);
+                            }
                         }
                     }
                 }
@@ -242,7 +317,7 @@ namespace WaypointManager {
         return g_currentMapId.empty() ? "default" : g_currentMapId;
     }
 
-    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId, bool pinned, const std::string& folder, int8_t isCave) {
+    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId, bool pinned, const std::string& folder, int8_t isCave, const std::string& set) {
         Waypoint wp;
         wp.id = GenerateID();
         wp.name = name;
@@ -251,6 +326,11 @@ namespace WaypointManager {
         wp.enabled = true;
         wp.dimId = (dimId >= 0 && dimId < 3) ? dimId : g_currentDim; // 默认归属玩家当前维度
         wp.pinned = pinned;
+        std::string finalSet = set;
+        if (finalSet.empty()) {
+            finalSet = "gui.xaero_default";
+        }
+        wp.set = finalSet;
         wp.folder = folder;
         wp.isCave = isCave;
         wp.createdAt = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -259,7 +339,8 @@ namespace WaypointManager {
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             wp.order = (int)g_waypoints.size();
-            if (!folder.empty()) g_customFolders.insert(folder);
+            if (!wp.folder.empty()) g_customFolders.insert(wp.folder);
+            if (!wp.set.empty() && wp.set != "gui.xaero_default") g_customSets.insert(wp.set);
             g_waypoints.push_back(wp);
         }
         SaveWaypoints();
@@ -339,7 +420,7 @@ namespace WaypointManager {
         if (changed) SaveWaypoints();
     }
 
-    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned, const std::string& folder, int8_t isCave, int dimId) {
+    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned, const std::string& folder, int8_t isCave, int dimId, const std::string& set) {
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             auto it = std::find_if(g_waypoints.begin(), g_waypoints.end(),
@@ -350,12 +431,18 @@ namespace WaypointManager {
             it->r = r; it->g = g; it->b = b;
             it->enabled = enabled;
             it->pinned = pinned;
+            std::string finalSet = set;
+            if (finalSet.empty()) {
+                finalSet = "gui.xaero_default";
+            }
+            it->set = finalSet;
             it->folder = folder;
             it->isCave = isCave;
             if (dimId >= 0 && dimId < 3) {
                 it->dimId = dimId;
             }
-            if (!folder.empty()) g_customFolders.insert(folder);
+            if (!it->folder.empty()) g_customFolders.insert(it->folder);
+            if (!it->set.empty() && it->set != "gui.xaero_default") g_customSets.insert(it->set);
         }
         SaveWaypoints();
     }
@@ -565,4 +652,114 @@ namespace WaypointManager {
         }
         SaveWaypoints();
     }
+
+    // [P3] 路径点集合管理接口实现
+    std::vector<std::string> GetWaypointSets() {
+        std::lock_guard<std::mutex> lock(g_wpMutex);
+        std::set<std::string> setPool = g_customSets;
+        for (const auto& wp : g_waypoints) {
+            if (!wp.set.empty() && wp.set != "gui.xaero_default") {
+                setPool.insert(wp.set);
+            }
+        }
+        std::vector<std::string> result;
+        result.push_back("gui.xaero_default");
+        for (const auto& s : setPool) {
+            if (s != "gui.xaero_default") {
+                result.push_back(s);
+            }
+        }
+        return result;
+    }
+
+    void AddWaypointSet(const std::string& setName) {
+        if (setName.empty() || setName == "gui.xaero_default") return;
+        {
+            std::lock_guard<std::mutex> lock(g_wpMutex);
+            g_customSets.insert(setName);
+            g_customFolders.insert(setName);
+        }
+        SaveWaypoints();
+    }
+
+    void RenameWaypointSet(const std::string& oldName, const std::string& newName) {
+        if (oldName.empty() || newName.empty() || oldName == newName || oldName == "gui.xaero_default") return;
+        {
+            std::lock_guard<std::mutex> lock(g_wpMutex);
+            g_customSets.erase(oldName);
+            g_customSets.insert(newName);
+            g_customFolders.erase(oldName);
+            g_customFolders.insert(newName);
+            for (auto& wp : g_waypoints) {
+                if (wp.set == oldName) {
+                    wp.set = newName;
+                    wp.folder = newName;
+                }
+            }
+        }
+        if (MapRenderState::currentWaypointSet == oldName) {
+            MapRenderState::currentWaypointSet = newName;
+            LanguageManager::SaveConfig();
+        }
+        SaveWaypoints();
+    }
+
+    void DeleteWaypointSet(const std::string& setName) {
+        if (setName.empty() || setName == "gui.xaero_default") return;
+        {
+            std::lock_guard<std::mutex> lock(g_wpMutex);
+            g_customSets.erase(setName);
+            for (auto& wp : g_waypoints) {
+                if (wp.set == setName) {
+                    wp.set = "gui.xaero_default";
+                }
+            }
+        }
+        if (MapRenderState::currentWaypointSet == setName) {
+            MapRenderState::currentWaypointSet = "gui.xaero_default";
+            LanguageManager::SaveConfig();
+        }
+        SaveWaypoints();
+    }
+
+    void CycleNextWaypointSet() {
+        auto sets = GetWaypointSets();
+        if (sets.empty()) return;
+        std::string current = MapRenderState::currentWaypointSet;
+        size_t nextIdx = 0;
+        for (size_t i = 0; i < sets.size(); ++i) {
+            if (sets[i] == current) {
+                nextIdx = (i + 1) % sets.size();
+                break;
+            }
+        }
+        std::string nextSet = sets[nextIdx];
+        MapRenderState::currentWaypointSet = nextSet;
+        MapRenderState::TriggerWaypointSetToast(nextSet);
+        LanguageManager::SaveConfig();
+    }
+
+    std::string GetCurrentWaypointSet() {
+        return MapRenderState::currentWaypointSet;
+    }
+
+    void SetCurrentWaypointSet(const std::string& setName) {
+        MapRenderState::currentWaypointSet = setName;
+        LanguageManager::SaveConfig();
+    }
+
+    std::string GetWaypointSetDisplayName(const std::string& setName) {
+        if (setName.empty() || setName == "gui.xaero_default") {
+            return LanguageManager::GetText("WP_SET_DEFAULT");
+        }
+        return setName;
+    }
+}
+
+void MapRenderState::TriggerWaypointSetToast(const std::string& setName) {
+    std::string disp = WaypointManager::GetWaypointSetDisplayName(setName);
+    char buf[256];
+    snprintf(buf, sizeof(buf), LanguageManager::GetText("WP_SET_TOAST"), disp.c_str());
+    g_waypointSetToast = buf;
+    g_waypointSetToastTimer = 2.5f;
 }

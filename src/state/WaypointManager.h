@@ -18,17 +18,19 @@ struct Waypoint {
     bool pinned = false; // 是否置顶
     bool isTemporary = false; // 是否为临时路径点 (全局唯一，每次新建覆盖旧的)
     std::string folder = ""; // 所属文件夹（空表示未分类）
+    std::string set = "gui.xaero_default"; // [P3] 所属集合 (默认 "gui.xaero_default")
     uint64_t createdAt = 0;  // 创建时间戳（毫秒）
     int order = 0;           // 手动排序次序
     mutable int8_t isCave = -1; // 主世界层级: -1=自动判定, 0=地表之上, 1=洞穴内
 
     // 构造函数
-    Waypoint() : x(0), y(0), z(0), r(1.f), g(1.f), b(1.f), enabled(true), dimId(0), pinned(false), isTemporary(false), folder(""), createdAt(0), order(0), isCave(-1) {}
+    Waypoint() : x(0), y(0), z(0), r(1.f), g(1.f), b(1.f), enabled(true), dimId(0), pinned(false), isTemporary(false), folder(""), set("gui.xaero_default"), createdAt(0), order(0), isCave(-1) {}
 };
 
 namespace WaypointManager {
     extern std::vector<Waypoint> g_waypoints;
     extern std::set<std::string> g_customFolders;
+    extern std::set<std::string> g_customSets;
     extern std::mutex g_wpMutex;
     extern Waypoint g_lastDeletedWaypoint;
     extern bool g_hasDeletedWaypoint;
@@ -39,12 +41,12 @@ namespace WaypointManager {
     void LoadWaypoints();
 
     // 增删查改接口
-    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId = -1, bool pinned = false, const std::string& folder = "", int8_t isCave = -1);
+    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId = -1, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, const std::string& set = "gui.xaero_default");
     void RemoveWaypoint(const std::string& id);
     void RemoveWaypoints(const std::set<std::string>& ids);
     void ToggleWaypoint(const std::string& id);
     void ToggleWaypointPin(const std::string& id);
-    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, int dimId = -1);
+    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, int dimId = -1, const std::string& set = "gui.xaero_default");
     bool RestoreLastDeletedWaypoint();
     int GetDeletedWaypointCount();
     std::string GetLastDeletedWaypointName();
@@ -63,6 +65,16 @@ namespace WaypointManager {
     void AddFolder(const std::string& folderName);
     void RenameFolder(const std::string& oldName, const std::string& newName);
     void DeleteFolder(const std::string& folderName);
+
+    // [P3] 路径点集合管理接口 (Waypoint Sets System)
+    std::vector<std::string> GetWaypointSets();
+    void AddWaypointSet(const std::string& setName);
+    void RenameWaypointSet(const std::string& oldName, const std::string& newName);
+    void DeleteWaypointSet(const std::string& setName);
+    void CycleNextWaypointSet();
+    std::string GetCurrentWaypointSet();
+    void SetCurrentWaypointSet(const std::string& setName);
+    std::string GetWaypointSetDisplayName(const std::string& setName);
 
     // [新增] 跨界热重载引擎
     void SwitchWorld(const std::string& worldId, int dimensionId);

@@ -312,6 +312,8 @@ namespace MapRenderState {
         Hotkey enlargeMinimap    = { 0x58, 0 }; // X: 放大小地图 (默认 X 键，避免与原版 Z 键状态效果界面冲突)
         Hotkey centerCamera      = { 0x20, 0 }; // Space: 大地图视角居中对齐玩家
         Hotkey selectExportArea  = { 0x10, 0 }; // Shift: 框选导出高清 PNG (默认 Shift 键)
+        Hotkey toggleSlimeChunks = { 0, 0 };    // 切换小地图史莱姆区块显示 (默认未绑定)
+        Hotkey switchWaypointSet = { 0, 0 };    // 切换路径点集合 (默认未绑定)
 
         // 系统预设默认值 (单一来源，供"单行重置"与"全部重置"共用)
         static constexpr HotkeyBindings Defaults() {
@@ -326,7 +328,9 @@ namespace MapRenderState {
                 { 0x4B, 0 },
                 { 0x58, 0 },
                 { 0x20, 0 },
-                { 0x10, 0 }
+                { 0x10, 0 },
+                { 0, 0 },
+                { 0, 0 }
             };
         }
     };
@@ -339,6 +343,30 @@ namespace MapRenderState {
     inline std::atomic<bool> g_hotkeyUndoRequested{false};
     // [路径点交互增强] Ctrl+Z 误删路径点恢复请求标志 (由 WndProc 设置，渲染线程消费)
     inline std::atomic<bool> g_waypointRestoreRequested{false};
+
+    // [P3] 路径点集合系统 (Waypoint Sets System)
+    inline std::string currentWaypointSet = "gui.xaero_default"; // 当前激活集合 (默认 gui.xaero_default)
+    inline bool onlyShowCurrentWaypointSet = false;              // 仅在地图显示当前集合 (默认关)
+    inline std::string g_waypointSetToast = "";                 // 集合切换 Toast 通知文本
+    inline float g_waypointSetToastTimer = 0.0f;                // Toast 动画计时器 (秒)
+    void TriggerWaypointSetToast(const std::string& setName);
+
+    // [P3] 小地图边框样式与罗盘个性化 (Minimap Frame Styling & Color)
+    inline int   miniMapFrameStyle = 0;                          // 边框样式: 0=经典默认, 1=纯色粗框(4px), 2=纯色细框(2px), 3=无边框
+    inline float miniMapFrameColor[4] = { 0.12f, 0.12f, 0.12f, 1.0f }; // 边框自定义 RGBA 颜色
+    inline int   compassLocation = 1;                            // 罗盘字标位置: 0=地图内侧, 1=边框圆环上
+    inline int   northCompassColorMode = 0;                      // 北向标颜色模式: 0=经典鲜红, 1=跟随边框色, 2=自定义颜色
+    inline float northCompassCustomColor[4] = { 1.0f, 0.29f, 0.29f, 1.0f }; // 北向标自定义颜色
+    inline bool  keepEnlargedMinimapRotation = false;            // 临时放大小地图时保持视角旋转 (默认关)
+
+    // [P1] 史莱姆区块覆盖层与 HUD 推挤避让系统
+    inline bool showSlimeChunks = true;        // 小地图史莱姆区块覆盖层 (默认开)
+    inline int  pushboxBossHealth = 1;         // Boss 血条避让推挤框 (0=关闭, 1=常规避让, 2=整屏推挤)
+    inline int  pushboxPotionEffects = 1;      // 药水状态避让推挤框 (0=关闭, 1=常规避让, 2=整屏推挤)
+    inline float g_currentPushOffsetY = 0.0f;  // 运行时小地图平滑推挤 Y 偏移量
+    inline float g_currentPushOffsetX = 0.0f;  // 运行时小地图平滑推挤 X 偏移量
+    inline std::atomic<bool> g_hasActiveBoss{false}; // 是否激活 Boss 血条
+    inline std::atomic<int>  g_activeEffectCount{0}; // 玩家当前活跃状态效果数量
 
     // [新增] 小地图偏移与位置设置
     inline float miniMapOffsetX = 0.0f; // 小地图 X 偏移
@@ -361,6 +389,13 @@ namespace MapRenderState {
     inline bool radarShowHostile = true;   // 显示敌对生物
     inline bool radarShowFriendly = true;  // 显示友好/被动生物
     inline bool radarShowItems = false;    // 显示掉落物与载具 (默认关，防止杂乱)
+
+    // [P4] 高级实体雷达系统 (Advanced Radar System)
+    inline int   radarOverFrameMode = 0;       // 越界吸附边框: 0=关闭, 1=全部实体, 2=仅敌对生物, 3=仅其他玩家, 4=仅按住Tab时
+    inline bool  radarHighlightTamed = true;   // 已驯服生物高亮显示 (默认开)
+    inline float radarDepthFadeStart = 1.5f;   // 景深淡出起始高度差 (默认 1.5 格, 1.0~30.0)
+    inline char  radarFilterInclude[128] = ""; // 自定义包含规则 (逗号分隔通配符, 非空则仅显示匹配项)
+    inline char  radarFilterExclude[128] = ""; // 自定义排除规则 (逗号分隔通配符, 匹配项被隐藏)
 
     // [大地图路径点缩放] (持久化保存)
     inline float bigMapWaypointScale = 1.0f; // 0.5x ~ 2.5x
@@ -479,7 +514,9 @@ namespace MapRenderState {
     inline bool infoShowCoords = true;       // 显示 XYZ 坐标 (第1项: 默认开)
     inline bool infoShowNetherCoords = false; // 显示下界/主世界换算坐标 (第2项: 默认关)
     inline bool infoShowFacing = false;       // 显示朝向与偏航角 (第3项: 默认关)
+    inline bool infoShowAngles = false;       // 显示精准视角角度 (默认关)
     inline bool infoShowBiome = true;        // 显示当前生物群系 (第4项: 默认开)
+    inline bool infoShowWeather = false;      // 显示天气状态 (默认关)
     inline bool infoShowTime = false;         // 显示游戏时间与现实时间 (第5项: 默认关)
     inline bool infoShowLight = false;        // 显示方块光照等级 (默认关)
     inline bool infoShowChunkCoords = false;  // 显示区块局部坐标与索引 (默认关)
@@ -488,6 +525,10 @@ namespace MapRenderState {
     inline std::atomic<int> g_blockLight{-1}; // 当前方块光照 (0-15)
     inline std::atomic<int> g_skyLight{-1};   // 当前天空光照 (0-15)
     inline std::atomic<int> g_gameTimeTicks{-1}; // 游戏刻实时同步 (主线程 -> 渲染线程)
+    inline std::atomic<float> g_weatherRainLevel{0.0f};      // 降雨强度 (0.0~1.0)
+    inline std::atomic<float> g_weatherLightningLevel{0.0f}; // 雷暴强度 (0.0~1.0)
+    inline std::atomic<bool>  g_isCurrentPosRainAllowed{true}; // 当前群系是否允许降水
+    inline std::atomic<bool>  g_isCurrentPosSnowing{false};     // 当前位置群系/高度是否降雪
 
     // [关闭期安全标志] disable() 入口处置 true，所有钩子和后台线程在入口检查此标志并提前返回，
     // 防止进程退出阶段访问已释放的 D3D/ImGui 资源导致 0xC0000005 退出崩溃
@@ -771,7 +812,9 @@ namespace MapRenderState {
         infoShowCoords = true;
         infoShowNetherCoords = false;
         infoShowFacing = false;
+        infoShowAngles = false;
         infoShowBiome = true;
+        infoShowWeather = false;
         infoShowTime = false;
         timeFormat24h = true;
         infoShowLight = false;
@@ -789,6 +832,24 @@ namespace MapRenderState {
         showWaypointDistance = false;
         renderWaypointBackgrounds = true;
         declutterWaypointLabels = true;
+        showSlimeChunks = true;
+        pushboxBossHealth = 1;
+        pushboxPotionEffects = 1;
+        g_currentPushOffsetY = 0.0f;
+        g_currentPushOffsetX = 0.0f;
+        miniMapFrameStyle = 0;
+        miniMapFrameColor[0] = 0.12f; miniMapFrameColor[1] = 0.12f; miniMapFrameColor[2] = 0.12f; miniMapFrameColor[3] = 1.0f;
+        compassLocation = 1;
+        northCompassColorMode = 0;
+        northCompassCustomColor[0] = 1.0f; northCompassCustomColor[1] = 0.29f; northCompassCustomColor[2] = 0.29f; northCompassCustomColor[3] = 1.0f;
+        keepEnlargedMinimapRotation = false;
+        onlyShowCurrentWaypointSet = false;
+        currentWaypointSet = "gui.xaero_default";
+        radarOverFrameMode = 0;
+        radarHighlightTamed = true;
+        radarDepthFadeStart = 1.5f;
+        radarFilterInclude[0] = '\0';
+        radarFilterExclude[0] = '\0';
         ::g_mapDataUpdated.store(true);
     }
 
@@ -851,7 +912,72 @@ struct RadarEntity {
     std::string typeName;
     std::string nameTag;
     std::string uuid;
+    bool isTamed = false; // [P4] 是否为已驯服生物
 };
+
+namespace RadarUtils {
+    inline bool MatchesWildcardPattern(std::string_view pattern, std::string_view str) {
+        size_t p = 0, s = 0;
+        size_t starP = std::string_view::npos, starS = 0;
+        while (s < str.size()) {
+            if (p < pattern.size() && (std::tolower(static_cast<unsigned char>(pattern[p])) == std::tolower(static_cast<unsigned char>(str[s])) || pattern[p] == '?')) {
+                ++p;
+                ++s;
+            } else if (p < pattern.size() && pattern[p] == '*') {
+                starP = p++;
+                starS = s;
+            } else if (starP != std::string_view::npos) {
+                p = starP + 1;
+                s = ++starS;
+            } else {
+                return false;
+            }
+        }
+        while (p < pattern.size() && pattern[p] == '*') ++p;
+        return p == pattern.size();
+    }
+
+    inline bool MatchesCommaPatterns(const char* patternList, const std::string& typeName, const std::string& nameTag) {
+        if (!patternList || patternList[0] == '\0') return false;
+
+        std::string shortName = typeName;
+        size_t colon = shortName.find(':');
+        if (colon != std::string::npos) shortName = shortName.substr(colon + 1);
+
+        const char* ptr = patternList;
+        while (*ptr) {
+            while (*ptr == ' ' || *ptr == ',' || *ptr == ';') ++ptr;
+            if (!*ptr) break;
+            const char* start = ptr;
+            while (*ptr && *ptr != ',' && *ptr != ';') ++ptr;
+            const char* end = ptr - 1;
+            while (end > start && *end == ' ') --end;
+            std::string token(start, end + 1);
+
+            if (token.empty()) continue;
+            if (MatchesWildcardPattern(token, typeName) ||
+                MatchesWildcardPattern(token, shortName) ||
+                (!nameTag.empty() && MatchesWildcardPattern(token, nameTag))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    inline bool PassesRadarFilter(const std::string& typeName, const std::string& nameTag, const char* includeList, const char* excludeList) {
+        if (excludeList && excludeList[0] != '\0') {
+            if (MatchesCommaPatterns(excludeList, typeName, nameTag)) {
+                return false;
+            }
+        }
+        if (includeList && includeList[0] != '\0') {
+            if (!MatchesCommaPatterns(includeList, typeName, nameTag)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
 
 struct PlayerSkinHead {
     uint8_t pixels[8 * 8 * 4]{}; // 8x8 RGBA

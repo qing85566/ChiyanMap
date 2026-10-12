@@ -41,6 +41,9 @@ using ChiyanMapMaterialType = ::SharedTypes::v1_26_20::MaterialType;
 #include <mc/deps/core/math/Vec3.h>
 #include <mc/world/level/Level.h>
 #include <mc/client/multiplayer/ClientLevel.h>
+#include <mc/world/level/storage/LevelData.h>
+#include <mc/world/level/dimension/Dimension.h>
+#include <mc/world/level/Weather.h>
 #include <mc/world/actor/Actor.h>
 #include <mc/legacy/ActorRuntimeID.h>
 #include <mc/world/effect/MobEffectInstance.h>
@@ -249,6 +252,7 @@ extern float g_playerX;
 extern float g_playerY;
 extern float g_playerZ;
 extern float g_playerYaw;
+extern float g_playerPitch;
 extern bool  g_hasPlayer;
 extern LocalPlayer* g_localPlayer;
 extern ClientInstance* g_clientInstance;
@@ -2758,6 +2762,25 @@ inline int SafeQueryGameTime(ClientInstance* ci) noexcept {
     return -1;
 }
 
+// [P2 天气系统: 实时更新钩子] 捕获服务端同步或单人模式下的天气渐变与雷暴
+LL_TYPE_INSTANCE_HOOK(
+    LevelUpdateWeatherHook,
+    ll::memory::HookPriority::Normal,
+    Level,
+    &Level::$updateWeather,
+    void,
+    float rainLevel,
+    int rainTime,
+    float lightningLevel,
+    int lightningTime
+) {
+    if (!MapRenderState::g_isShuttingDown.load()) {
+        MapRenderState::g_weatherRainLevel.store(rainLevel);
+        MapRenderState::g_weatherLightningLevel.store(lightningLevel);
+    }
+    origin(rainLevel, rainTime, lightningLevel, lightningTime);
+}
+
 LL_TYPE_INSTANCE_HOOK(
     ClientInstanceUpdateHook,
     ll::memory::HookPriority::Normal,
@@ -2804,7 +2827,9 @@ LL_TYPE_INSTANCE_HOOK(
             g_playerBlockX = (int)std::floor(pos.x);
             g_playerBlockZ = (int)std::floor(pos.z);
             g_playerX = pos.x; g_playerY = pos.y; g_playerZ = pos.z;
-            g_playerYaw = player->getRotation().y;
+            auto rot = player->getRotation();
+            g_playerYaw = rot.y;
+            g_playerPitch = rot.x;
             g_hasPlayer   = true;
             g_localPlayer = player;
 
@@ -2817,6 +2842,42 @@ LL_TYPE_INSTANCE_HOOK(
             int gameTicks = SafeQueryGameTime(this);
             if (gameTicks >= 0) {
                 MapRenderState::g_gameTimeTicks.store(gameTicks);
+            }
+
+            // [P2 天气系统] 当开启天气显示时，安全同步当前世界的天气量
+            if (MapRenderState::infoShowWeather) {
+                try {
+                    bool weatherFound = false;
+                    // 1. 优先通过玩家当前维度 (Dimension) 读取实时 Weather 实例的降水与雷暴值
+                    try {
+                        auto& dim = player->getDimension();
+                        if (dim.mWeather) {
+                            float r = dim.mWeather->mRainLevel;
+                            float tr = dim.mWeather->mTargetRainLevel;
+                            float l = dim.mWeather->mLightningLevel;
+                            float tl = dim.mWeather->mTargetLightningLevel;
+                            float curRain = (std::max)(r, tr);
+                            float curLight = (std::max)(l, tl);
+                            MapRenderState::g_weatherRainLevel.store(curRain);
+                            MapRenderState::g_weatherLightningLevel.store(curLight);
+                            weatherFound = true;
+                        }
+                    } catch (...) {}
+
+                    // 2. 若未从 Dimension 获取到有效天气，且尚未被 Hook 填充降水，则通过 LevelData 保底
+                    if (!weatherFound && this->hasLevel()) {
+                        auto* cl = this->getLevel();
+                        if (cl) {
+                            auto& ld = cl->getLevelData();
+                            if (ld.mRainLevel > 0.0f || MapRenderState::g_weatherRainLevel.load() <= 0.0f) {
+                                MapRenderState::g_weatherRainLevel.store(ld.mRainLevel);
+                            }
+                            if (ld.mLightningLevel > 0.0f || MapRenderState::g_weatherLightningLevel.load() <= 0.0f) {
+                                MapRenderState::g_weatherLightningLevel.store(ld.mLightningLevel);
+                            }
+                        }
+                    }
+                } catch (...) {}
             }
 
             // [HUD 实时光照等级] 当开启光照显示时，安全采样脚部方块光照
@@ -2832,6 +2893,22 @@ LL_TYPE_INSTANCE_HOOK(
                         MapRenderState::g_blockLight.store((int)bl);
                     }
                 } catch (...) {}
+            }
+
+            // [HUD 推挤避让] 实时检测药水状态效果数量
+            if (MapRenderState::pushboxPotionEffects > 0) {
+                try {
+                    if (player->hasAnyEffects()) {
+                        const auto& effects = player->getAllEffects();
+                        MapRenderState::g_activeEffectCount.store((int)effects.size());
+                    } else {
+                        MapRenderState::g_activeEffectCount.store(0);
+                    }
+                } catch (...) {
+                    MapRenderState::g_activeEffectCount.store(0);
+                }
+            } else {
+                MapRenderState::g_activeEffectCount.store(0);
             }
 
             // 靠近 6 个方块内自动清除到达过的死亡地点 (5秒免删安全期)
@@ -3720,6 +3797,17 @@ LL_TYPE_INSTANCE_HOOK(
 
                         MapRenderState::rawBiomeName = displayRawName;
                         MapRenderState::translatedBiomeName = TranslateBiomeName(rawName);
+
+                        // [P2 天气系统: 降雨与降雪判定]
+                        try {
+                            bool canRain = (bool)biome.mRain;
+                            float temp = (float)biome.mTemperature - (std::max(0.0f, g_playerY - 64.0f) * 0.00166667f);
+                            MapRenderState::g_isCurrentPosRainAllowed.store(canRain);
+                            MapRenderState::g_isCurrentPosSnowing.store(canRain && (temp < 0.15f));
+                        } catch (...) {
+                            MapRenderState::g_isCurrentPosRainAllowed.store(true);
+                            MapRenderState::g_isCurrentPosSnowing.store(false);
+                        }
                     }
                 }
             } catch (...) {}
@@ -4774,8 +4862,21 @@ LL_TYPE_INSTANCE_HOOK(
                         nameTag = actor->getNameTag();
                     } catch (...) {}
 
-                    tempEntities.push_back({ePos.x, ePos.y, ePos.z, type, std::move(entityType), std::move(nameTag), std::move(uuid)});
+                    bool isTamed = false;
+                    try { isTamed = actor->isTame(); } catch (...) {}
+
+                    tempEntities.push_back({ePos.x, ePos.y, ePos.z, type, std::move(entityType), std::move(nameTag), std::move(uuid), isTamed});
                 }
+
+                bool hasBoss = false;
+                for (const auto& ent : tempEntities) {
+                    if (ent.typeName == "minecraft:ender_dragon" || ent.typeName == "minecraft:wither" || ent.typeName == "minecraft:elder_guardian") {
+                        hasBoss = true;
+                        break;
+                    }
+                }
+                MapRenderState::g_hasActiveBoss.store(hasBoss);
+
                 {
                     std::lock_guard<std::mutex> lock(g_radarMutex);
                     g_radarEntities = std::move(tempEntities);
@@ -4783,6 +4884,7 @@ LL_TYPE_INSTANCE_HOOK(
                 g_radarUpdated.store(true);
                 g_radarGeneration.fetch_add(1, std::memory_order_release);
             } else {
+                MapRenderState::g_hasActiveBoss.store(false);
                 bool hadEntities = false;
                 {
                     std::lock_guard<std::mutex> lock(g_radarMutex);

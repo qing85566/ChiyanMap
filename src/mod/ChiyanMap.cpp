@@ -24,6 +24,7 @@ float g_playerX       = 0.0f;
 float g_playerY       = 0.0f;
 float g_playerZ       = 0.0f;
 float g_playerYaw     = 0.0f;
+float g_playerPitch   = 0.0f;
 bool  g_hasPlayer     = false;
 
 class LocalPlayer;
