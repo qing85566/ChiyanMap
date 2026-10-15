@@ -7,6 +7,7 @@
 #include <random>
 #include <algorithm>
 #include <chrono>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -104,8 +105,8 @@ namespace WaypointManager {
                 wp.isTemporary = item.value("isTemporary", false);
                 wp.folder = item.value("folder", "");
                 wp.set = item.value("set", "");
-                if (wp.set.empty()) {
-                    wp.set = "gui.xaero_default";
+                if (wp.set.empty() || wp.set.find("_default") != std::string::npos) {
+                    wp.set = "gui.chiyan_default";
                 }
                 wp.createdAt = item.value("createdAt", (uint64_t)0);
                 wp.order = item.value("order", (int)g_waypoints.size());
@@ -113,7 +114,7 @@ namespace WaypointManager {
                 if (!wp.folder.empty()) {
                     g_customFolders.insert(wp.folder);
                 }
-                if (!wp.set.empty() && wp.set != "gui.xaero_default") {
+                if (!wp.set.empty() && wp.set != "gui.chiyan_default") {
                     g_customSets.insert(wp.set);
                 }
                 g_waypoints.push_back(wp);
@@ -181,7 +182,7 @@ namespace WaypointManager {
         // 保存路径点集合配置
         std::set<std::string> allSets = g_customSets;
         for (const auto& wp : g_waypoints) {
-            if (!wp.set.empty() && wp.set != "gui.xaero_default") allSets.insert(wp.set);
+            if (!wp.set.empty() && wp.set != "gui.chiyan_default") allSets.insert(wp.set);
         }
         json sList = json::array();
         for (const auto& s : allSets) {
@@ -266,7 +267,7 @@ namespace WaypointManager {
                     for (const auto& item : sList) {
                         if (item.is_string()) {
                             std::string s = item.get<std::string>();
-                            if (!s.empty() && s != "gui.xaero_default") {
+                            if (!s.empty() && s.find("_default") == std::string::npos && s != "gui.chiyan_default") {
                                 g_customSets.insert(s);
                                 g_customFolders.insert(s);
                             }
@@ -327,8 +328,8 @@ namespace WaypointManager {
         wp.dimId = (dimId >= 0 && dimId < 3) ? dimId : g_currentDim; // 默认归属玩家当前维度
         wp.pinned = pinned;
         std::string finalSet = set;
-        if (finalSet.empty()) {
-            finalSet = "gui.xaero_default";
+        if (finalSet.empty() || finalSet.find("_default") != std::string::npos) {
+            finalSet = "gui.chiyan_default";
         }
         wp.set = finalSet;
         wp.folder = folder;
@@ -340,7 +341,7 @@ namespace WaypointManager {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             wp.order = (int)g_waypoints.size();
             if (!wp.folder.empty()) g_customFolders.insert(wp.folder);
-            if (!wp.set.empty() && wp.set != "gui.xaero_default") g_customSets.insert(wp.set);
+            if (!wp.set.empty() && wp.set != "gui.chiyan_default") g_customSets.insert(wp.set);
             g_waypoints.push_back(wp);
         }
         SaveWaypoints();
@@ -420,6 +421,49 @@ namespace WaypointManager {
         if (changed) SaveWaypoints();
     }
 
+    void SetAllWaypointsEnabled(bool enabled, const std::vector<std::string>& targetIds) {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(g_wpMutex);
+            if (targetIds.empty()) {
+                for (auto& wp : g_waypoints) {
+                    if (wp.enabled != enabled) {
+                        wp.enabled = enabled;
+                        changed = true;
+                    }
+                }
+            } else {
+                std::unordered_set<std::string> idSet(targetIds.begin(), targetIds.end());
+                for (auto& wp : g_waypoints) {
+                    if (idSet.count(wp.id) > 0) {
+                        if (wp.enabled != enabled) {
+                            wp.enabled = enabled;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if (changed) SaveWaypoints();
+    }
+
+    void SetWaypointsEnabled(bool enabled, const std::set<std::string>& targetIds) {
+        if (targetIds.empty()) return;
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(g_wpMutex);
+            for (auto& wp : g_waypoints) {
+                if (targetIds.count(wp.id) > 0) {
+                    if (wp.enabled != enabled) {
+                        wp.enabled = enabled;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (changed) SaveWaypoints();
+    }
+
     void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned, const std::string& folder, int8_t isCave, int dimId, const std::string& set) {
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
@@ -432,8 +476,8 @@ namespace WaypointManager {
             it->enabled = enabled;
             it->pinned = pinned;
             std::string finalSet = set;
-            if (finalSet.empty()) {
-                finalSet = "gui.xaero_default";
+            if (finalSet.empty() || finalSet.find("_default") != std::string::npos) {
+                finalSet = "gui.chiyan_default";
             }
             it->set = finalSet;
             it->folder = folder;
@@ -442,7 +486,7 @@ namespace WaypointManager {
                 it->dimId = dimId;
             }
             if (!it->folder.empty()) g_customFolders.insert(it->folder);
-            if (!it->set.empty() && it->set != "gui.xaero_default") g_customSets.insert(it->set);
+            if (!it->set.empty() && it->set != "gui.chiyan_default") g_customSets.insert(it->set);
         }
         SaveWaypoints();
     }
@@ -495,6 +539,11 @@ namespace WaypointManager {
             return g_deletedWaypoints.back().name;
         }
         return g_hasDeletedWaypoint ? g_lastDeletedWaypoint.name : "";
+    }
+
+    int GetWaypointCount() {
+        std::lock_guard<std::mutex> lock(g_wpMutex);
+        return (int)g_waypoints.size();
     }
 
     std::string SetTemporaryWaypoint(int x, int y, int z, int dimId, int8_t isCave) {
@@ -658,14 +707,14 @@ namespace WaypointManager {
         std::lock_guard<std::mutex> lock(g_wpMutex);
         std::set<std::string> setPool = g_customSets;
         for (const auto& wp : g_waypoints) {
-            if (!wp.set.empty() && wp.set != "gui.xaero_default") {
+            if (!wp.set.empty() && wp.set != "gui.chiyan_default") {
                 setPool.insert(wp.set);
             }
         }
         std::vector<std::string> result;
-        result.push_back("gui.xaero_default");
+        result.push_back("gui.chiyan_default");
         for (const auto& s : setPool) {
-            if (s != "gui.xaero_default") {
+            if (s != "gui.chiyan_default") {
                 result.push_back(s);
             }
         }
@@ -673,7 +722,7 @@ namespace WaypointManager {
     }
 
     void AddWaypointSet(const std::string& setName) {
-        if (setName.empty() || setName == "gui.xaero_default") return;
+        if (setName.empty() || setName == "gui.chiyan_default") return;
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             g_customSets.insert(setName);
@@ -683,7 +732,7 @@ namespace WaypointManager {
     }
 
     void RenameWaypointSet(const std::string& oldName, const std::string& newName) {
-        if (oldName.empty() || newName.empty() || oldName == newName || oldName == "gui.xaero_default") return;
+        if (oldName.empty() || newName.empty() || oldName == newName || oldName == "gui.chiyan_default") return;
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             g_customSets.erase(oldName);
@@ -705,18 +754,18 @@ namespace WaypointManager {
     }
 
     void DeleteWaypointSet(const std::string& setName) {
-        if (setName.empty() || setName == "gui.xaero_default") return;
+        if (setName.empty() || setName == "gui.chiyan_default") return;
         {
             std::lock_guard<std::mutex> lock(g_wpMutex);
             g_customSets.erase(setName);
             for (auto& wp : g_waypoints) {
                 if (wp.set == setName) {
-                    wp.set = "gui.xaero_default";
+                    wp.set = "gui.chiyan_default";
                 }
             }
         }
         if (MapRenderState::currentWaypointSet == setName) {
-            MapRenderState::currentWaypointSet = "gui.xaero_default";
+            MapRenderState::currentWaypointSet = "gui.chiyan_default";
             LanguageManager::SaveConfig();
         }
         SaveWaypoints();
@@ -749,7 +798,7 @@ namespace WaypointManager {
     }
 
     std::string GetWaypointSetDisplayName(const std::string& setName) {
-        if (setName.empty() || setName == "gui.xaero_default") {
+        if (setName.empty() || setName == "gui.chiyan_default") {
             return LanguageManager::GetText("WP_SET_DEFAULT");
         }
         return setName;

@@ -14,6 +14,7 @@
 #include <Windows.h>
 #include <wincodec.h>
 #include <shellapi.h>
+#include <unordered_set>
 #include <mc/world/level/levelgen/synth/PerlinSimplexNoise.h>
 
 namespace MapCacheManager {
@@ -30,10 +31,15 @@ namespace MapCacheManager {
     static int s_currentLoadedDimId = -999;
     static std::string s_currentLoadedMapId = "default";
 
-    // [四叉树多级金字塔 BranchLeveledRegion] 脏状态表 (受 g_cacheMutex 保护)
+    // 磁盘上已存在的所有区域文件哈希集合，受 g_cacheMutex 保护
+    static std::unordered_set<uint64_t> s_existingRegionFiles;
+    // 待更新至 GPU 显存的脏区域哈希集合，受 g_cacheMutex 保护
+    static std::unordered_set<uint64_t> s_dirtyTextureHashes;
+
+    // 脏状态表，受 g_cacheMutex 保护
     static std::unordered_map<uint64_t, bool> s_branchDirtyMap;
 
-    // [跨进程文件锁保护] .cache.lock 独占写句柄与冲突状态
+    // 跨进程文件锁保护：.cache.lock 独占写句柄与冲突状态
     static HANDLE s_cacheLockHandle = INVALID_HANDLE_VALUE;
     static std::atomic<bool> s_cacheLockedByAnotherProcess{false};
 
@@ -406,7 +412,14 @@ namespace MapCacheManager {
                 RegionData* newRegion = new RegionData();
                 newRegion->dimId = loadedDimId;
                 newRegion->saveDir = dir;
-                LoadRegionFromFile(filePath, *newRegion, isCave);
+                if (!LoadRegionFromFile(filePath, *newRegion, isCave)) {
+                    delete newRegion;
+                    std::lock_guard<std::mutex> lock(g_cacheMutex);
+                    g_loadedRegions.erase(hash);
+                    s_existingRegionFiles.erase(hash);
+                    s_dirtyTextureHashes.erase(hash);
+                    continue;
+                }
                 newRegion->textureDirty = true;
                 newRegion->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
 
@@ -416,6 +429,8 @@ namespace MapCacheManager {
                     if (s_currentLoadedDimId == loadedDimId && g_cacheDir == currentDir) {
                         if (g_loadedRegions[hash] == nullptr) {
                             g_loadedRegions[hash] = newRegion;
+                            s_existingRegionFiles.insert(hash);
+                            s_dirtyTextureHashes.insert(hash);
                             MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
                         } else {
                             delete newRegion;
@@ -720,6 +735,8 @@ namespace MapCacheManager {
         s_currentLoadedDimId = dimensionId;
         g_loadedRegions.clear();
         g_loadQueue.clear();
+        s_existingRegionFiles.clear();
+        s_dirtyTextureHashes.clear();
 
         // 路径示例：mods/ChiyanMap/data/cache/<worldId>/dim_<n>/ (default)
         // 或 mods/ChiyanMap/data/cache/<worldId>/maps/<mapId>/dim_<n>/ (subworlds)
@@ -860,7 +877,6 @@ namespace MapCacheManager {
             std::error_code ec2;
             if (!std::filesystem::is_directory(fullDir, ec2)) return;
             for (auto const& entry : std::filesystem::directory_iterator(fullDir, ec2)) {
-                if (g_loadedRegions.size() >= maxPreload) break;
                 if (!entry.is_regular_file()) continue;
                 std::string filename = entry.path().filename().string();
                 if (filename.rfind("region_", 0) != 0) continue;
@@ -884,7 +900,8 @@ namespace MapCacheManager {
                         if (negZ) rz = -rz;
                     } else { continue; }
                     uint64_t hash = GetRegionHash(rx, rz, isCave);
-                    if (g_loadedRegions.find(hash) == g_loadedRegions.end()) {
+                    s_existingRegionFiles.insert(hash);
+                    if (g_loadedRegions.size() < maxPreload && g_loadedRegions.find(hash) == g_loadedRegions.end()) {
                         g_loadedRegions[hash] = nullptr;
                         g_loadQueue.push_back(hash);
                     }
@@ -983,6 +1000,8 @@ namespace MapCacheManager {
                     LoadRegionFromFile(filePath, *newRegion, isCave);
                     newRegion->textureDirty = true;
                     g_loadedRegions[hash] = newRegion;
+                    s_existingRegionFiles.insert(hash);
+                    s_dirtyTextureHashes.insert(hash);
                 }
 
                 RegionData* region = g_loadedRegions[hash];
@@ -1016,6 +1035,8 @@ namespace MapCacheManager {
 
                 region->dirty = true;
                 region->textureDirty = true;
+                s_existingRegionFiles.insert(hash);
+                s_dirtyTextureHashes.insert(hash);
                 region->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
                 MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
             }
@@ -1156,8 +1177,12 @@ namespace MapCacheManager {
         std::lock_guard<std::mutex> lock(g_cacheMutex);
         auto it = g_loadedRegions.find(hash);
         if (it == g_loadedRegions.end()) {
-            g_loadedRegions[hash] = nullptr;
-            g_loadQueue.push_back(hash);
+            if (s_existingRegionFiles.contains(hash)) {
+                if (g_loadQueue.size() < 256) {
+                    g_loadedRegions[hash] = nullptr;
+                    g_loadQueue.push_back(hash);
+                }
+            }
             return false;
         } else {
             RegionData* region = it->second;
@@ -1169,6 +1194,7 @@ namespace MapCacheManager {
                     bool isCave = IsCaveHash(hash);
                     ShadeRegionBuffer(region, outBuffer, rx, rz, isCave, false);
                     region->textureDirty = false;
+                    s_dirtyTextureHashes.erase(hash);
                     return true;
                 }
             }
@@ -1215,9 +1241,11 @@ namespace MapCacheManager {
                 uint64_t childHash = GetRegionHash(rx, rz, isCave);
                 auto it = g_loadedRegions.find(childHash);
                 if (it == g_loadedRegions.end()) {
-                    if (g_loadQueue.size() < 256) {
-                        g_loadedRegions[childHash] = nullptr;
-                        g_loadQueue.push_back(childHash);
+                    if (s_existingRegionFiles.contains(childHash)) {
+                        if (g_loadQueue.size() < 256) {
+                            g_loadedRegions[childHash] = nullptr;
+                            g_loadQueue.push_back(childHash);
+                        }
                     }
                 } else if (it->second != nullptr) {
                     it->second->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
@@ -1289,6 +1317,7 @@ namespace MapCacheManager {
         auto it = g_loadedRegions.find(hash);
         if (it != g_loadedRegions.end() && it->second) {
             it->second->textureDirty = true;
+            s_dirtyTextureHashes.insert(hash);
             int rx, rz;
             DecodeRegionHash(hash, rx, rz);
             MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, IsCaveHash(hash));
@@ -1300,6 +1329,7 @@ namespace MapCacheManager {
         for (auto& pair : g_loadedRegions) {
             if (pair.second) {
                 pair.second->textureDirty = true;
+                s_dirtyTextureHashes.insert(pair.first);
                 int rx, rz;
                 DecodeRegionHash(pair.first, rx, rz);
                 MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, IsCaveHash(pair.first));
@@ -1307,6 +1337,51 @@ namespace MapCacheManager {
         }
         for (auto& bpair : s_branchDirtyMap) {
             bpair.second = true;
+        }
+    }
+
+    bool HasRegionOnDisk(uint64_t hash) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        return s_existingRegionFiles.contains(hash) || g_loadedRegions.contains(hash);
+    }
+
+    void GetExistingRegionHashesInView(int minRx, int maxRx, int minRz, int maxRz, bool isCave, std::vector<uint64_t>& outHashes) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        outHashes.clear();
+        for (uint64_t hash : s_existingRegionFiles) {
+            if (IsCaveHash(hash) != isCave) continue;
+            int rx, rz;
+            DecodeRegionHash(hash, rx, rz);
+            if (rx >= minRx && rx <= maxRx && rz >= minRz && rz <= maxRz) {
+                outHashes.push_back(hash);
+            }
+        }
+    }
+
+    void GetExistingBranchHashesInView(int minRx, int maxRx, int minRz, int maxRz, int pyramidLevel, bool isCave, std::vector<uint64_t>& outBranchHashes) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        outBranchHashes.clear();
+        std::unordered_set<uint64_t> uniqueBranches;
+        for (uint64_t hash : s_existingRegionFiles) {
+            if (IsCaveHash(hash) != isCave) continue;
+            int rx, rz;
+            DecodeRegionHash(hash, rx, rz);
+            if (rx >= minRx && rx <= maxRx && rz >= minRz && rz <= maxRz) {
+                int brx = rx >> pyramidLevel;
+                int brz = rz >> pyramidLevel;
+                uniqueBranches.insert(GetBranchHash(pyramidLevel, brx, brz, isCave));
+            }
+        }
+        outBranchHashes.assign(uniqueBranches.begin(), uniqueBranches.end());
+    }
+
+    void PopDirtyTextureHashes(std::vector<uint64_t>& outHashes, size_t maxCount) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        outHashes.clear();
+        auto it = s_dirtyTextureHashes.begin();
+        while (it != s_dirtyTextureHashes.end() && outHashes.size() < maxCount) {
+            outHashes.push_back(*it);
+            ++it;
         }
     }
 
@@ -1383,8 +1458,9 @@ namespace MapCacheManager {
                             if (negZ) rz = -rz;
                         } else { continue; }
                         reloadedCount++;
+                        uint64_t hash = GetRegionHash(rx, rz, isCave);
+                        s_existingRegionFiles.insert(hash);
                         if (g_loadedRegions.size() < maxPreload) {
-                            uint64_t hash = GetRegionHash(rx, rz, isCave);
                             if (g_loadedRegions.find(hash) == g_loadedRegions.end()) {
                                 g_loadedRegions[hash] = nullptr;
                                 g_loadQueue.push_back(hash);
@@ -1421,12 +1497,16 @@ namespace MapCacheManager {
                     std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
                     std::error_code ec;
                     bool fileExists = std::filesystem::exists(filePath, ec);
+                    if (fileExists) {
+                        s_existingRegionFiles.insert(hash);
+                    }
                     auto it = g_loadedRegions.find(hash);
                     if (it != g_loadedRegions.end() && it->second != nullptr) {
                         if (fileExists) {
                             LoadRegionFromFile(filePath, *(it->second), isCave);
                         }
                         it->second->textureDirty = true;
+                        s_dirtyTextureHashes.insert(hash);
                         it->second->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
                         MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
                         reloadedCount++;
@@ -1544,12 +1624,16 @@ namespace MapCacheManager {
                 newRegion->dimId = s_currentLoadedDimId;
                 newRegion->saveDir = dir;
                 g_loadedRegions[hash] = newRegion;
+                s_existingRegionFiles.insert(hash);
+                s_dirtyTextureHashes.insert(hash);
                 it = g_loadedRegions.find(hash);
             } else {
                 if (it == g_loadedRegions.end()) {
                     delete newRegion;
-                    g_loadedRegions[hash] = nullptr;
-                    g_loadQueue.push_back(hash);
+                    if (s_existingRegionFiles.contains(hash)) {
+                        g_loadedRegions[hash] = nullptr;
+                        g_loadQueue.push_back(hash);
+                    }
                 }
                 return HEIGHT_UNKNOWN;
             }
@@ -1672,9 +1756,11 @@ namespace MapCacheManager {
 
         auto it = g_loadedRegions.find(hash);
         if (it == g_loadedRegions.end()) {
-            // 区域未加载 → 排队异步加载，下次查询可命中
-            g_loadedRegions[hash] = nullptr;
-            g_loadQueue.push_back(hash);
+            // 区域未加载 → 若磁盘存在则排队异步加载，下次查询可命中
+            if (s_existingRegionFiles.contains(hash)) {
+                g_loadedRegions[hash] = nullptr;
+                g_loadQueue.push_back(hash);
+            }
             return false;
         }
         if (it->second == nullptr) return false;  // 已排队但尚未加载完成

@@ -23,10 +23,12 @@ namespace MapRenderState {
     inline bool bigMapShowDisabledWaypoints = true; // 全屏大地图显示已禁用的路径点 (半透明，持久化)
     inline bool showChunkGrid = false;     // 区块网格显示开关 (小地图 + 大地图共用，图标按钮切换，持久化)
     inline bool bigMapShowHoverBox = true; // 全屏大地图鼠标悬停区块选框显示开关 (持久化)
+    inline bool bigMapHideUI = false;      // 大地图全套界面隐藏状态 (按 F1 切换)
+    inline bool bigMapFollowPlayer = true; // [锁定跟随玩家] 大地图锁定跟随玩家视角 (持久化，默认开)
 
     // [P1] 内嵌折叠路径点抽屉与镜头对齐状态 (持久化)
     inline bool bigMapWaypointDrawerOpen = false;  // 大地图路径点抽屉是否展开 (持久化)
-    inline bool bigMapCloseDrawerAfterHop = false; // 镜头跳转后是否自动关闭抽屉 (对应 Xaero 的 CLOSE_WAYPOINTS_AFTER_HOP，持久化)
+    inline bool bigMapCloseDrawerAfterHop = false; // 镜头跳转后是否自动关闭抽屉，持久化
 
     // [P1] 镜头平滑跳转与平移对齐状态 (Camera Hopping / Pan Animation)
     inline bool cameraHopActive = false;
@@ -60,6 +62,7 @@ namespace MapRenderState {
     inline std::string currentWorldId = "";
     inline int currentDimensionId = -999;
     inline std::atomic<bool> clearGPUCache{false}; // 用于通知 GPU 清理旧世界的贴图残留
+    inline std::atomic<uint32_t> g_spatialCacheGen{0}; // 空间视口缓存代数计数器
 
     // [维度切换] 全屏大地图浏览维度 (-999 表示跟随玩家物理维度，0=主世界, 1=下界, 2=末地)
     inline int bigMapViewDimensionId = -999;
@@ -126,7 +129,7 @@ namespace MapRenderState {
     inline void RestoreDimCamera(int targetDim, int fromDim, float smoothPX, float smoothPZ) {
         if (targetDim < 0 || targetDim >= 3) return;
         if (dimCameraStates[targetDim].initialized) {
-            bigMapZoom = dimCameraStates[targetDim].zoom;
+            bigMapZoom = std::clamp(dimCameraStates[targetDim].zoom, 0.01f, 50.0f);
             float targetWx = dimCameraStates[targetDim].centerWx;
             float targetWz = dimCameraStates[targetDim].centerWz;
             bigMapOffsetX = (smoothPX - targetWx) * bigMapZoom;
@@ -173,6 +176,7 @@ namespace MapRenderState {
     }
 
     inline void CenterCameraOnViewDimension(float smoothPX, float smoothPZ) {
+        bigMapFollowPlayer = true;
         int viewDim = GetEffectiveViewDimensionId();
         if (viewDim == currentDimensionId) {
             bigMapOffsetX = 0.0f;
@@ -229,6 +233,9 @@ namespace MapRenderState {
 
     // [新增] 小地图路径点显示开关 (独立于路径点 enabled 属性，控制是否在小地图上绘制)
     inline bool showWaypointsOnMinimap = true;
+
+    // [优先主世界路径点] 身处下界时跨维度渲染主世界路径点，且默认创建和管理主世界路径点
+    inline bool preferOverworldWaypoints = false;
 
     // [新增] 小地图雷达显示开关 (控制是否扫描并显示周围生物/实体)
     inline bool showRadar = true;
@@ -314,6 +321,19 @@ namespace MapRenderState {
         Hotkey selectExportArea  = { 0x10, 0 }; // Shift: 框选导出高清 PNG (默认 Shift 键)
         Hotkey toggleSlimeChunks = { 0, 0 };    // 切换小地图史莱姆区块显示 (默认未绑定)
         Hotkey switchWaypointSet = { 0, 0 };    // 切换路径点集合 (默认未绑定)
+        Hotkey toggleHighways    = { 0, 0 };    // 切换通用主干道覆盖层 (默认未绑定)
+        Hotkey toggleAnarchySettings = { 0, 0 }; // 切换无规则/区块探测设置面板 (默认未绑定)
+        Hotkey toggleDrawingMode = { 0x50, 0 }; // P: 切换地图涂鸦模式 (默认 P 键)
+        Hotkey toggleDoubleMinZoom = { 0, 0 };   // 切换小地图最小变焦翻倍 (默认未绑定)
+        Hotkey toggleTransBg       = { 0, 0 };   // 切换未加载区块透明化 (默认未绑定)
+        Hotkey minimapZoomIn       = { 0, 0 };   // 小地图视野放大 (默认未绑定)
+        Hotkey minimapZoomOut      = { 0, 0 };   // 小地图视野缩小 (默认未绑定)
+        Hotkey togglePreferOwWaypoints = { 0, 0 }; // 切换优先主世界路径点 (默认未绑定)
+        Hotkey quickCreateWaypoint     = { 0, 0 }; // 快捷新建路径点 (默认未绑定)
+        Hotkey toggleViewDistance       = { 0, 0 }; // 切换视距覆盖层 (默认未绑定)
+        Hotkey toggleSimulationDistance = { 0, 0 }; // 切换模拟距离覆盖层 (默认未绑定)
+        Hotkey toggleBigMapUI          = { 0x70, 0 }; // F1: 切换大地图全套界面隐藏 (默认 F1 键)
+        Hotkey toggleFollowPlayer      = { 0, 0 };    // 切换大地图锁定跟随 (默认未绑定)
 
         // 系统预设默认值 (单一来源，供"单行重置"与"全部重置"共用)
         static constexpr HotkeyBindings Defaults() {
@@ -330,6 +350,19 @@ namespace MapRenderState {
                 { 0x20, 0 },
                 { 0x10, 0 },
                 { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0x50, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0, 0 },
+                { 0x70, 0 },
                 { 0, 0 }
             };
         }
@@ -344,12 +377,56 @@ namespace MapRenderState {
     // [路径点交互增强] Ctrl+Z 误删路径点恢复请求标志 (由 WndProc 设置，渲染线程消费)
     inline std::atomic<bool> g_waypointRestoreRequested{false};
 
-    // [P3] 路径点集合系统 (Waypoint Sets System)
-    inline std::string currentWaypointSet = "gui.xaero_default"; // 当前激活集合 (默认 gui.xaero_default)
+    // [P3] 路径点集合系统
+    inline std::string currentWaypointSet = "gui.chiyan_default"; // 当前激活集合 (默认 gui.chiyan_default)
     inline bool onlyShowCurrentWaypointSet = false;              // 仅在地图显示当前集合 (默认关)
     inline std::string g_waypointSetToast = "";                 // 集合切换 Toast 通知文本
     inline float g_waypointSetToastTimer = 0.0f;                // Toast 动画计时器 (秒)
     void TriggerWaypointSetToast(const std::string& setName);
+
+    inline std::string g_minimapToast = "";                     // 小地图 Toast 通知文本
+    inline float g_minimapToastTimer = 0.0f;                    // Toast 动画计时器 (秒)
+    inline void TriggerMinimapToast(const std::string& msg) {
+        g_minimapToast = msg;
+        g_minimapToastTimer = 2.0f;
+    }
+
+    // ==================== 航点 3D 渲染与增强 ====================
+    inline bool show3DWaypoints = true;            // 启用游戏内 3D 航点渲染
+    inline bool show3DWaypointBeams = true;        // 渲染 3D 贯天信标光柱
+    inline bool useNativeBeaconBeams = true;       // 调用原版游戏内置信标光柱
+    inline bool show3DWaypointLabels = true;       // 悬浮显示航点名称标签
+    inline bool show3DWaypointDistance = true;     // 悬浮显示距离数值
+    inline bool waypoint3DClampToScreen = true;    // 屏幕边缘方位指示与贴边吸附
+    inline int  waypoint3DMaxDistance = 5000;      // 最大渲染距离 (格)，0 为无限制
+    inline float waypoint3DBeamOpacity = 0.65f;    // 光柱不透明度 (0.10f ~ 1.00f)
+    inline float waypoint3DBeamRadius = 0.40f;     // 光柱宽度比例 (0.10f ~ 1.50f)
+    inline float waypoint3DScale = 1.0f;           // 3D 航点图标与文字整体缩放 (0.50f ~ 2.00f)
+    inline bool show3DDeathpoints = true;          // 游戏内 3D 渲染上次死亡点
+
+    // 原版世界摄像机参数捕获: 与原版信标渲染管线严格同步
+    struct WorldCameraCapture {
+        float posX = 0.0f;
+        float posY = 0.0f;
+        float posZ = 0.0f;
+        float fwdX = 0.0f;
+        float fwdY = 0.0f;
+        float fwdZ = 1.0f;
+        float rgtX = 1.0f;
+        float rgtY = 0.0f;
+        float rgtZ = 0.0f;
+        float upX = 0.0f;
+        float upY = 1.0f;
+        float upZ = 0.0f;
+        float fx = 0.0f;
+        float fy = 0.0f;
+        float fovRad = 1.2217f;
+        float aspect = 16.0f / 9.0f;
+        bool hasProj = false;
+        uint64_t frameId = 0;
+    };
+    inline WorldCameraCapture g_worldCameraCapture;
+
 
     // [P3] 小地图边框样式与罗盘个性化 (Minimap Frame Styling & Color)
     inline int   miniMapFrameStyle = 0;                          // 边框样式: 0=经典默认, 1=纯色粗框(4px), 2=纯色细框(2px), 3=无边框
@@ -432,13 +509,15 @@ namespace MapRenderState {
     inline char renameMapNameInput[128] = "";    // 重命名输入缓冲
     inline bool showTeleportNotConnectedWarning = false; // 传送未连接警告
 
+    inline bool showAnarchySettings = false; // 是否显示无规则/区块探测设置窗口
+
     // [统一拦截枢纽] 判断是否有任何全屏 UI 处于活动状态
     inline bool IsUIActive() {
         int tp = teleportState.load();
         bool isTeleportUIActive = (tp == (int)TeleportState::Loading || 
                                    tp == (int)TeleportState::Validating || 
                                    tp == (int)TeleportState::Failed);
-        return showBigMap || showWaypointUI || showDeathPointUI || showMiniMapPosSettings || showMiniMapSettings || showBigMapSettings || showHotkeySettings || showCaveSettings ||
+        return showBigMap || showWaypointUI || showDeathPointUI || showMiniMapPosSettings || showMiniMapSettings || showBigMapSettings || showHotkeySettings || showCaveSettings || showAnarchySettings ||
                showExportPNGScreen || showSeedMap || showMapSelectionUI || showNewMapModal || showRenameMapModal || showConnectMapModal || showTeleportNotConnectedWarning || isTeleportUIActive;
     }
 
@@ -509,9 +588,21 @@ namespace MapRenderState {
 
     inline float miniMapScale = 1.0f; // 小地图本身大小缩放
     inline float miniMapZoomRadius = 50.0f; // 小地图可视范围（玩家周围方块半径，10-200）
+    inline bool minimapDoubleMinZoom = false; // 小地图最小变焦翻倍 (开启后视野缩放范围翻倍放大，展示 2 倍半径宏观地形)
+    inline bool transparentMinimapBackground = false; // 小地图未加载区块透明化 (未扫描/未加载区域完全透明透出游戏画面)
+
+    // [底层数据持久化与细节体验配置]
+    inline bool useSqliteDatabase = true;          // 启用 SQLite 嵌入式结构化数据库
+    inline int  minimapFpsLimit = 0;               // 小地图独立刷新率限制 (0=跟随主帧率, 60, 30, 20, 15)
+    inline bool bigMapCrossDimCoords = true;       // 大地图光标跨维度换算显示 (主世界 ↔ 下界 8:1)
+    inline bool persistBigMapDimension = true;     // 持久大地图查看维度 (记住上次查看维度)
+    inline int  lastViewedDimensionId = 0;         // 上次查看的大地图维度
+    inline bool teleportFailNotifier = true;       // 缺少权限时的传送失败检测提示
+    inline bool fastWritesEnabled = true;          // 高性能写入节流控制 (合并高频磁盘事务)
+    inline int  writeBatchIntervalMs = 500;        // 写入批处理节流间隔 (毫秒)
 
     // [小地图 HUD 实时信息栏配置]
-    inline bool infoShowCoords = true;       // 显示 XYZ 坐标 (第1项: 默认开)
+    inline bool infoShowCoords = true;       // 显示 XYZ 坐标，第1项默认开
     inline bool infoShowNetherCoords = false; // 显示下界/主世界换算坐标 (第2项: 默认关)
     inline bool infoShowFacing = false;       // 显示朝向与偏航角 (第3项: 默认关)
     inline bool infoShowAngles = false;       // 显示精准视角角度 (默认关)
@@ -627,6 +718,80 @@ namespace MapRenderState {
     inline std::string g_regionOpStatusText = "";
     inline std::chrono::steady_clock::time_point g_regionOpStatusTime = std::chrono::steady_clock::now();
 
+    // ==================== 无规则与区块历史探测 ====================
+    // 1. 液体流动新区块
+    inline bool anarchyLiquidNewChunks = false;
+    inline bool anarchyLiquidNewChunksInverse = false;
+    inline bool anarchyLiquidNewChunksOnlyAboveY0 = false;
+    inline float anarchyLiquidNewChunksColor[4] = { 1.0f, 0.15f, 0.15f, 0.45f };
+    inline float anarchyLiquidNewChunksInverseColor[4] = { 0.15f, 0.90f, 0.35f, 0.30f };
+
+    // 2. 调色板与原生新区块
+    inline bool anarchyPaletteNewChunks = false;
+    inline bool anarchyPaletteNewChunksInverse = false;
+    inline float anarchyPaletteNewChunksColor[4] = { 1.0f, 0.45f, 0.05f, 0.45f };
+    inline float anarchyPaletteNewChunksInverseColor[4] = { 0.25f, 0.70f, 0.95f, 0.30f };
+
+    // 3. 老区块探测
+    inline bool anarchyOldChunks = false;
+    inline bool anarchyOldChunksInverse = false;
+    inline int  anarchyOldChunksMode = 2; // 0=经典1.12, 1=基岩版Pre-1.18, 2=基岩版26.51升级存档探测, 3=全代综合断层分析
+    inline bool anarchyOldChunksBedrockBlending = true; // 启用 26.51 融合升级老区块高亮
+    inline float anarchyOldChunksColor[4] = { 1.0f, 0.90f, 0.10f, 0.45f }; // 老区块高亮颜色 (金黄)
+    inline float anarchyOldChunksInverseColor[4] = { 0.20f, 0.50f, 1.0f, 0.35f }; // 现代新区块高亮颜色 (天蓝)
+    inline float anarchyOldChunksBlendedColor[4] = { 0.95f, 0.55f, 0.15f, 0.40f }; // 融合升级老区块高亮颜色 (暖橙)
+
+    // 4. 经典旧生物群系
+    inline bool anarchyOldBiomes = false;
+    inline float anarchyOldBiomesColor[4] = { 0.10f, 0.85f, 0.85f, 0.45f };
+    inline int64_t anarchyOldBiomesSeed = -4172144997902289642LL;
+
+    // 5. 传送门高亮
+    inline bool anarchyPortals = false;
+    inline float anarchyPortalsColor[4] = { 0.80f, 0.15f, 0.95f, 0.60f };
+
+    // 6. 传送门跳转检测
+    inline bool anarchyPortalSkip = false;
+    inline int anarchyPortalSkipRadius = 7;
+    inline float anarchyPortalSkipColor[4] = { 0.10f, 0.95f, 0.95f, 0.50f };
+
+    // 7. 通用坐标道路系统
+    inline bool anarchyHighways = false;
+    inline int  anarchyHighwaysMode = 0;              // 0=经典预设体系, 1=等距通用系统, 2=自由距离列表
+    inline bool anarchyHighwaysMainAxes = true;       // 主坐标轴 X=0, Z=0
+    inline bool anarchyHighwaysDiagAxes = true;       // 对角线轴 X=±Z
+    inline bool anarchyHighwaysRingRoads = true;      // 同心方环
+    inline bool anarchyHighwaysDiamondRoads = true;   // 同心菱形道路
+    inline bool anarchyHighwaysGridRoads = false;     // 平行等距网格道路
+    inline int  anarchyHighwaysRingInterval = 1000;   // 方环间距 (格)
+    inline int  anarchyHighwaysDiamondInterval = 2500;// 菱形环间距 (格)
+    inline int  anarchyHighwaysGridSpacing = 1000;    // 平行网格道路间距 (格)
+    inline int  anarchyHighwaysMaxCoord = 3750000;    // 最大绘制范围 (格)
+    inline char anarchyHighwaysCustomRingsStr[256] = "200, 500, 1000, 1500, 2000, 2500, 5000, 10000, 25000, 50000";
+    inline bool anarchyHighwaysDimOverworld = true;   // 主世界显示
+    inline bool anarchyHighwaysDimNether = true;      // 下界显示
+    inline bool anarchyHighwaysDimEnd = false;        // 末地显示
+    inline float anarchyHighwaysWidth = 2.0f;         // 道路线宽
+    inline float anarchyHighwaysColor[4] = { 0.10f, 0.65f, 1.0f, 0.80f }; // 主轴/主环路颜色
+    inline float anarchyHighwaysSecondaryColor[4] = { 0.15f, 0.85f, 0.60f, 0.60f }; // 次级网格/环路颜色
+    inline bool  anarchyHighwaysShowLabels = false;   // 道路坐标距离标注
+
+    // 8. 下界岩浆柱探测
+    inline bool anarchyLavaColumns = false;
+    inline int anarchyLavaColumnsMinHeight = 15;
+    inline float anarchyLavaColumnsAlphaShift = 0.10f;
+    inline float anarchyLavaColumnsAlphaStep = 0.02f;
+    inline float anarchyLavaColumnsColor[4] = { 1.0f, 0.40f, 0.0f, 0.55f };
+
+    // 9. 下界黑曜石平台透视
+    inline bool transparentObsidianRoof = false;
+    inline int transparentObsidianRoofY = 125;
+    inline float roofObsidianDarkening = 0.75f;
+    inline float roofSnowOpacity = 0.25f;
+
+    // 10. 磁盘持久化存储
+    inline bool anarchySaveLoadToDisk = true;
+
     // ==================== 探索足迹与个性化 ====================
     inline bool showFootsteps = true;
     inline int playerArrowColor = 0; // 0=Red, 1=White, 2=Green, 3=Blue, 4=Yellow, 5=Purple, 6=Black, 7=Cyan
@@ -634,6 +799,7 @@ namespace MapRenderState {
     inline bool timeFormat24h = true;     // 24小时制时间格式 (true=24h, false=12h AM/PM)
     inline bool showWaypointDistance = false; // 小地图路径点显示直线距离
     inline bool showZoomButtons = true; // 大地图角落缩放按钮
+    inline bool showDrawingsOnMinimap = true; // 小地图显示涂鸦标注 (默认开)
 
     struct FootstepPoint {
         float x;
@@ -803,7 +969,10 @@ namespace MapRenderState {
         miniMapOffsetX = 0.0f;
         miniMapOffsetY = 0.0f;
         miniMapZoomRadius = 50.0f;
+        minimapDoubleMinZoom = false;
+        transparentMinimapBackground = false;
         showWaypointsOnMinimap = true;
+        preferOverworldWaypoints = false;
         showRadar = true;
         showCompass = true;
         compassScale = 1.0f;
@@ -844,7 +1013,19 @@ namespace MapRenderState {
         northCompassCustomColor[0] = 1.0f; northCompassCustomColor[1] = 0.29f; northCompassCustomColor[2] = 0.29f; northCompassCustomColor[3] = 1.0f;
         keepEnlargedMinimapRotation = false;
         onlyShowCurrentWaypointSet = false;
-        currentWaypointSet = "gui.xaero_default";
+        currentWaypointSet = "gui.chiyan_default";
+        show3DWaypoints = true;
+        show3DWaypointBeams = true;
+        useNativeBeaconBeams = true;
+        show3DWaypointLabels = true;
+        show3DWaypointDistance = true;
+        waypoint3DClampToScreen = true;
+
+        waypoint3DMaxDistance = 5000;
+        waypoint3DBeamOpacity = 0.65f;
+        waypoint3DBeamRadius = 0.40f;
+        waypoint3DScale = 1.0f;
+        show3DDeathpoints = true;
         radarOverFrameMode = 0;
         radarHighlightTamed = true;
         radarDepthFadeStart = 1.5f;
@@ -854,10 +1035,14 @@ namespace MapRenderState {
     }
 
     inline void ResetBigMapSettingsToDefaults() {
+        bigMapZoom = 3.0f;
+        bigMapHideUI = false;
+        bigMapFollowPlayer = true;
         bigMapShowHoverBox = true;
         bigMapShowEntities = false;
         bigMapEntityScale = 1.0f;
         bigMapShowMarkers = true;
+        preferOverworldWaypoints = false;
         bigMapShowDisabledWaypoints = true;
         bigMapWaypointScale = 1.0f;
         minZoomForLocalWaypoints = 0.0f;

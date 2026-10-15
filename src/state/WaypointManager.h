@@ -18,13 +18,13 @@ struct Waypoint {
     bool pinned = false; // 是否置顶
     bool isTemporary = false; // 是否为临时路径点 (全局唯一，每次新建覆盖旧的)
     std::string folder = ""; // 所属文件夹（空表示未分类）
-    std::string set = "gui.xaero_default"; // [P3] 所属集合 (默认 "gui.xaero_default")
+    std::string set = "gui.chiyan_default"; // [P3] 所属集合 (默认 "gui.chiyan_default")
     uint64_t createdAt = 0;  // 创建时间戳（毫秒）
     int order = 0;           // 手动排序次序
     mutable int8_t isCave = -1; // 主世界层级: -1=自动判定, 0=地表之上, 1=洞穴内
 
     // 构造函数
-    Waypoint() : x(0), y(0), z(0), r(1.f), g(1.f), b(1.f), enabled(true), dimId(0), pinned(false), isTemporary(false), folder(""), set("gui.xaero_default"), createdAt(0), order(0), isCave(-1) {}
+    Waypoint() : x(0), y(0), z(0), r(1.f), g(1.f), b(1.f), enabled(true), dimId(0), pinned(false), isTemporary(false), folder(""), set("gui.chiyan_default"), createdAt(0), order(0), isCave(-1) {}
 };
 
 namespace WaypointManager {
@@ -41,15 +41,18 @@ namespace WaypointManager {
     void LoadWaypoints();
 
     // 增删查改接口
-    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId = -1, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, const std::string& set = "gui.xaero_default");
+    std::string AddWaypoint(const std::string& name, int x, int y, int z, float r, float g, float b, int dimId = -1, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, const std::string& set = "gui.chiyan_default");
     void RemoveWaypoint(const std::string& id);
     void RemoveWaypoints(const std::set<std::string>& ids);
     void ToggleWaypoint(const std::string& id);
     void ToggleWaypointPin(const std::string& id);
-    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, int dimId = -1, const std::string& set = "gui.xaero_default");
+    void SetAllWaypointsEnabled(bool enabled, const std::vector<std::string>& targetIds = {});
+    void SetWaypointsEnabled(bool enabled, const std::set<std::string>& targetIds);
+    void UpdateWaypoint(const std::string& id, const std::string& name, int x, int y, int z, float r, float g, float b, bool enabled, bool pinned = false, const std::string& folder = "", int8_t isCave = -1, int dimId = -1, const std::string& set = "gui.chiyan_default");
     bool RestoreLastDeletedWaypoint();
     int GetDeletedWaypointCount();
     std::string GetLastDeletedWaypointName();
+    int GetWaypointCount();
 
     // 临时路径点接口 (单例临时路径点，重复设置自动更新)
     std::string SetTemporaryWaypoint(int x, int y, int z, int dimId = -1, int8_t isCave = -1);

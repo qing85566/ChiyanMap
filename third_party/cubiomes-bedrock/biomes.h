@@ -39,13 +39,16 @@ enum MCVersion
     MC_NEWEST = MC_26_51,
 };
 
-enum Dimension
+enum CubiomesDimension
 {
     DIM_NETHER      =   -1,
     DIM_OVERWORLD   =    0,
     DIM_END         =   +1,
     DIM_UNDEF       = 1000,
 };
+#ifndef __cplusplus
+typedef enum CubiomesDimension Dimension;
+#endif
 
 enum BiomeID
 {

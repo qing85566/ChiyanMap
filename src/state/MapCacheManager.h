@@ -138,6 +138,16 @@ namespace MapCacheManager {
     bool FetchBranchPyramidTextureData(uint64_t branchHash, uint8_t* outBuffer, bool forceCopy = false);
     void MarkBranchPyramidDirtyForRegion(int rx, int rz, bool isCave);
 
+    // [大地图渲染极速优化核心]
+    // 检查指定区域在磁盘上或当前内存中是否真实存在
+    bool HasRegionOnDisk(uint64_t hash);
+    // 快速获取视口范围内真实存在的所有区域哈希
+    void GetExistingRegionHashesInView(int minRx, int maxRx, int minRz, int maxRz, bool isCave, std::vector<uint64_t>& outHashes);
+    // 快速获取视口范围内真实存在的分支哈希集合
+    void GetExistingBranchHashesInView(int minRx, int maxRx, int minRz, int maxRz, int pyramidLevel, bool isCave, std::vector<uint64_t>& outBranchHashes);
+    // 提取待更新到 GPU 显存的脏区域哈希列表
+    void PopDirtyTextureHashes(std::vector<uint64_t>& outHashes, size_t maxCount = 16);
+
     // [新增] 当 GPU 繁忙时，退回纹理更新请求
     void MarkTextureDirty(uint64_t hash);
     // [新增] 当光影/昼夜参数变化时，标记所有已加载区域重新烘焙纹理

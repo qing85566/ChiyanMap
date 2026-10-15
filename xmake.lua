@@ -9,6 +9,7 @@ add_requires("levibuildscript")
 add_requires("imgui", {configs = {shared = false, win32 = true, dx11 = true}})
 add_requires("minhook", {configs = {shared = false}})
 add_requires("nlohmann_json")
+add_requires("sqlite3")
 
 if not has_config("vs_runtime") then
     set_runtimes("MD")
@@ -31,7 +32,7 @@ target("ChiyanMap")
         "/wd4189"    -- 允许已初始化但未使用的局部变量
     )
     add_defines("NOMINMAX", "UNICODE")
-    add_packages("levilamina", "imgui", "minhook", "nlohmann_json")
+    add_packages("levilamina", "imgui", "minhook", "nlohmann_json", "sqlite3")
     add_syslinks("d3d11", "dxgi", "user32", "delayimp", "windowscodecs", "ole32", "shell32")
     add_ldflags("/DELAYLOAD:dwmapi.dll", "/DELAYLOAD:imm32.dll", "/DELAYLOAD:LeviLamina.dll")
     add_shflags("/DELAYLOAD:dwmapi.dll", "/DELAYLOAD:imm32.dll", "/DELAYLOAD:LeviLamina.dll")

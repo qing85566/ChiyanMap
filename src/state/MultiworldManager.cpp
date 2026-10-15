@@ -1,6 +1,7 @@
 #include "state/MultiworldManager.h"
 #include "state/MapCacheManager.h"
 #include "state/WaypointManager.h"
+#include "state/DrawingManager.h"
 #include "state/LanguageManager.h"
 #include "mod/ChiyanMap.h"
 
@@ -260,6 +261,7 @@ namespace MultiworldManager {
             // 通知缓存系统与路径点系统切换
             MapCacheManager::SwitchMap(newId);
             WaypointManager::SwitchMap(newId);
+            DrawingManager::SwitchMap(newId);
 
             for (auto& cb : s_changeCallbacks) {
                 if (cb) cb(newId);

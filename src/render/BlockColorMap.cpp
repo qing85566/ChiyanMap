@@ -33,7 +33,7 @@ bool IsInvisibleOrTechnicalOverlay(std::string const& rawName) noexcept {
     if (name == "minecraft:air" || name == "air" ||
         name == "minecraft:cave_air" || name == "cave_air" ||
         name == "minecraft:void_air" || name == "void_air") return true;
-    // 普通无色玻璃与无色玻璃板始终透明穿透（与原版地图及 Xaero 行为一致，直视下方地形）
+    // 普通无色玻璃与无色玻璃板始终透明穿透（直视下方地形）
     if (name == "minecraft:glass" || name == "glass" ||
         name == "minecraft:glass_pane" || name == "glass_pane" ||
         name == "minecraft:hard_glass" || name == "hard_glass" ||

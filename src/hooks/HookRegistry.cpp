@@ -2,12 +2,14 @@
 #include "hooks/PlayerHook.h"
 #include "hooks/UIRenderHook.h"
 #include "hooks/DX11Hook.h"
+#include "hooks/BeaconRenderHook.h"
 
 void registerAllHooks() {
     // 只注册原生的游戏逻辑与 UI 钩子
     ClientInstanceUpdateHook::hook();
     LevelUpdateWeatherHook::hook();
     UIRenderContextFlushTextHook::hook();
+    BeaconRenderHook::hook();
 
     LocalPlayerApplyTurnDeltaHook::hook();
     GameModeStartDestroyBlockHook::hook();
@@ -36,11 +38,13 @@ void unregisterAllHooks() {
     ClientInstanceUpdateHook::unhook();
     LevelUpdateWeatherHook::unhook();
     UIRenderContextFlushTextHook::unhook();
+    BeaconRenderHook::unhook();
 
     LocalPlayerApplyTurnDeltaHook::unhook();
     GameModeStartDestroyBlockHook::unhook();
     GameModeUseItemHook::unhook();
     GameModeAttackHook::unhook();
+
 
     LocalPlayerSwingHook::unhook();
     LocalPlayerMissedSwingHook::unhook();

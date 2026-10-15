@@ -6,12 +6,16 @@
 #include "state/DeathPointManager.h"
 #include "state/LanguageManager.h"
 #include "state/SeedMapManager.h"
+#include "state/AnarchyManager.h"
+#include "state/SpecialGridManager.h"
+#include "state/DatabaseManager.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/utils/SystemUtils.h"
 #include "ll/api/io/FileUtils.h"
 #include "ll/api/data/Version.h"
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/input/MouseInputEvent.h"
+#include <windows.h>
 #include <chrono>
 #include <atomic>
 #include <vector>
@@ -106,6 +110,9 @@ bool ChiyanMap::load() {
     WaypointManager::Init(); // 初始化地标 JSON 引擎
     DeathPointManager::Init(); // 初始化死亡记录引擎
     SeedMapManager::Init();
+    AnarchyManager::Init();
+    SpecialGridManager::Init();
+    DatabaseManager::Init();
     return true;
 }
 
@@ -130,6 +137,7 @@ bool ChiyanMap::disable() {
     // 防止进程退出阶段访问已释放的 D3D/ImGui/Player 资源；
     // 退出时不主动卸载跳板内存，确保 Minecraft 全局析构函数通过跳板时依然安全执行原函数
     MapRenderState::g_isShuttingDown.store(true);
+    ClipCursor(NULL);
     if (g_mouseListener) {
         ll::event::EventBus::getInstance().removeListener(g_mouseListener);
         g_mouseListener = nullptr;
@@ -138,6 +146,9 @@ bool ChiyanMap::disable() {
     g_localPlayer = nullptr;
     g_clientInstance = nullptr;
 
+    AnarchyManager::SaveHighlights();
+    SpecialGridManager::Shutdown();
+    DatabaseManager::Shutdown();
     SeedMapManager::Shutdown();
     shutdownCacheWriteThread();
     MapCacheManager::Shutdown();

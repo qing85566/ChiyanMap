@@ -26,4 +26,8 @@ namespace DeathPointManager {
     void SetConverted(const std::string& id, bool converted = true, const std::string& waypointId = "");
     void SaveDeathPoints();
     void LoadDeathPoints();
+    inline int GetDeathPointCount() {
+        std::lock_guard<std::mutex> lock(g_deathMutex);
+        return (int)g_deathPoints.size();
+    }
 }
