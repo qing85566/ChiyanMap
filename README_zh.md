@@ -97,6 +97,69 @@ xmake
 
 ---
 
+## 📂 仓库架构与目录说明
+
+```text
+ChiyanMap/
+├── .github/                 # GitHub CI/CD 工作流与 Issue/PR 模板
+├── docs/                    # 完整用户手册与详细使用指南（9 篇核心指南）
+├── heads/                   # 原版实体与生物雷达高分辨率头像素材（PNG）
+├── lang/                    # 16 国语言本地化国际化 JSON 翻译字典
+├── src/                     # C++23 核心源代码
+│   ├── hooks/               # LeviLamina / MinHook 渲染与游戏底层 Hook 拦截器
+│   │   ├── BeaconRenderHook.h   # 3D 贯天信标与三维场景渲染拦截
+│   │   ├── DX11Hook.h           # DX11/11On12 SwapChain Present 呈现与 ImGui 渲染屏障
+│   │   ├── HookRegistry.h/.cpp  # 统一 Hook 注册、初始化与卸载安全管理
+│   │   ├── PlayerHook.h         # 玩家 Tick、坐标旋转、跨维度与死亡拦截
+│   │   └── UIRenderHook.h       # 游戏 UI 状态协同与输入冲突仲裁
+│   ├── mod/                 # 模组生命周期与运行时安全入口
+│   │   ├── ChiyanMap.h/.cpp     # 模组初始化、配置热加载、输入监听与全局派发
+│   │   └── MemoryOperators.cpp  # 跨 DLL 内存分配/释放安全重载算子
+│   ├── render/              # 贴图、着色与图集渲染层
+│   │   ├── BlockColorMap.h/.cpp # 方块 ID/State 转地图着色与高程阴影算法
+│   │   ├── EntityIconManager.h  # 实体头像纹理加载、缓存与雷达标记渲染
+│   │   └── XaeroGuiAtlas.h      # 矢量与程序化 GUI 图集渲染
+│   ├── state/               # 核心状态机、数据模型与业务管理器
+│   │   ├── AnarchyManager.h/.cpp     # 无规则区块历史变动与建筑痕迹探测
+│   │   ├── DatabaseManager.h/.cpp    # 本地数据持久化存储底层
+│   │   ├── DeathPointManager.h/.cpp  # 死亡记录追踪、历史归档与 Ctrl+Z 恢复
+│   │   ├── DrawingManager.h/.cpp     # 大地图矢量标绘涂鸦与图层撤销/重做
+│   │   ├── LanguageManager.h/.cpp    # 16 种多语言本地化加载与实时切换
+│   │   ├── MapCacheManager.h/.cpp    # 多线程分层异步磁盘写盘与 LRU 缓存自愈
+│   │   ├── MapRenderState.h/.cpp     # 小地图与大地图 ImGui 渲染驱动核心
+│   │   ├── MultiworldManager.h/.cpp  # 多世界/多维度实例隔离与级联文件清理
+│   │   ├── SeedMapIconAtlas.h        # 种子地图群系与结构图标图集
+│   │   ├── SeedMapManager.h/.cpp     # 种子地图预测、结构分布与异步生成
+│   │   ├── SpecialGridManager.h/.cpp # 坐标网格、区块边界与史莱姆区块计算
+│   │   └── WaypointManager.h/.cpp    # 路径点集合、分类抽屉筛选与光柱管理
+│   └── worldgen/            # 基岩版世界生成算法封装
+│       ├── BedrockBiomeValidator.h/.cpp # 基岩版群系有效性校验与推导
+│       ├── Random.h/.cpp                # 基岩版 PRNG 伪随机数发生器
+│       ├── StructureCatalog.h/.cpp      # 全结构生成特征与索引编目
+│       ├── TileQuery.h/.cpp             # 瓦片空间坐标与区块计算管道
+│       └── WorldGenTypes.h              # 世界生成基础类型与几何结构体
+├── third_party/             # 第三方依赖库
+│   └── cubiomes-bedrock/    # 高性能 C 语言基岩版群系与结构算法库
+├── .clang-format            # 代码格式化规范配置
+├── .clang-tidy              # 静态代码检查规则配置
+├── LICENSE                  # GNU GPL-3.0 开源协议文本
+├── manifest.json            # LeviLamina 模组元数据清单
+├── tooth.json               # LeviLamina 包管理器配置文件
+└── xmake.lua                # XMake 构建自动化脚本
+```
+
+### 核心模块职责说明
+
+- **`src/mod/`（模组生命周期）**：模组主入口，负责在 LeviLamina 加载阶段初始化各子系统、注册命令与事件回调、监听键盘热键，并提供跨模块的安全内存算子。
+- **`src/hooks/`（游戏钩子）**：基于 MinHook 拦截 DirectX 11 `Present` / `ResizeBuffers`，挂载 ImGui 渲染管线；拦截玩家 tick 与视角变换，实时同步玩家移动与死亡事件。
+- **`src/render/`（渲染层）**：负责方块材质色彩提取、高程渲染阴影、实体头像贴图加载与雷达渲染，以及 GUI 图标图集绘制。
+- **`src/state/`（状态与业务逻辑）**：模组的核心业务引擎。涵盖小地图与大地图绘制状态机、异步多线程瓦片磁盘缓存、路径点/死亡点持久化、跨维度多世界识别、矢量标注撤销重做、种子地图计算与 16 国语言本地化。
+- **`src/worldgen/` & `third_party/`（世界生成与算法）**：基于移植优化的 C 语言 `cubiomes-bedrock` 库，在纯客户端环境下高效预测基岩版群系分布、史莱姆区块与各种自然生成结构。
+- **`docs/`（文档库）**：包含 9 篇全方位功能说明书与用户教程，涵盖小地图、大地图、路径点、多世界漫游、洞穴透视、矢量标绘、种子地图与快捷键设置。
+- **`heads/` & `lang/`（资源与资产）**：包含全套原版生物高分辨率雷达头像与 16 国语言 JSON 字典。
+
+---
+
 ## 📄 开源许可证
 
 本项目基于 [GNU General Public License v3.0 (GPL-3.0)](./LICENSE) 协议开源。

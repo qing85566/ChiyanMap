@@ -97,6 +97,69 @@ xmake
 
 ---
 
+## 📂 Repository Structure
+
+```text
+ChiyanMap/
+├── .github/                 # GitHub CI/CD workflows and Issue/PR templates
+├── docs/                    # Complete user documentation and guides (9 core chapters)
+├── heads/                   # High-resolution entity radar icon assets (PNG)
+├── lang/                    # Localization dictionaries for 16 languages (JSON)
+├── src/                     # C++23 core source code
+│   ├── hooks/               # LeviLamina & MinHook engine hooks
+│   │   ├── BeaconRenderHook.h   # In-world 3D beacon beam rendering hook
+│   │   ├── DX11Hook.h           # DX11/11On12 SwapChain Present & ImGui render barrier
+│   │   ├── HookRegistry.h/.cpp  # Centralized hook registration and lifecycle management
+│   │   ├── PlayerHook.h         # Player tick, rotation, dimension shift, and death hooks
+│   │   └── UIRenderHook.h       # In-game UI coordination and input arbitration
+│   ├── mod/                 # Mod entry point and lifecycle safety
+│   │   ├── ChiyanMap.h/.cpp     # Mod lifecycle, config hot-reloading, and hotkey dispatch
+│   │   └── MemoryOperators.cpp  # Safe cross-DLL new/delete memory operator overloads
+│   ├── render/              # Shading, textures, and atlas rendering
+│   │   ├── BlockColorMap.h/.cpp # Block ID/State to RGBA color and elevation hillshading
+│   │   ├── EntityIconManager.h  # Entity head icon texture loading, caching, and radar rendering
+│   │   └── XaeroGuiAtlas.h      # Procedural and vector GUI icon atlas rendering
+│   ├── state/               # State machine, data models, and business logic
+│   │   ├── AnarchyManager.h/.cpp     # Anarchy chunk modification history and footprint detection
+│   │   ├── DatabaseManager.h/.cpp    # Persistent storage and caching backend
+│   │   ├── DeathPointManager.h/.cpp  # Death point tracking, history, and Ctrl+Z undo restoration
+│   │   ├── DrawingManager.h/.cpp     # World map vector drawings, annotations, and layer undo/redo
+│   │   ├── LanguageManager.h/.cpp    # 16-language i18n loader and real-time switching
+│   │   ├── MapCacheManager.h/.cpp    # Multi-threaded layered async disk writing & self-healing LRU cache
+│   │   ├── MapRenderState.h/.cpp     # MiniMap and World Map ImGui rendering coordinator
+│   │   ├── MultiworldManager.h/.cpp  # Multiworld/dimension instance isolation and cascade cleanup
+│   │   ├── SeedMapIconAtlas.h        # Biome and structure icon atlas for Seed Map
+│   │   ├── SeedMapManager.h/.cpp     # Seed Map generation, structure prediction, and biome queries
+│   │   ├── SpecialGridManager.h/.cpp # Coordinate grids, chunk boundaries, and slime chunk overlays
+│   │   └── WaypointManager.h/.cpp    # Waypoint sets, categorization, drawer filtering, and beacons
+│   └── worldgen/            # Bedrock world generation wrappers
+│       ├── BedrockBiomeValidator.h/.cpp # Bedrock biome validation and derivation
+│       ├── Random.h/.cpp                # Bedrock PRNG (pseudo-random number generators)
+│       ├── StructureCatalog.h/.cpp      # Catalog of Bedrock structure generation traits
+│       ├── TileQuery.h/.cpp             # Tile spatial query and chunk calculation pipeline
+│       └── WorldGenTypes.h              # Data structures and geometry types for world generation
+├── third_party/             # Third-party dependencies
+│   └── cubiomes-bedrock/    # High-performance C library for Bedrock biome & structure algorithms
+├── .clang-format            # Code formatting rules
+├── .clang-tidy              # Static code analysis configuration
+├── LICENSE                  # GNU General Public License v3.0 text
+├── manifest.json            # LeviLamina mod manifest
+├── tooth.json               # LeviLamina package manager configuration
+└── xmake.lua                # XMake build automation script
+```
+
+### Module Responsibilities
+
+- **`src/mod/` (Mod Lifecycle)**: Core initialization entry point. Manages subsystem bootstrapping during LeviLamina load, registers commands and event callbacks, listens for hotkeys, and provides safe memory allocators.
+- **`src/hooks/` (Engine Hooks)**: MinHook-based hooks intercepting DirectX 11 `Present` / `ResizeBuffers` to run the ImGui render pipeline with full exception safety, as well as player tick hooks to synchronize coordinates, rotations, dimension shifts, and death events.
+- **`src/render/` (Rendering Pipeline)**: Computes block colors, elevation hillshading, dynamic entity icon loading and caching, and procedural vector GUI icons.
+- **`src/state/` (State Machine & Logic)**: The core engine of the mod. Handles MiniMap and World Map render states, multi-threaded asynchronous chunk tile caching, waypoint/deathpoint persistence, multiworld instance management, vector drawing layers with undo/redo, seed map computation, and 16-language localization.
+- **`src/worldgen/` & `third_party/` (Worldgen & Algorithms)**: Integrates the ported C `cubiomes-bedrock` library to predict Bedrock biomes, slime chunks, and structures on the client side without needing server permissions.
+- **`docs/` (Documentation)**: Comprehensive 9-part user guide and tutorial collection covering every aspect of the mod.
+- **`heads/` & `lang/` (Assets & Locales)**: High-resolution mob head icons for the entity radar and JSON dictionaries for 16 supported languages.
+
+---
+
 ## 📄 License
 
 This project is licensed under the [GNU General Public License v3.0 (GPL-3.0)](./LICENSE).
