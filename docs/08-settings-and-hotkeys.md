@@ -65,3 +65,29 @@ ChiyanMap 研发了 **悬浮宿主式原生输入法桥接系统（NativeIME）*
 ### 4.3 小地图帧率限制（Minimap FPS Limit）
 - 小地图默认随游戏渲染帧率（如 144Hz / 240Hz）高刷渲染；
 - 如果在核显或轻薄本上运行游戏，可在设置中将小地图独立限制为 `30 FPS` 或 `60 FPS`，以极少平滑度代价降低整机功耗与发热。
+
+### 4.4 模组完整目录结构与数据文件职责对照
+为了方便玩家备份、迁移存档或整合包作者打包，`mods/ChiyanMap/` 运行时的各项配置与数据文件结构如下：
+
+```
+mods/ChiyanMap/
+├── ChiyanMap.dll                  # 模组核心主程序动态库
+├── manifest.json / tooth.json     # LeviLamina 依赖清单与版本描述
+├── config.json                    # 用户图形设置与快捷键配置
+├── lang/*.json                    # 16 种本地化多语言字典
+├── heads/*.png                    # 80+ 种生物雷达微缩贴图
+├── data/
+│   ├── <World_ID>_database.db     # SQLite WAL 数据库文件
+│   ├── cache/<World_ID>/          # 512x512 区域二进制地貌切片
+│   │   ├── dim_0/                 # 主世界切片 (含 cave/ 洞穴数据)
+│   │   ├── dim_1/ & dim_2/        # 下界与末地切片
+│   │   └── maps/<Map_ID>/         # 多世界独立切片
+│   └── export/*.png               # 框选导出的全景地图文件
+├── waypoints/<World_ID>_*.json    # 路径点列表、集合清单与分类文件夹
+├── deaths/<World_ID>.json         # 死亡记录与路径点关联数据
+├── drawings/<World_ID>_*.json     # 矢量涂鸦标注与多图层数据
+├── anarchy/<World_ID>_anarchy.json# 无规则区块历史痕迹热度点
+├── breadcrumbs/*.json             # 探索历史移动足迹
+└── backups/*.json                 # 手动/自动备份快照
+```
+详尽的各目录职责与文件格式说明，亦可参阅 [运行时目录架构总览](./README.md#运行时目录架构与文件说明-modschiyanmap)。
