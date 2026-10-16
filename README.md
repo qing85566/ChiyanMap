@@ -1,4 +1,6 @@
-# ChiyanMap（赤焰地图）
+# ChiyanMap
+
+**English** | [简体中文](./README_zh.md)
 
 [![Release](https://img.shields.io/github/v/release/qing85566/ChiyanMap?color=red&label=Release)](https://github.com/qing85566/ChiyanMap/releases)
 [![Platform](https://img.shields.io/badge/Platform-Minecraft%20Bedrock%20(Windows)-green)](https://www.minecraft.net/)
@@ -6,102 +8,93 @@
 [![Language](https://img.shields.io/badge/C%2B%2B-23-orange)](https://en.cppreference.com/w/cpp/23)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](./LICENSE)
 
-**ChiyanMap** 是一款专为 **Minecraft 基岩版 (Windows)** 打造的高性能客户端渲染向地图与雷达模组。基于 **LeviLamina** 原生框架与 DirectX 11 / 11On12 渲染管线深度集成，纯客户端运行，无需服务器安装任何插件即可享受丝滑的 HUD 实时地图体验。
+**ChiyanMap** is a high-performance, client-side map and radar mod designed exclusively for **Minecraft Bedrock Edition (Windows)**. Built on the **LeviLamina** native framework and deeply integrated into the DirectX 11 / 11On12 rendering pipeline, it runs purely within the client—requiring zero server plugins for a buttery-smooth real-time HUD map experience.
 
-> ⚠️ **声明**：本模组全部代码均由 **AI（人工智能）编写生成**。使用即代表知情并自行承担相关风险。
-
----
-
-## 🌟 核心特性
-
-- **🗺️ 实时小地图 (MiniMap)**
-  
-  - 支持圆形 / 方形无缝切换、自由拖拽定位、缩放与显示半径调节。
-  - 玩家朝向平滑旋转或固定正北；智能药水效果避让与 HUD 堆叠防护。
-  - 内置多距离分层实体雷达（生物、玩家、怪物、已驯服宠物专属光环）。
-
-- **🌍 全屏大地图 (World Map)**
-  
-  - 高流畅度平滑缩放、坐标即时跳转、多维度视角无缝漫游。
-  - 框选高清导出地图 PNG 图片（支持自定义快捷键）。
-  - 内置种子地图（Seed Map），支持结构分布、史莱姆区块与群系实时预测。
-
-- **📍 路径点与死亡点系统 (Waypoints & Death Points)**
-  
-  - 支持路径点集合（Sets）管理、分类抽屉筛选、自定义颜色与图标。
-  - 原版 3D 贯天信标光柱与屏幕距离指示器；支持快捷键切换集合并弹出平滑 Toast。
-  - 死亡位置自动高精度记录，支持一键转为永久路径点，误删支持 `Ctrl+Z` 撤销恢复。
-
-- **🌌 多世界与实例漫游 (Multiworld)**
-  
-  - 支持跨服/子服地图实例独立隔离与互联漫游，自动感知世界出生点变更。
-  - 实例删除级联清理，不留磁盘孤儿文件。
-
-- **⛏️ 洞穴地图与无规则探测 (Cave & Anarchy)**
-  
-  - 垂直深度切片洞穴透视，地下结构一目了然。
-  - 无规则（Anarchy）区块历史修改痕迹探测，协助识别建筑痕迹与地形变动。
-
-- **✏️ 涂鸦与标注系统 (Drawing & Annotations)**
-  
-  - 大地图自由涂鸦，支持画笔、折线、箭头、矩形、圆形、文本标记及图层管理。
-  - 完整支持撤销 (`Ctrl+Z`) 与重做 (`Ctrl+Y`)。
-
-- **⚡ 极致性能与稳定性**
-  
-  - 多线程分层异步磁盘写盘，内存缓存自愈管理。
-  - DXGI Present 呈现层全链路异常容灾屏障，0 崩溃、0 掉帧。
-  - 内置 16 种语言本地化支持与原生独立输入法 (IME) 输入支持。
+> ⚠️ **Disclaimer**: All code in this mod was generated and written by **AI (Artificial Intelligence)**. By using this mod, you acknowledge this and assume all associated risks.
 
 ---
 
-## ⌨️ 常用快捷键（默认）
+## 🌟 Key Features
 
-| 按键             | 功能                | 按键               | 功能                 |
-|:-------------- |:----------------- |:---------------- |:------------------ |
-| **`M`**        | 打开 / 关闭全屏大地图      | **`U`**          | 打开路径点管理器           |
-| **`N`**        | 切换小地图显示开关         | **`Y`**          | 切换小地图形状（圆形 / 方形）   |
-| **`J`**        | 切换小地图朝向（旋转 / 锁定北） | **`Shift` + 拖拽** | 大地图框选区域导出 PNG      |
-| **`Tab` (长按)** | 大地图临时显隐实体头像       | **`Ctrl + Z`**   | 撤销上一步操作 / 恢复已删除路径点 |
+- **🗺️ Real-Time MiniMap**
+  - Seamless toggle between circular and square shapes, free dragging, scaling, and view distance radius adjustment.
+  - Smooth player-direction rotation or locked to North; smart potion HUD push-box avoidance.
+  - Multi-distance layered entity radar (passive mobs, players, hostile mobs, and tamed pets with glowing auras).
 
-> 💡 所有快捷键均可在设置面板（大地图齿轮图标）中自由重绑定与组合绑定。
+- **🌍 Fullscreen World Map**
+  - Ultra-smooth panning and zooming, instant coordinate jumping, and cross-dimension viewport roaming.
+  - Selection box export of high-resolution map PNGs (with customizable hotkey).
+  - Integrated Seed Map supporting structure distribution, slime chunk, and biome predictions.
+
+- **📍 Waypoints & Death Points System**
+  - Waypoint Sets management, category drawer filtering, custom colors, and icons.
+  - In-game 3D beacon beams and distance HUD indicators; hotkey set switching with smooth on-screen toast notifications.
+  - High-precision automatic death location recording, one-click conversion to permanent waypoints, and `Ctrl+Z` undo restoration for accidental deletions.
+
+- **🌌 Multiworld & Instance Roaming**
+  - Separate isolation and interconnected roaming between server worlds and custom map instances, automatically detecting spawn changes.
+  - Deep cascade cleanup upon instance deletion—zero leftover orphaned files.
+
+- **⛏️ Cave Map & Anarchy Detection**
+  - Vertical depth-sliced cave X-ray mode reveals underground layouts at a glance.
+  - Anarchy chunk history modification detection to identify player structures and terrain modifications.
+
+- **✏️ Drawing & Annotation System**
+  - Freehand drawing on the fullscreen map with pens, polylines, arrows, rectangles, circles, text labels, and layer management.
+  - Full undo (`Ctrl+Z`) and redo (`Ctrl+Y`) support.
+
+- **⚡ Ultimate Performance & Stability**
+  - Multi-threaded asynchronous layered disk writes and self-healing in-memory cache management.
+  - Full-pipeline exception barrier across DXGI Present—0 crashes, 0 frame drops.
+  - Native independent IME input host and 16 built-in localization languages.
 
 ---
 
-## 📦 安装方法
+## ⌨️ Default Hotkeys
 
-1. 确保已安装 [LeviLamina](https://github.com/LiteLDev/LeviLamina) 对应版本的 Minecraft 基岩版客户端。
-2. 前往 [Releases](https://github.com/qing85566/ChiyanMap/releases) 下载最新版本的 `ChiyanMap.zip`。
-3. 将解压出的 `ChiyanMap` 文件夹放置于客户端 `mods/` 目录下（如 `mods/ChiyanMap`）。
-4. 启动游戏即可生效。
+| Key | Action | Key | Action |
+| :--- | :--- | :--- | :--- |
+| **`M`** | Toggle Fullscreen World Map | **`U`** | Open Waypoint Manager |
+| **`N`** | Toggle MiniMap Visibility | **`Y`** | Toggle MiniMap Shape (Circle / Square) |
+| **`J`** | Toggle MiniMap Rotation (Player / North) | **`Shift` + Drag** | Select Box to Export PNG on World Map |
+| **`Tab` (Hold)** | Temporarily Show/Hide Entity Heads on Map | **`Ctrl + Z`** | Undo Action / Restore Deleted Waypoint |
+
+> 💡 All hotkeys can be rebound or combined in the settings panel (gear icon on the world map).
 
 ---
 
-## 🛠️ 源码构建
+## 📦 Installation
 
-### 环境要求
+1. Ensure [LeviLamina](https://github.com/LiteLDev/LeviLamina) is installed for your Minecraft Bedrock client version.
+2. Download the latest `ChiyanMap.zip` from [Releases](https://github.com/qing85566/ChiyanMap/releases).
+3. Extract the `ChiyanMap` folder into your client's `mods/` directory (e.g., `mods/ChiyanMap`).
+4. Launch the game.
 
-- **操作系统**：Windows 10 / 11 (x64)
-- **编译工具**：[Visual Studio 2022](https://visualstudio.microsoft.com/)（C++ 桌面开发环境，MSVC v143+）
-- **构建工具**：[XMake](https://xmake.io/) (3.0.0+)
-- **语言标准**：C++23
+---
 
-### 构建步骤
+## 🛠️ Building from Source
 
+### Prerequisites
+- **Operating System**: Windows 10 / 11 (x64)
+- **Compiler**: [Visual Studio 2022](https://visualstudio.microsoft.com/) (Desktop development with C++, MSVC v143+)
+- **Build Tool**: [XMake](https://xmake.io/) (3.0.0+)
+- **Standard**: C++23
+
+### Build Steps
 ```powershell
-# 1. 克隆仓库
+# 1. Clone repository
 git clone https://github.com/qing85566/ChiyanMap.git
 cd ChiyanMap
 
-# 2. 配置并构建（Release）
+# 2. Configure and build (Release)
 xmake f -m release
 xmake
 
-# 编译产物位于 bin/ChiyanMap/
+# Compiled binaries will be generated in bin/ChiyanMap/
 ```
 
 ---
 
-## 📄 开源许可证
+## 📄 License
 
-本项目基于 [GNU General Public License v3.0 (GPL-3.0)](./LICENSE) 协议开源。
+This project is licensed under the [GNU General Public License v3.0 (GPL-3.0)](./LICENSE).
