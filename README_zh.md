@@ -1,4 +1,4 @@
-# ChiyanMap（赤焰地图）
+# ChiyanMap
 
 [English](./README.md) | **简体中文**
 
