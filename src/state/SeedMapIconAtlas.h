@@ -61,7 +61,7 @@ inline constexpr IconColor kIce{123, 210, 235};
 inline constexpr IconColor kMangrove{54, 128, 91};
 inline constexpr IconColor kPale{174, 192, 160};
 inline constexpr IconColor kSulfur{200, 210, 50};
-inline constexpr IconColor kDappled{85, 140, 60};
+inline constexpr IconColor kDappled{223, 104, 39};
 inline constexpr IconColor kSoul{93, 137, 158};
 inline constexpr IconColor kCrimson{177, 55, 70};
 inline constexpr IconColor kWarped{46, 157, 150};

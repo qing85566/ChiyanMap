@@ -355,12 +355,17 @@ namespace MultiworldManager {
                 std::filesystem::copy(mapDir, backupDir, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
                 std::filesystem::remove_all(mapDir, ec);
             }
-            // 同时清理对应地图独立的路径点文件
+            // 同时清理对应地图独立的路径点与涂鸦文件
             for (int d = 0; d <= 2; ++d) {
                 std::string wpFile = "mods/ChiyanMap/waypoints/" + g_currentWorldId + "_" + mapId + "_dim" + std::to_string(d) + ".json";
                 std::error_code ec2;
                 std::filesystem::remove(wpFile, ec2);
+                std::string drawFile = "mods/ChiyanMap/drawings/" + g_currentWorldId + "_" + mapId + "_dim" + std::to_string(d) + ".json";
+                std::filesystem::remove(drawFile, ec2);
             }
+            std::error_code ecFolders;
+            std::filesystem::remove("mods/ChiyanMap/waypoints/" + g_currentWorldId + "_" + mapId + "_folders.json", ecFolders);
+            std::filesystem::remove("mods/ChiyanMap/waypoints/" + g_currentWorldId + "_" + mapId + "_sets.json", ecFolders);
         } catch (...) {}
 
         return true;

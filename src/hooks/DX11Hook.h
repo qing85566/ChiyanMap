@@ -908,6 +908,10 @@ namespace DX11Hook {
     }
 
     inline LRESULT __stdcall WndProcHook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        if (MapRenderState::g_isShuttingDown.load()) {
+            if (oWndProc) return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
+            return DefWindowProc(hWnd, uMsg, wParam, lParam);
+        }
         // 【硬核硬件光标守护】游戏底层维护了一个负数的隐藏层级，导致脱离小框后鼠标在游戏画面上彻底隐形。
         // 这里我们在主线程通过 ShowCursor(TRUE) 将层级强制拉回 >=0 的可见状态！
         bool isNativeTyping = NativeIME::isTyping.load();
@@ -14185,16 +14189,42 @@ namespace DX11Hook {
         }
     }
 
+    inline bool IsClientScreenBlockingRender(ClientInstance* ci, bool isUIActive) {
+        __try {
+            if (!ci) return false;
+            if (ci->isShowingLoadingScreen() ||
+                ci->isShowingProgressScreen() ||
+                ci->isShowingWorldProgressScreen() ||
+                ci->isShowingDeathScreen() ||
+                (ci->isShowingPauseScreen() && !isUIActive)) {
+                return true;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return true;
+        }
+        return false;
+    }
+
     inline void RenderImGui(IDXGISwapChain* pSwapChain) {
         static std::atomic<bool> isRendering{false};
-        if (isRendering.exchange(true)) return;
+        struct RenderingGuard {
+            std::atomic<bool>& flag;
+            bool active;
+            RenderingGuard(std::atomic<bool>& f) : flag(f), active(!f.exchange(true)) {}
+            ~RenderingGuard() {
+                if (active) flag.store(false);
+            }
+            explicit operator bool() const { return active; }
+        };
+
+        RenderingGuard guard(isRendering);
+        if (!guard) return;
 
         // [关闭期安全] 进程退出阶段已开始时，所有 D3D/ImGui 资源可能在 ShutdownImGuiAndBuffers
         // 中被释放；此时进入渲染路径会访问悬空指针，导致 0xC0000005 退出崩溃。
         // 直接放行 Present 到原函数，由 MH_DisableHook 完成后此回调自然不再被调用。
         if (MapRenderState::g_isShuttingDown.load()) {
             ClipCursor(NULL);
-            isRendering = false;
             return;
         }
 
@@ -14203,20 +14233,8 @@ namespace DX11Hook {
         // 光标无论如何都会被彻底解除裁剪并恢复自由移动，杜绝任何情况下光标被锁死在屏幕中央的问题。
         UpdateCursorState();
 
-        if (g_clientInstance) {
-            __try {
-                if (g_clientInstance->isShowingLoadingScreen() ||
-                    g_clientInstance->isShowingProgressScreen() ||
-                    g_clientInstance->isShowingWorldProgressScreen() ||
-                    g_clientInstance->isShowingDeathScreen() ||
-                    (g_clientInstance->isShowingPauseScreen() && !MapRenderState::IsUIActive())) {
-                    isRendering = false;
-                    return;
-                }
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                isRendering = false;
-                return;
-            }
+        if (IsClientScreenBlockingRender(g_clientInstance, MapRenderState::IsUIActive())) {
+            return;
         }
 
         static bool initAttempted = false; 
@@ -14226,7 +14244,7 @@ namespace DX11Hook {
                 initAttempted = true;
                 g_pd3dDevice->GetImmediateContext(&g_pd3dDeviceContext);
             } else {
-                if (!g_pGameCommandQueue) { isRendering = false; return; }
+                if (!g_pGameCommandQueue) { return; }
                 initAttempted = true;
                 ID3D12Device* pD3D12Device = nullptr;
                 if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), (void**)&pD3D12Device))) {
@@ -14273,7 +14291,7 @@ namespace DX11Hook {
                                  MapRenderState::teleportState.load() == (int)MapRenderState::TeleportState::Failed);
             bool has3DWaypoints = MapRenderState::show3DWaypoints && (WaypointManager::GetWaypointCount() > 0 || (MapRenderState::show3DDeathpoints && DeathPointManager::GetDeathPointCount() > 0));
             bool needsRender = MapRenderState::showMiniMap || MapRenderState::IsUIActive() || isTeleportUI || has3DWaypoints;
-            if (!needsRender) { isRendering = false; return; }
+            if (!needsRender) { return; }
 
             auto renderImGuiFrame = [&](ID3D11RenderTargetView* rtv) {
                 ImGuiIO& io = ImGui::GetIO();
@@ -14569,7 +14587,9 @@ namespace DX11Hook {
                         g_pd3dDevice->CreateRenderTargetView(wrappedBackBuffer, NULL, &rtv);
                         g_d3d11On12Device->AcquireWrappedResources(&wrappedBackBuffer, 1);
 
-                        if (rtv) renderImGuiFrame(rtv);
+                        try {
+                            if (rtv) renderImGuiFrame(rtv);
+                        } catch (...) {}
 
                         g_d3d11On12Device->ReleaseWrappedResources(&wrappedBackBuffer, 1);
                         wrappedBackBuffer->Release();
@@ -14586,13 +14606,14 @@ namespace DX11Hook {
                     g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &rtv);
                     pBackBuffer->Release();
                     if (rtv) {
-                        renderImGuiFrame(rtv);
+                        try {
+                            renderImGuiFrame(rtv);
+                        } catch (...) {}
                         rtv->Release();
                     }
                 }
             }
         }
-        isRendering = false;
     }
 
     inline HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
@@ -14600,7 +14621,9 @@ namespace DX11Hook {
             if (oPresent) return oPresent(pSwapChain, SyncInterval, Flags);
             return S_OK;
         }
-        RenderImGui(pSwapChain);
+        try {
+            RenderImGui(pSwapChain);
+        } catch (...) {}
         return oPresent(pSwapChain, SyncInterval, Flags);
     }
 
@@ -14609,7 +14632,9 @@ namespace DX11Hook {
             if (oPresent1) return oPresent1(pSwapChain, SyncInterval, Flags, pParams);
             return S_OK;
         }
-        RenderImGui(pSwapChain);
+        try {
+            RenderImGui(pSwapChain);
+        } catch (...) {}
         return oPresent1(pSwapChain, SyncInterval, Flags, pParams);
     }
 

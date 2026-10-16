@@ -180,11 +180,28 @@ namespace MapCacheManager {
                 int bIdx = cellZ * BIOME_CELLS_PER_REGION + cellX;
                 if (bIdx >= 0 && bIdx < (int)sizeof(reg.biomeCells)) {
                     uint8_t bId = reg.biomeCells[bIdx];
-                    if (bId < reg.biomeTable.size() && reg.biomeTable[bId].find("pale_garden") != std::string::npos) {
+                    if (bId != BIOME_INDEX_UNKNOWN && bId < reg.biomeTable.size() && reg.biomeTable[bId].find("pale_garden") != std::string::npos) {
                         float factor = (float)g / 135.0f; // 保持原有高度差明暗比
                         reg.colors[i * 4 + 0] = (uint8_t)std::clamp((int)(110.0f * factor), 0, 255);
                         reg.colors[i * 4 + 1] = (uint8_t)std::clamp((int)(115.0f * factor), 0, 255);
                         reg.colors[i * 4 + 2] = (uint8_t)std::clamp((int)(107.0f * factor), 0, 255);
+                        healedAny = true;
+                    }
+                }
+            } else if (g > r && g >= 45) {
+                // [斑驳森林历史自愈] 修复历史版本中因被按普通森林绿色渲染的草地与树叶 (g > r)
+                int px = i % REGION_SIZE;
+                int pz = i / REGION_SIZE;
+                int cellX = px / BIOME_CELL_SIZE;
+                int cellZ = pz / BIOME_CELL_SIZE;
+                int bIdx = cellZ * BIOME_CELLS_PER_REGION + cellX;
+                if (bIdx >= 0 && bIdx < (int)sizeof(reg.biomeCells)) {
+                    uint8_t bId = reg.biomeCells[bIdx];
+                    if (bId != BIOME_INDEX_UNKNOWN && bId < reg.biomeTable.size() && (reg.biomeTable[bId].find("dappled_forest") != std::string::npos || reg.biomeTable[bId].find("dappled") != std::string::npos)) {
+                        float factor = (float)g / 110.0f; // 保持原有高度差明暗比
+                        reg.colors[i * 4 + 0] = (uint8_t)std::clamp((int)(223.0f * factor), 0, 255);
+                        reg.colors[i * 4 + 1] = (uint8_t)std::clamp((int)(104.0f * factor), 0, 255);
+                        reg.colors[i * 4 + 2] = (uint8_t)std::clamp((int)(39.0f * factor), 0, 255);
                         healedAny = true;
                     }
                 }
@@ -197,7 +214,7 @@ namespace MapCacheManager {
                 int bIdx = cellZ * BIOME_CELLS_PER_REGION + cellX;
                 if (bIdx >= 0 && bIdx < (int)sizeof(reg.biomeCells)) {
                     uint8_t bId = reg.biomeCells[bIdx];
-                    if (bId < reg.biomeTable.size()) {
+                    if (bId != BIOME_INDEX_UNKNOWN && bId < reg.biomeTable.size()) {
                         const std::string& bName = reg.biomeTable[bId];
                         if (bName.find("swamp") != std::string::npos && bName.find("mangrove") == std::string::npos) {
                             static const PerlinSimplexNoise s_swampNoise(2345u, 1);
@@ -313,7 +330,7 @@ namespace MapCacheManager {
                     std::string bName;
                     if (bIdx >= 0 && bIdx < (int)sizeof(reg.biomeCells)) {
                         uint8_t bId = reg.biomeCells[bIdx];
-                        if (bId < reg.biomeTable.size()) {
+                        if (bId != BIOME_INDEX_UNKNOWN && bId < reg.biomeTable.size()) {
                             bName = reg.biomeTable[bId];
                         }
                     }
@@ -1196,6 +1213,8 @@ namespace MapCacheManager {
                     region->textureDirty = false;
                     s_dirtyTextureHashes.erase(hash);
                     return true;
+                } else {
+                    s_dirtyTextureHashes.erase(hash);
                 }
             }
         }
@@ -1618,7 +1637,7 @@ namespace MapCacheManager {
         if (it == g_loadedRegions.end() || it->second == nullptr) {
             std::string dir = g_cacheDir + GetRegionSubdir(isCave);
             std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
-            RegionData* newRegion = (it != g_loadedRegions.end() && it->second) ? it->second : new RegionData();
+            RegionData* newRegion = new RegionData();
             if (LoadRegionFromFile(filePath, *newRegion, isCave)) {
                 newRegion->textureDirty = true;
                 newRegion->dimId = s_currentLoadedDimId;
@@ -1628,12 +1647,10 @@ namespace MapCacheManager {
                 s_dirtyTextureHashes.insert(hash);
                 it = g_loadedRegions.find(hash);
             } else {
-                if (it == g_loadedRegions.end()) {
-                    delete newRegion;
-                    if (s_existingRegionFiles.contains(hash)) {
-                        g_loadedRegions[hash] = nullptr;
-                        g_loadQueue.push_back(hash);
-                    }
+                delete newRegion;
+                if (it == g_loadedRegions.end() && s_existingRegionFiles.contains(hash)) {
+                    g_loadedRegions[hash] = nullptr;
+                    g_loadQueue.push_back(hash);
                 }
                 return HEIGHT_UNKNOWN;
             }
@@ -1668,7 +1685,7 @@ namespace MapCacheManager {
             int biomeCellIdx = cellZ * BIOME_CELLS_PER_REGION + cellX;
             if (biomeCellIdx >= 0 && biomeCellIdx < (int)sizeof(region->biomeCells)) {
                 uint8_t bidx = region->biomeCells[biomeCellIdx];
-                if (bidx < region->biomeTable.size()) {
+                if (bidx != BIOME_INDEX_UNKNOWN && bidx < region->biomeTable.size()) {
                     std::string const& bname = region->biomeTable[bidx];
                     if (bname.find("ocean") != std::string::npos ||
                         bname.find("river") != std::string::npos ||
@@ -1808,7 +1825,7 @@ namespace MapCacheManager {
         int biomeCellIdx = cellZ * BIOME_CELLS_PER_REGION + cellX;
         if (biomeCellIdx >= 0 && biomeCellIdx < (int)sizeof(region->biomeCells)) {
             uint8_t bidx = region->biomeCells[biomeCellIdx];
-            if (bidx < region->biomeTable.size()) {
+            if (bidx != BIOME_INDEX_UNKNOWN && bidx < region->biomeTable.size()) {
                 std::string const& bname = region->biomeTable[bidx];
                 if (bname.find("ocean") != std::string::npos ||
                     bname.find("river") != std::string::npos ||

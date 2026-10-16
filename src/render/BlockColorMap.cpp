@@ -318,6 +318,15 @@ mce::Color GetVanillaBlockColor(std::string const& rawName, mce::Color grassCol,
     if (name.find("pale_oak_leaves") != std::string::npos || name.find("pale_moss") != std::string::npos) {
         return rgb(153, 153, 153); // MapColor.COLOR_LIGHT_GRAY
     }
+    if (name.find("red_poplar_leaves") != std::string::npos) {
+        return rgb(153, 51, 51); // MapColor.COLOR_RED (#993333)
+    }
+    if (name.find("yellow_poplar_leaves") != std::string::npos) {
+        return rgb(229, 172, 44); // MapColor.COLOR_YELLOW (#E5AC2C)
+    }
+    if (name.find("orange_poplar_leaves") != std::string::npos || name.find("poplar_leaves") != std::string::npos) {
+        return rgb(216, 127, 51); // MapColor.COLOR_ORANGE (#D87F33)
+    }
     if (name.find("leaves") != std::string::npos || name.find("leaf") != std::string::npos ||
         name.find("vine") != std::string::npos || name.find("lily_pad") != std::string::npos || name.find("waterlily") != std::string::npos ||
         name.find("sugar_cane") != std::string::npos || name.find("reeds") != std::string::npos ||
@@ -446,6 +455,7 @@ mce::Color GetVanillaBlockColor(std::string const& rawName, mce::Color grassCol,
     }
     if (name.find("cherry") != std::string::npos) return rgb(209, 177, 161); // MapColor.TERRACOTTA_WHITE
     if (name.find("pale_oak") != std::string::npos) return rgb(199, 199, 199);
+    if (name.find("poplar") != std::string::npos) return rgb(150, 137, 127); // MapColor.TERRACOTTA_LIGHT_GRAY
     if (name.find("oak") != std::string::npos || name.find("planks") != std::string::npos ||
         name.find("log") != std::string::npos || name.find("wood") != std::string::npos ||
         name.find("fence") != std::string::npos || name.find("chest") != std::string::npos ||
@@ -1175,6 +1185,7 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         {"orange_concrete", mce::Color(0.878f, 0.380f, 0.000f, 1.00f)},
         {"orange_concrete_powder", mce::Color(0.886f, 0.514f, 0.125f, 1.00f)},
         {"orange_glazed_terracotta", mce::Color(0.880f, 0.460f, 0.110f, 1.00f)},
+        {"orange_poplar_leaves", mce::Color(0.847f, 0.431f, 0.118f, 1.00f)},
         {"orange_shulker_box", mce::Color(0.925f, 0.424f, 0.035f, 1.00f)},
         {"orange_stained_glass", mce::Color(0.847f, 0.498f, 0.200f, 1.00f)},
         {"orange_stained_glass_pane", mce::Color(0.804f, 0.475f, 0.184f, 1.00f)},
@@ -1287,6 +1298,25 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         {"polished_tuff_slab", mce::Color(0.392f, 0.412f, 0.392f, 1.00f)},
         {"polished_tuff_stairs", mce::Color(0.392f, 0.412f, 0.392f, 1.00f)},
         {"polished_tuff_wall", mce::Color(0.392f, 0.412f, 0.392f, 1.00f)},
+        {"poplar_button", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_door", mce::Color(0.560f, 0.510f, 0.470f, 1.00f)},
+        {"poplar_fence", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_fence_gate", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_hanging_sign", mce::Color(0.520f, 0.470f, 0.430f, 1.00f)},
+        {"poplar_leaves", mce::Color(0.847f, 0.431f, 0.118f, 1.00f)},
+        {"poplar_log", mce::Color(0.310f, 0.239f, 0.169f, 1.00f)},
+        {"poplar_planks", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_pressure_plate", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_sapling", mce::Color(0.680f, 0.450f, 0.180f, 1.00f)},
+        {"poplar_shelf", mce::Color(0.620f, 0.570f, 0.530f, 1.00f)},
+        {"poplar_sign", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_slab", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_stairs", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_standing_sign", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_trapdoor", mce::Color(0.560f, 0.510f, 0.470f, 1.00f)},
+        {"poplar_wall_hanging_sign", mce::Color(0.520f, 0.470f, 0.430f, 1.00f)},
+        {"poplar_wall_sign", mce::Color(0.588f, 0.537f, 0.498f, 1.00f)},
+        {"poplar_wood", mce::Color(0.310f, 0.239f, 0.169f, 1.00f)},
         {"poppy", mce::Color(0.788f, 0.161f, 0.145f, 1.00f)},
         {"potatoes", mce::Color(0.310f, 0.616f, 0.165f, 1.00f)},
         {"potent_sulfur", mce::Color(0.804f, 0.796f, 0.373f, 1.00f)},
@@ -1318,6 +1348,7 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         {"potted_orange_tulip", mce::Color(0.537f, 0.384f, 0.267f, 1.00f)},
         {"potted_oxeye_daisy", mce::Color(0.537f, 0.384f, 0.267f, 1.00f)},
         {"potted_pale_oak_sapling", mce::Color(0.443f, 0.424f, 0.400f, 1.00f)},
+        {"potted_poplar_sapling", mce::Color(0.550f, 0.400f, 0.220f, 1.00f)},
         {"potted_pink_tulip", mce::Color(0.537f, 0.384f, 0.267f, 1.00f)},
         {"potted_poppy", mce::Color(0.537f, 0.384f, 0.267f, 1.00f)},
         {"potted_red_mushroom", mce::Color(0.537f, 0.384f, 0.267f, 1.00f)},
@@ -1383,11 +1414,13 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         {"red_nether_brick_stairs", mce::Color(0.333f, 0.047f, 0.059f, 1.00f)},
         {"red_nether_brick_wall", mce::Color(0.333f, 0.047f, 0.059f, 1.00f)},
         {"red_nether_bricks", mce::Color(0.333f, 0.047f, 0.059f, 1.00f)},
+        {"red_poplar_leaves", mce::Color(0.682f, 0.165f, 0.145f, 1.00f)},
         {"red_sand", mce::Color(0.748f, 0.404f, 0.130f, 1.00f)},
         {"red_sandstone", mce::Color(0.711f, 0.384f, 0.123f, 1.00f)},
         {"red_sandstone_slab", mce::Color(0.711f, 0.384f, 0.123f, 1.00f)},
         {"red_sandstone_stairs", mce::Color(0.711f, 0.384f, 0.123f, 1.00f)},
         {"red_sandstone_wall", mce::Color(0.711f, 0.384f, 0.123f, 1.00f)},
+        {"red_shrub", mce::Color(0.480f, 0.140f, 0.090f, 1.00f)},
         {"red_shulker_box", mce::Color(0.557f, 0.122f, 0.118f, 1.00f)},
         {"red_stained_glass", mce::Color(0.600f, 0.200f, 0.200f, 1.00f)},
         {"red_stained_glass_pane", mce::Color(0.569f, 0.184f, 0.184f, 1.00f)},
@@ -1431,6 +1464,7 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         {"sea_pickle", mce::Color(0.349f, 0.376f, 0.153f, 1.00f)},
         {"seagrass", mce::Color(0.188f, 0.478f, 0.020f, 1.00f)},
         {"short_dry_grass", mce::Color(0.733f, 0.622f, 0.424f, 1.00f)},
+        {"shelf_mushroom", mce::Color(0.686f, 0.541f, 0.392f, 1.00f)},
         {"shroomlight", mce::Color(0.949f, 0.588f, 0.294f, 1.00f)},
         {"shulker_box", mce::Color(0.553f, 0.384f, 0.553f, 1.00f)},
         {"skeleton_skull", mce::Color(0.705f, 0.704f, 0.705f, 1.00f)},
@@ -1521,6 +1555,8 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         {"stripped_oak_wood", mce::Color(0.694f, 0.561f, 0.333f, 1.00f)},
         {"stripped_pale_oak_log", mce::Color(0.875f, 0.843f, 0.839f, 1.00f)},
         {"stripped_pale_oak_wood", mce::Color(0.918f, 0.890f, 0.886f, 1.00f)},
+        {"stripped_poplar_log", mce::Color(0.647f, 0.600f, 0.549f, 1.00f)},
+        {"stripped_poplar_wood", mce::Color(0.647f, 0.600f, 0.549f, 1.00f)},
         {"stripped_spruce_log", mce::Color(0.443f, 0.337f, 0.196f, 1.00f)},
         {"stripped_spruce_wood", mce::Color(0.451f, 0.349f, 0.204f, 1.00f)},
         {"stripped_warped_hyphae", mce::Color(0.224f, 0.588f, 0.576f, 1.00f)},
@@ -1707,6 +1743,7 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         {"yellow_concrete_powder", mce::Color(0.910f, 0.776f, 0.216f, 1.00f)},
         {"yellow_flower", mce::Color(0.957f, 0.804f, 0.251f, 1.00f)},
         {"yellow_glazed_terracotta", mce::Color(0.902f, 0.741f, 0.337f, 1.00f)},
+        {"yellow_poplar_leaves", mce::Color(0.886f, 0.678f, 0.165f, 1.00f)},
         {"yellow_shulker_box", mce::Color(0.976f, 0.745f, 0.118f, 1.00f)},
         {"yellow_stained_glass", mce::Color(0.898f, 0.898f, 0.200f, 1.00f)},
         {"yellow_stained_glass_pane", mce::Color(0.851f, 0.851f, 0.184f, 1.00f)},
@@ -1746,6 +1783,21 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
         }
         // 木板/台阶/楼梯/栅栏/门/活板门/压力板/告示牌
         return mce::Color(0.86f, 0.82f, 0.82f, 1.0f); // 冷白浅灰 #DBD1D0
+    }
+
+    // [杨木全套 (Poplar) 与斑驳森林特色树木]
+    if (name.find("poplar") != std::string::npos) {
+        if (name.find("red") != std::string::npos) return mce::Color(0.682f, 0.165f, 0.145f, 1.0f);    // 红杨树叶 #AE2A25
+        if (name.find("yellow") != std::string::npos) return mce::Color(0.886f, 0.678f, 0.165f, 1.0f); // 黄杨树叶 #E2AD2A
+        if (name.find("orange") != std::string::npos || name.find("leaves") != std::string::npos) {
+            return mce::Color(0.847f, 0.431f, 0.118f, 1.0f);                                           // 橙杨树叶/默认杨树叶 #D86E1E
+        }
+        if (name.find("sapling") != std::string::npos) return mce::Color(0.680f, 0.450f, 0.180f, 1.0f);
+        if (name.find("stripped") != std::string::npos) return mce::Color(0.647f, 0.600f, 0.549f, 1.0f); // 去皮杨木 #A5998C
+        if (name.find("log") != std::string::npos || name.find("wood") != std::string::npos) {
+            return mce::Color(0.310f, 0.239f, 0.169f, 1.0f);                                           // 杨木树皮深棕 #4F3D2B
+        }
+        return mce::Color(0.588f, 0.537f, 0.498f, 1.0f);                                               // 杨木木板及衍生方块 #96897F
     }
 
     // [铜质全套建筑体系 (Copper System)] 含普通/斑驳/锈蚀/氧化、切制、雕纹、格栅、铜门、活板门、铜灯
@@ -1977,6 +2029,9 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
 
     // [树叶系列] 必须在通用染色规则之前，避免 red_poplar_leaves / yellow_poplar_leaves 等树叶被误染
     if (name.find("leaf") != std::string::npos || name.find("leaves") != std::string::npos) {
+        if (name.find("red_poplar") != std::string::npos) return mce::Color(0.682f, 0.165f, 0.145f, 1.0f);
+        if (name.find("yellow_poplar") != std::string::npos) return mce::Color(0.886f, 0.678f, 0.165f, 1.0f);
+        if (name.find("orange_poplar") != std::string::npos || name.find("poplar") != std::string::npos) return mce::Color(0.847f, 0.431f, 0.118f, 1.0f);
         if (name.find("cherry") != std::string::npos) return mce::Color(0.90f, 0.65f, 0.75f, 1.0f);
         if (name.find("mangrove") != std::string::npos) return mce::Color(0.32f, 0.40f, 0.09f, 1.0f);
         if (name.find("pale") != std::string::npos) return mce::Color(0.431f, 0.451f, 0.420f, 1.0f);
@@ -2147,8 +2202,9 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
     if (name.find("froglight") != std::string::npos) return mce::Color(0.92f, 0.90f, 0.80f, 1.0f);
     if (name.find("frog_spawn") != std::string::npos || name.find("frogspawn") != std::string::npos) return mce::Color(0.45f, 0.40f, 0.35f, 0.7f);
 
-    // [苍白橡木] 灰白色木材，区别于普通橡木的暖棕色
+    // [苍白橡木与杨木] 特色木材，区别于普通橡木的暖棕色
     if (name.find("pale_oak") != std::string::npos) return mce::Color(0.68f, 0.66f, 0.60f, 1.0f);
+    if (name.find("poplar") != std::string::npos) return mce::Color(0.588f, 0.537f, 0.498f, 1.0f);
     // [嘎枝之心] 苍白橡木质地，需在通用 wood 规则前处理（名称含 "wood"）
     if (name.find("creaking_heart") != std::string::npos) return mce::Color(0.55f, 0.52f, 0.48f, 1.0f);
     // [深板岩] 冷调深暗蓝灰岩石（原生贴图均值 RGB(80,80,83)），必须在 wood/stairs/slab 检查之前

@@ -363,8 +363,11 @@ inline std::unordered_set<uint64_t> g_anarchySurfChunks;
 inline std::unordered_set<uint64_t> g_anarchyCaveChunks;
 
 inline void AbortActiveScanAndPendingWrites() {
-    g_cacheWritePending.store(false);
-    g_cacheWriteBiomes.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_cacheWriteMutex);
+        g_cacheWritePending.store(false);
+        g_cacheWriteBiomes.clear();
+    }
     g_cacheWriteCV.notify_one();
 
     g_isScanning = false;
@@ -381,35 +384,54 @@ inline void AbortActiveScanAndPendingWrites() {
 
 inline void CacheWriteWorkerFunc() {
     while (true) {
+        int writeDim = 0;
+        int writeX = 0;
+        int writeZ = 0;
+        bool writeIsCave = false;
+        std::vector<MapCacheManager::BiomeEntry> biomesToProcess;
+
         {
             std::unique_lock<std::mutex> lock(g_cacheWriteMutex);
             g_cacheWriteCV.wait(lock, [] { return g_cacheWritePending.load() || g_cacheWriteExit.load(); });
             if (g_cacheWriteExit.load()) return;
-        }
 
-        if (MapRenderState::g_isShuttingDown.load()) {
-            g_cacheWritePending.store(false);
+            if (!g_cacheWritePending.load() || MapRenderState::g_isShuttingDown.load()) {
+                g_cacheWritePending.store(false);
+                g_cacheWriteBiomes.clear();
+                continue;
+            }
+
+            // 严格核验：待写维度必须与当前物理维度以及缓存加载维度完全匹配
+            if (MapRenderState::currentDimensionId != g_cacheWriteDim ||
+                MapCacheManager::GetLoadedDimensionId() != g_cacheWriteDim) {
+                g_cacheWritePending.store(false);
+                g_cacheWriteBiomes.clear();
+                continue;
+            }
+
+            writeDim = g_cacheWriteDim;
+            writeX = g_cacheWriteX;
+            writeZ = g_cacheWriteZ;
+            writeIsCave = g_cacheWriteIsCave;
+            biomesToProcess = std::move(g_cacheWriteBiomes);
             g_cacheWriteBiomes.clear();
-            continue;
-        }
-        // 严格核验：待写维度必须与当前物理维度以及缓存加载维度完全匹配
-        if (MapRenderState::currentDimensionId != g_cacheWriteDim ||
-            MapCacheManager::GetLoadedDimensionId() != g_cacheWriteDim) {
-            g_cacheWritePending.store(false);
-            g_cacheWriteBiomes.clear();
-            continue;
         }
 
         // [修复] 包裹 try-catch 防止 UpdateFromScan/UpdateBiomesFromScan 抛异常
         // 导致 std::terminate → 0xC0000409 FAST_FAIL_FATAL_APP_EXIT
         try {
-            MapCacheManager::UpdateFromScan(g_cacheWriteDim, g_cacheWriteX, g_cacheWriteZ, g_cacheWriteColors, g_cacheWriteHeights, g_cacheWriteIsCave, g_cacheWriteLights);
-            MapCacheManager::UpdateBiomesFromScan(g_cacheWriteDim, g_cacheWriteBiomes);
+            MapCacheManager::UpdateFromScan(writeDim, writeX, writeZ, g_cacheWriteColors, g_cacheWriteHeights, writeIsCave, g_cacheWriteLights);
+            if (!biomesToProcess.empty()) {
+                MapCacheManager::UpdateBiomesFromScan(writeDim, biomesToProcess);
+            }
         } catch (...) {
             // 异常时仍需复位状态，避免 pending 永远卡住
         }
-        g_cacheWriteBiomes.clear();
-        g_cacheWritePending.store(false);
+
+        {
+            std::lock_guard<std::mutex> lock(g_cacheWriteMutex);
+            g_cacheWritePending.store(false);
+        }
     }
 }
 
@@ -433,12 +455,15 @@ inline void SubmitCacheWrite(int x, int z, int dim, bool isCave, std::vector<Map
         std::memcpy(g_cacheWriteHeights, g_mapHeightsBack, sizeof(g_mapHeightsBack));
         std::memcpy(g_cacheWriteLights, g_mapLightsBack, sizeof(g_mapLightsBack));
     }
-    g_cacheWriteX = x;
-    g_cacheWriteZ = z;
-    g_cacheWriteDim = dim;
-    g_cacheWriteIsCave = isCave;
-    g_cacheWriteBiomes.swap(biomes);
-    g_cacheWritePending.store(true);
+    {
+        std::lock_guard<std::mutex> lock(g_cacheWriteMutex);
+        g_cacheWriteX = x;
+        g_cacheWriteZ = z;
+        g_cacheWriteDim = dim;
+        g_cacheWriteIsCave = isCave;
+        g_cacheWriteBiomes.swap(biomes);
+        g_cacheWritePending.store(true);
+    }
     g_cacheWriteCV.notify_one();
 }
 
@@ -1012,6 +1037,12 @@ inline void getBiomeTints(std::string const& biomeName, mce::Color& grass, mce::
         grass   = mce::Color(0.20f, 0.30f, 0.12f, 1.0f);
         foliage = mce::Color(0.235f, 0.471f, 0.118f, 1.0f);
     }
+    // === 斑驳森林：秋季特色暖橙草地与温润橙褐树叶 ===
+    else if (lower.find("dappled_forest") != std::string::npos || lower.find("dappled") != std::string::npos) {
+        grass   = mce::Color(0.875f, 0.408f, 0.153f, 1.0f); // #df6827 标志性暖橙草色
+        foliage = mce::Color(0.902f, 0.557f, 0.188f, 1.0f); // #e68e30 暖橙黄褐树叶
+        water   = mce::Color(0.216f, 0.318f, 0.329f, 1.0f); // #375154 专属暗青灰水色
+    }
     // === 森林与繁花森林：草地匹配实际颜色 RGB(75,118,55) ===
     else if (lower.find("forest") != std::string::npos) {
         grass   = mce::Color(0.294f, 0.463f, 0.216f, 1.0f);
@@ -1131,7 +1162,8 @@ inline bool IsBiomeTintedBlock(std::string const& name) noexcept {
         if (name.find("cherry_leaves") != std::string::npos ||
             name.find("mangrove_leaves") != std::string::npos ||
             name.find("pale_oak_leaves") != std::string::npos ||
-            name.find("pale_leaves") != std::string::npos) return false;
+            name.find("pale_leaves") != std::string::npos ||
+            name.find("poplar") != std::string::npos) return false;
         return true;
     }
     return false;
@@ -3966,29 +3998,27 @@ LL_TYPE_INSTANCE_HOOK(
                 BlockSource* regionPtr = this->getRegion();
                 if (regionPtr) {
                     auto const& biome = regionPtr->getBiome(BlockPos(g_playerBlockX, (int)g_playerY, g_playerBlockZ));
-                    {
-                        std::string rawName = biome.mHash->getString();
-                        std::string displayRawName = rawName;
+                    std::string rawName = biome.mHash->getString();
+                    std::string displayRawName = rawName;
 
-                        // 剥离命名空间前缀（例如将 minecraft:plains 转为 plains）
-                        size_t colonPos = displayRawName.find(":");
-                        if (colonPos != std::string::npos) {
-                            displayRawName = displayRawName.substr(colonPos + 1);
-                        }
+                    // 剥离命名空间前缀（例如将 minecraft:plains 转为 plains）
+                    size_t colonPos = displayRawName.find(":");
+                    if (colonPos != std::string::npos) {
+                        displayRawName = displayRawName.substr(colonPos + 1);
+                    }
 
-                        MapRenderState::rawBiomeName = displayRawName;
-                        MapRenderState::translatedBiomeName = TranslateBiomeName(rawName);
+                    MapRenderState::rawBiomeName = displayRawName;
+                    MapRenderState::translatedBiomeName = TranslateBiomeName(rawName);
 
-                        // [P2 天气系统: 降雨与降雪判定]
-                        try {
-                            bool canRain = (bool)biome.mRain;
-                            float temp = (float)biome.mTemperature - (std::max(0.0f, g_playerY - 64.0f) * 0.00166667f);
-                            MapRenderState::g_isCurrentPosRainAllowed.store(canRain);
-                            MapRenderState::g_isCurrentPosSnowing.store(canRain && (temp < 0.15f));
-                        } catch (...) {
-                            MapRenderState::g_isCurrentPosRainAllowed.store(true);
-                            MapRenderState::g_isCurrentPosSnowing.store(false);
-                        }
+                    // [P2 天气系统: 降雨与降雪判定]
+                    try {
+                        bool canRain = (bool)biome.mRain;
+                        float temp = (float)biome.mTemperature - (std::max(0.0f, g_playerY - 64.0f) * 0.00166667f);
+                        MapRenderState::g_isCurrentPosRainAllowed.store(canRain);
+                        MapRenderState::g_isCurrentPosSnowing.store(canRain && (temp < 0.15f));
+                    } catch (...) {
+                        MapRenderState::g_isCurrentPosRainAllowed.store(true);
+                        MapRenderState::g_isCurrentPosSnowing.store(false);
                     }
                 }
             } catch (...) {}
@@ -5150,6 +5180,11 @@ LL_TYPE_INSTANCE_HOOK(
         clearPlayerHeadTextures.store(true);
         MapRenderState::showSeedMap = false;
         SeedMapManager::ClearWorldContext();
+        AbortActiveScanAndPendingWrites();
+        MapRenderState::currentDimensionId = -999;
+        MapRenderState::currentWorldId.clear();
+        g_prevPhysicsPos = {0.0f, 0.0f, 0.0f};
+        g_currPhysicsPos = {0.0f, 0.0f, 0.0f};
     }
 
     return result;

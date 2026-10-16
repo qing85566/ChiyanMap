@@ -71,7 +71,8 @@ namespace DeathPointManager {
                 {"z", point.z},
                 {"dimensionId", point.dimensionId},
                 {"timestamp", point.timestamp},
-                {"converted", point.converted}
+                {"converted", point.converted},
+                {"convertedWaypointId", point.convertedWaypointId}
             });
         }
 
@@ -99,6 +100,7 @@ namespace DeathPointManager {
                 point.dimensionId = item.value("dimensionId", 0);
                 point.timestamp = item.value("timestamp", 0LL);
                 point.converted = item.value("converted", false);
+                point.convertedWaypointId = item.value("convertedWaypointId", "");
                 g_deathPoints.push_back(point);
             }
             TrimLocked();

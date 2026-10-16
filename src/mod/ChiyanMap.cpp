@@ -9,6 +9,8 @@
 #include "state/AnarchyManager.h"
 #include "state/SpecialGridManager.h"
 #include "state/DatabaseManager.h"
+#include "state/DrawingManager.h"
+#include "state/MultiworldManager.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/utils/SystemUtils.h"
 #include "ll/api/io/FileUtils.h"
@@ -113,6 +115,8 @@ bool ChiyanMap::load() {
     AnarchyManager::Init();
     SpecialGridManager::Init();
     DatabaseManager::Init();
+    DrawingManager::Init();
+    MultiworldManager::Init();
     return true;
 }
 
@@ -147,6 +151,10 @@ bool ChiyanMap::disable() {
     g_clientInstance = nullptr;
 
     AnarchyManager::SaveHighlights();
+    WaypointManager::SaveWaypoints();
+    DeathPointManager::SaveDeathPoints();
+    DrawingManager::SaveDrawings();
+    MultiworldManager::SaveConfig();
     SpecialGridManager::Shutdown();
     DatabaseManager::Shutdown();
     SeedMapManager::Shutdown();

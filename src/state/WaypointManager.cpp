@@ -397,13 +397,18 @@ namespace WaypointManager {
     }
 
     void ToggleWaypoint(const std::string& id) {
-        std::lock_guard<std::mutex> lock(g_wpMutex);
-        for (auto& wp : g_waypoints) {
-            if (wp.id == id) {
-                wp.enabled = !wp.enabled;
-                break;
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(g_wpMutex);
+            for (auto& wp : g_waypoints) {
+                if (wp.id == id) {
+                    wp.enabled = !wp.enabled;
+                    changed = true;
+                    break;
+                }
             }
         }
+        if (changed) SaveWaypoints();
     }
 
     void ToggleWaypointPin(const std::string& id) {
