@@ -12,6 +12,8 @@
 
 > ⚠️ **Disclaimer**: All code in this mod was generated and written by **AI (Artificial Intelligence)**. By using this mod, you acknowledge this and assume all associated risks.
 
+> 📖 **Comprehensive Guides**: Detailed documentation and tutorials are available in the [Docs Directory](./docs/README.md).
+
 ---
 
 ## 🌟 Key Features
