@@ -1,5 +1,7 @@
 # 快捷键、设置与性能调优指南
 
+[English](../en/08-settings-and-hotkeys.md) | **简体中文** | [返回文档首页](../README_zh.md)
+
 ChiyanMap 提供了极其丰富的可定制性。无论是按键习惯、界面视觉、多语言界面，还是底层磁盘 I/O 写入吞吐与显卡帧率，均可在设置系统中细致调节。
 
 ---
@@ -90,4 +92,8 @@ mods/ChiyanMap/
 ├── breadcrumbs/*.json             # 探索历史移动足迹
 └── backups/*.json                 # 手动/自动备份快照
 ```
-详尽的各目录职责与文件格式说明，亦可参阅 [运行时目录架构总览](./README.md#运行时目录架构与文件说明-modschiyanmap)。
+详尽的各目录职责与文件格式说明，亦可参阅 [运行时目录架构总览](../README_zh.md#运行时目录架构与文件说明-modschiyanmap)。
+
+---
+
+[← 上一章：07 - 种子地图与结构预测](./07-seedmap.md) | [返回文档首页](../README_zh.md)

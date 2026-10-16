@@ -1,5 +1,7 @@
 # 多世界与地图实例管理指南
 
+[English](../en/04-multiworld.md) | **简体中文** | [返回文档首页](../README_zh.md)
+
 在大型多人服务器、群组服（BungeeCord / Velocity）、小游戏大厅或经常跨服联机的场景中，玩家常遇到**地图数据串线混淆**的困扰——例如从小游戏大厅切换至空岛生存服时，两个完全不同世界的地形被错误拼接在同一张地图上，导致缓存被覆盖损坏。
 
 **ChiyanMap 的多世界管理引擎（Multiworld Manager）** 从底层彻底解决了该问题，为每个世界和子服赋予了完全独立的地图实例（Map Instance）体系。
@@ -83,3 +85,7 @@ mods/ChiyanMap/
     ├── <World_UUID>_dim0.json       # 默认地图路径点
     └── <World_UUID>_<Map_ID>_*.json # 自定义实例的独立路径点与集合
 ```
+
+---
+
+[← 上一章：03 - 路径点与死亡记录系统](./03-waypoints-and-deathpoints.md) | [下一章：05 - 洞穴地图与无规则探测 →](./05-cave-and-anarchy.md)

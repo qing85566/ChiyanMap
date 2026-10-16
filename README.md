@@ -102,7 +102,7 @@ xmake
 ```text
 ChiyanMap/
 ├── .github/                 # GitHub CI/CD workflows and Issue/PR templates
-├── docs/                    # Complete user documentation and guides (9 core chapters)
+├── docs/                    # Complete user documentation and guides (en/ & zh/ suites)
 ├── heads/                   # High-resolution entity radar icon assets (PNG)
 ├── lang/                    # Localization dictionaries for 16 languages (JSON)
 ├── src/                     # C++23 core source code
