@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README_zh.md)
 
-[![Release](https://img.shields.io/github/v/release/qing85566/ChiyanMap?include_prereleases&color=red&label=Release)](https://github.com/qing85566/ChiyanMap/releases)
+[![Release](https://img.shields.io/github/v/release/qing85566/ChiyanMap?include_prereleases&sort=semver&color=red&label=Release)](https://github.com/qing85566/ChiyanMap/releases)
 [![Platform](https://img.shields.io/badge/Platform-Minecraft%20Bedrock%20(Windows)-green)](https://www.minecraft.net/)
 [![Framework](https://img.shields.io/badge/Loader-LeviLamina-blue)](https://github.com/LiteLDev/LeviLamina)
 [![Language](https://img.shields.io/badge/C%2B%2B-23-orange)](https://en.cppreference.com/w/cpp/23)
