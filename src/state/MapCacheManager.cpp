@@ -38,6 +38,7 @@ namespace MapCacheManager {
 
     // 脏状态表，受 g_cacheMutex 保护
     static std::unordered_map<uint64_t, bool> s_branchDirtyMap;
+    static std::atomic<uint32_t> s_branchDirtyVersion{1};
 
     // 跨进程文件锁保护：.cache.lock 独占写句柄与冲突状态
     static HANDLE s_cacheLockHandle = INVALID_HANDLE_VALUE;
@@ -94,6 +95,7 @@ namespace MapCacheManager {
                 s_branchDirtyMap[GetBranchHash(2, crx >> 2, crz >> 2, isCave)] = true;
             }
         }
+        s_branchDirtyVersion.fetch_add(1, std::memory_order_relaxed);
     }
 
     int GetLoadedDimensionId() {
@@ -516,10 +518,25 @@ namespace MapCacheManager {
                         if (pair.second != nullptr) residentCount++;
                     }
                     if (residentCount > maxAllowed) {
+                        bool bigMapActive = MapRenderState::showBigMap;
+                        int vMinRx = MapRenderState::g_viewedMinRx;
+                        int vMaxRx = MapRenderState::g_viewedMaxRx;
+                        int vMinRz = MapRenderState::g_viewedMinRz;
+                        int vMaxRz = MapRenderState::g_viewedMaxRz;
+
                         std::vector<std::pair<uint64_t, uint64_t>> candidates; // (lastAccessTick, hash)
                         candidates.reserve(residentCount);
                         for (const auto& pair : g_loadedRegions) {
                             if (pair.second != nullptr && !pair.second->dirty && !pair.second->textureDirty) {
+                                if (bigMapActive && vMaxRx >= vMinRx && vMaxRz >= vMinRz) {
+                                    int rx, rz;
+                                    DecodeRegionHash(pair.first, rx, rz);
+                                    // 核心防护：处于大地图当前视口覆盖范围内的区域，绝对免除 LRU 淘汰！
+                                    // 彻底杜绝“边加载边淘汰视口内区域，导致已渲染地貌反复沦为黑块”的恶性循环！
+                                    if (rx >= vMinRx && rx <= vMaxRx && rz >= vMinRz && rz <= vMaxRz) {
+                                        continue;
+                                    }
+                                }
                                 candidates.push_back({pair.second->lastAccessTick, pair.first});
                             }
                         }
@@ -1099,6 +1116,7 @@ namespace MapCacheManager {
             s_dirtyTextureHashes.insert(touchedRegs[i].hash);
             MarkBranchPyramidDirtyForRegionUnlocked(touchedRegs[i].rx, touchedRegs[i].rz, isCave);
         }
+        MapRenderState::g_spatialCacheGen.fetch_add(1, std::memory_order_relaxed);
     }
 
     // ==========================================
@@ -1127,9 +1145,99 @@ namespace MapCacheManager {
         bool enableLighting = MapRenderState::mapLighting;
         float skyBright = MapRenderState::ComputeSkyLightBrightness(MapRenderState::g_gameTimeTicks.load(), regDim, forceNighttime);
 
-        for (int z = 0; z < REGION_SIZE; ++z) {
-            for (int x = 0; x < REGION_SIZE; ++x) {
-                int idx = (z * REGION_SIZE + x) * 4;
+        auto shadePixel = [&](int x, int z, float northY, float westY, float northWestY) {
+            int idx = (z * REGION_SIZE + x) * 4;
+            uint8_t a = region->colors[idx + 3];
+            if (a < 10) {
+                outBuffer[idx + 0] = 0;
+                outBuffer[idx + 1] = 0;
+                outBuffer[idx + 2] = 0;
+                outBuffer[idx + 3] = 0;
+                return;
+            }
+
+            int hIdx = z * REGION_SIZE + x;
+            int16_t h = region->heights[hIdx];
+            float currentY = (h != HEIGHT_UNKNOWN) ? (float)h : 64.0f;
+
+            if (std::abs(currentY - northY) >= 64.0f) northY = currentY;
+            if (std::abs(currentY - westY) >= 64.0f) westY = currentY;
+            if (std::abs(currentY - northWestY) >= 64.0f) northWestY = currentY;
+
+            float shade = MapRenderState::ComputeTerrainShading(
+                currentY, northY, westY, northWestY,
+                slopeMode, depth, isCave,
+                region->lightLevels[hIdx]
+            );
+
+            float fr = (region->colors[idx + 0] / 255.0f) * shade;
+            float fg = (region->colors[idx + 1] / 255.0f) * shade;
+            float fb = (region->colors[idx + 2] / 255.0f) * shade;
+
+            MapRenderState::ApplyMapLightingPrecomputed(
+                fr, fg, fb,
+                region->lightLevels[hIdx],
+                isCave,
+                regDim,
+                enableLighting,
+                skyBright
+            );
+
+            outBuffer[idx + 0] = (uint8_t)(std::clamp(fr, 0.0f, 1.0f) * 255.0f);
+            outBuffer[idx + 1] = (uint8_t)(std::clamp(fg, 0.0f, 1.0f) * 255.0f);
+            outBuffer[idx + 2] = (uint8_t)(std::clamp(fb, 0.0f, 1.0f) * 255.0f);
+            outBuffer[idx + 3] = a;
+        };
+
+        // 1. 特殊处理边缘点 (0, 0)
+        {
+            float curY = (region->heights[0] != HEIGHT_UNKNOWN) ? (float)region->heights[0] : 64.0f;
+            float nY = curY, wY = curY, nwY = curY;
+            if (northRegion && northRegion->colors[(REGION_SIZE - 1) * REGION_SIZE * 4 + 3] >= 10 && northRegion->heights[(REGION_SIZE - 1) * REGION_SIZE] != HEIGHT_UNKNOWN)
+                nY = (float)northRegion->heights[(REGION_SIZE - 1) * REGION_SIZE];
+            if (westRegion && westRegion->colors[(REGION_SIZE - 1) * 4 + 3] >= 10 && westRegion->heights[REGION_SIZE - 1] != HEIGHT_UNKNOWN)
+                wY = (float)westRegion->heights[REGION_SIZE - 1];
+            if (northWestRegion && northWestRegion->colors[(REGION_SIZE * REGION_SIZE - 1) * 4 + 3] >= 10 && northWestRegion->heights[REGION_SIZE * REGION_SIZE - 1] != HEIGHT_UNKNOWN)
+                nwY = (float)northWestRegion->heights[REGION_SIZE * REGION_SIZE - 1];
+            shadePixel(0, 0, nY, wY, nwY);
+        }
+
+        // 2. 特殊处理顶行 z = 0 (x = 1..255)
+        for (int x = 1; x < REGION_SIZE; ++x) {
+            float curY = (region->heights[x] != HEIGHT_UNKNOWN) ? (float)region->heights[x] : 64.0f;
+            float nY = curY, wY = curY, nwY = curY;
+            if (northRegion && northRegion->colors[((REGION_SIZE - 1) * REGION_SIZE + x) * 4 + 3] >= 10 && northRegion->heights[(REGION_SIZE - 1) * REGION_SIZE + x] != HEIGHT_UNKNOWN)
+                nY = (float)northRegion->heights[(REGION_SIZE - 1) * REGION_SIZE + x];
+            int wIdx = x - 1;
+            if (region->colors[wIdx * 4 + 3] >= 10 && region->heights[wIdx] != HEIGHT_UNKNOWN)
+                wY = (float)region->heights[wIdx];
+            if (northRegion && northRegion->colors[((REGION_SIZE - 1) * REGION_SIZE + (x - 1)) * 4 + 3] >= 10 && northRegion->heights[(REGION_SIZE - 1) * REGION_SIZE + (x - 1)] != HEIGHT_UNKNOWN)
+                nwY = (float)northRegion->heights[(REGION_SIZE - 1) * REGION_SIZE + (x - 1)];
+            shadePixel(x, 0, nY, wY, nwY);
+        }
+
+        // 3. 特殊处理左列 x = 0 (z = 1..255)
+        for (int z = 1; z < REGION_SIZE; ++z) {
+            int hIdx = z * REGION_SIZE;
+            float curY = (region->heights[hIdx] != HEIGHT_UNKNOWN) ? (float)region->heights[hIdx] : 64.0f;
+            float nY = curY, wY = curY, nwY = curY;
+            int nIdx = (z - 1) * REGION_SIZE;
+            if (region->colors[nIdx * 4 + 3] >= 10 && region->heights[nIdx] != HEIGHT_UNKNOWN)
+                nY = (float)region->heights[nIdx];
+            if (westRegion && westRegion->colors[(z * REGION_SIZE + (REGION_SIZE - 1)) * 4 + 3] >= 10 && westRegion->heights[z * REGION_SIZE + (REGION_SIZE - 1)] != HEIGHT_UNKNOWN)
+                wY = (float)westRegion->heights[z * REGION_SIZE + (REGION_SIZE - 1)];
+            if (westRegion && westRegion->colors[((z - 1) * REGION_SIZE + (REGION_SIZE - 1)) * 4 + 3] >= 10 && westRegion->heights[(z - 1) * REGION_SIZE + (REGION_SIZE - 1)] != HEIGHT_UNKNOWN)
+                nwY = (float)westRegion->heights[(z - 1) * REGION_SIZE + (REGION_SIZE - 1)];
+            shadePixel(0, z, nY, wY, nwY);
+        }
+
+        // 4. 极速内部直出循环 (z = 1..255, x = 1..255，占 99.2% 的像素)：
+        // 彻底消灭边缘跨区域查找与复杂分支判断，全内存连续寻址向量化
+        for (int z = 1; z < REGION_SIZE; ++z) {
+            int prevRow = (z - 1) * REGION_SIZE;
+            int curRow = z * REGION_SIZE;
+            for (int x = 1; x < REGION_SIZE; ++x) {
+                int idx = (curRow + x) * 4;
                 uint8_t a = region->colors[idx + 3];
                 if (a < 10) {
                     outBuffer[idx + 0] = 0;
@@ -1139,72 +1247,21 @@ namespace MapCacheManager {
                     continue;
                 }
 
-                int hIdx = z * REGION_SIZE + x;
+                int hIdx = curRow + x;
                 int16_t h = region->heights[hIdx];
                 float currentY = (h != HEIGHT_UNKNOWN) ? (float)h : 64.0f;
 
-                float northY = currentY;
-                if (z > 0) {
-                    int nIdx = (z - 1) * REGION_SIZE + x;
-                    if (region->colors[nIdx * 4 + 3] >= 10 && region->heights[nIdx] != HEIGHT_UNKNOWN) {
-                        float nh = (float)region->heights[nIdx];
-                        if (std::abs(currentY - nh) < 64.0f) northY = nh;
-                    }
-                } else if (northRegion) {
-                    int nIdx = (REGION_SIZE - 1) * REGION_SIZE + x;
-                    if (northRegion->colors[nIdx * 4 + 3] >= 10 && northRegion->heights[nIdx] != HEIGHT_UNKNOWN) {
-                        float nh = (float)northRegion->heights[nIdx];
-                        if (std::abs(currentY - nh) < 64.0f) northY = nh;
-                    }
-                }
+                int nIdx = prevRow + x;
+                int wIdx = curRow + (x - 1);
+                int nwIdx = prevRow + (x - 1);
 
-                float westY = currentY;
-                if (x > 0) {
-                    int wIdx = z * REGION_SIZE + (x - 1);
-                    if (region->colors[wIdx * 4 + 3] >= 10 && region->heights[wIdx] != HEIGHT_UNKNOWN) {
-                        float wh = (float)region->heights[wIdx];
-                        if (std::abs(currentY - wh) < 64.0f) westY = wh;
-                    }
-                } else if (westRegion) {
-                    int wIdx = z * REGION_SIZE + (REGION_SIZE - 1);
-                    if (westRegion->colors[wIdx * 4 + 3] >= 10 && westRegion->heights[wIdx] != HEIGHT_UNKNOWN) {
-                        float wh = (float)westRegion->heights[wIdx];
-                        if (std::abs(currentY - wh) < 64.0f) westY = wh;
-                    }
-                }
+                float northY = (region->colors[nIdx * 4 + 3] >= 10 && region->heights[nIdx] != HEIGHT_UNKNOWN) ? (float)region->heights[nIdx] : currentY;
+                float westY = (region->colors[wIdx * 4 + 3] >= 10 && region->heights[wIdx] != HEIGHT_UNKNOWN) ? (float)region->heights[wIdx] : currentY;
+                float northWestY = (region->colors[nwIdx * 4 + 3] >= 10 && region->heights[nwIdx] != HEIGHT_UNKNOWN) ? (float)region->heights[nwIdx] : currentY;
 
-                float northWestY = currentY;
-                if (z > 0 && x > 0) {
-                    int nwIdx = (z - 1) * REGION_SIZE + (x - 1);
-                    if (region->colors[nwIdx * 4 + 3] >= 10 && region->heights[nwIdx] != HEIGHT_UNKNOWN) {
-                        float nwh = (float)region->heights[nwIdx];
-                        if (std::abs(currentY - nwh) < 64.0f) northWestY = nwh;
-                    }
-                } else if (z == 0 && x > 0) {
-                    if (northRegion) {
-                        int nwIdx = (REGION_SIZE - 1) * REGION_SIZE + (x - 1);
-                        if (northRegion->colors[nwIdx * 4 + 3] >= 10 && northRegion->heights[nwIdx] != HEIGHT_UNKNOWN) {
-                            float nwh = (float)northRegion->heights[nwIdx];
-                            if (std::abs(currentY - nwh) < 64.0f) northWestY = nwh;
-                        }
-                    }
-                } else if (z > 0 && x == 0) {
-                    if (westRegion) {
-                        int nwIdx = (z - 1) * REGION_SIZE + (REGION_SIZE - 1);
-                        if (westRegion->colors[nwIdx * 4 + 3] >= 10 && westRegion->heights[nwIdx] != HEIGHT_UNKNOWN) {
-                            float nwh = (float)westRegion->heights[nwIdx];
-                            if (std::abs(currentY - nwh) < 64.0f) northWestY = nwh;
-                        }
-                    }
-                } else if (z == 0 && x == 0) {
-                    if (northWestRegion) {
-                        int nwIdx = (REGION_SIZE - 1) * REGION_SIZE + (REGION_SIZE - 1);
-                        if (northWestRegion->colors[nwIdx * 4 + 3] >= 10 && northWestRegion->heights[nwIdx] != HEIGHT_UNKNOWN) {
-                            float nwh = (float)northWestRegion->heights[nwIdx];
-                            if (std::abs(currentY - nwh) < 64.0f) northWestY = nwh;
-                        }
-                    }
-                }
+                if (std::abs(currentY - northY) >= 64.0f) northY = currentY;
+                if (std::abs(currentY - westY) >= 64.0f) westY = currentY;
+                if (std::abs(currentY - northWestY) >= 64.0f) northWestY = currentY;
 
                 float shade = MapRenderState::ComputeTerrainShading(
                     currentY, northY, westY, northWestY,
@@ -1276,6 +1333,21 @@ namespace MapCacheManager {
         return it->second;
     }
 
+    uint32_t GetBranchDirtyVersion() {
+        return s_branchDirtyVersion.load(std::memory_order_relaxed);
+    }
+
+    void GetDirtyBranchSet(std::unordered_set<uint64_t>& outSet, uint32_t& outVersion) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        outSet.clear();
+        for (const auto& pair : s_branchDirtyMap) {
+            if (pair.second) {
+                outSet.insert(pair.first);
+            }
+        }
+        outVersion = s_branchDirtyVersion.load(std::memory_order_relaxed);
+    }
+
     bool FetchBranchPyramidTextureData(uint64_t branchHash, uint8_t* outBuffer, bool forceCopy) {
         if (!outBuffer) return false;
         int level = 1, brx = 0, brz = 0;
@@ -1286,6 +1358,9 @@ namespace MapCacheManager {
         int span = (1 << level); // Level 1 -> 2x2, Level 2 -> 4x4
         int subTileSize = REGION_SIZE / span; // 128 or 64
 
+        // 无论何种情况，首先无条件清零输出缓冲区！彻底杜绝静态缓冲区残留污染导致的地图块重复/叠影 Bug！
+        std::memset(outBuffer, 0, REGION_SIZE * REGION_SIZE * 4);
+
         std::lock_guard<std::mutex> lock(g_cacheMutex);
         bool branchDirty = true;
         auto dirtyIt = s_branchDirtyMap.find(branchHash);
@@ -1293,38 +1368,52 @@ namespace MapCacheManager {
             branchDirty = dirtyIt->second;
         }
 
-        // 检查所有子叶子区域，若未加载则异步排队加载，若已加载则更新 LRU 时间戳
-        bool hasAnyLoadedChild = false;
+        if (!forceCopy && !branchDirty) {
+            return false;
+        }
+
+        // 检查所有子叶子区域：
+        // 统计该分支在磁盘上真实存在的文件总数，以及当前内存中已完成加载的就绪数量
+        int existingCount = 0;
+        int loadedCount = 0;
         RegionData* childPtrs[16] = {nullptr};
+
         for (int dz = 0; dz < span; ++dz) {
             for (int dx = 0; dx < span; ++dx) {
                 int rx = brx * span + dx;
                 int rz = brz * span + dz;
                 uint64_t childHash = GetRegionHash(rx, rz, isCave);
-                auto it = g_loadedRegions.find(childHash);
-                if (it == g_loadedRegions.end()) {
-                    if (s_existingRegionFiles.contains(childHash)) {
-                        if (g_loadQueue.size() < 256) {
-                            g_loadedRegions[childHash] = nullptr;
-                            g_loadQueue.push_back(childHash);
+                if (s_existingRegionFiles.contains(childHash)) {
+                    existingCount++;
+                    auto it = g_loadedRegions.find(childHash);
+                    if (it != g_loadedRegions.end() && it->second != nullptr) {
+                        it->second->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
+                        childPtrs[dz * span + dx] = it->second;
+                        loadedCount++;
+                    } else {
+                        // 磁盘存在但尚未加载到内存中，异步排队加载
+                        if (it == g_loadedRegions.end()) {
+                            if (g_loadQueue.size() < 256) {
+                                g_loadedRegions[childHash] = nullptr;
+                                g_loadQueue.push_back(childHash);
+                            }
                         }
                     }
-                } else if (it->second != nullptr) {
-                    it->second->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
-                    childPtrs[dz * span + dx] = it->second;
-                    hasAnyLoadedChild = true;
                 }
             }
         }
 
-        if (!forceCopy && !branchDirty) {
-            return false;
+        // 1. 若该分支覆盖范围内在磁盘上没有任何已探索区域文件：
+        if (existingCount == 0) {
+            s_branchDirtyMap[branchHash] = false;
+            s_branchDirtyVersion.fetch_add(1, std::memory_order_relaxed);
+            return true;
         }
 
-        std::memset(outBuffer, 0, REGION_SIZE * REGION_SIZE * 4);
-        if (!hasAnyLoadedChild) {
-            s_branchDirtyMap[branchHash] = false;
-            return true;
+        // 2. 关键防护：若该分支在磁盘上存在文件，但内存中尚未加载出任何一个区域，
+        // 暂不生成纯透明贴图，等待后台 IOWorker 读取至少一个区域后再行烘焙
+        if (loadedCount == 0) {
+            return false;
         }
 
         alignas(8) static uint8_t s_childShaded[REGION_SIZE * REGION_SIZE * 4];
@@ -1371,6 +1460,7 @@ namespace MapCacheManager {
         }
 
         s_branchDirtyMap[branchHash] = false;
+        s_branchDirtyVersion.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -1490,6 +1580,7 @@ namespace MapCacheManager {
             g_loadedRegions.clear();
             g_loadQueue.clear();
             s_branchDirtyMap.clear();
+            s_branchDirtyVersion.fetch_add(1, std::memory_order_relaxed);
 
             std::filesystem::path cacheDir(g_cacheDir);
             size_t maxPreload = (size_t)std::clamp(MapRenderState::g_maxLoadedRegions, 64, 4096);

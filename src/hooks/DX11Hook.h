@@ -523,9 +523,14 @@ namespace DX11Hook {
         return 0;
     }
 
+    inline bool IsMinecraftNativeScreenOpen() {
+        return CursorHelper::IsMinecraftNativeScreenOpen(g_clientInstance);
+    }
+
     typedef BOOL(WINAPI* PCLIPCURSOR_HOOK)(const RECT*);
     inline PCLIPCURSOR_HOOK oClipCursor = nullptr;
     inline std::atomic<bool> g_allowInternalClipCursor{false};
+    inline std::atomic<bool> g_hasClippedCursor{false};
 
     inline BOOL SafeClipCursorInternal(const RECT* lpRect) {
         g_allowInternalClipCursor.store(true);
@@ -536,6 +541,11 @@ namespace DX11Hook {
             res = ClipCursor(lpRect);
         }
         g_allowInternalClipCursor.store(false);
+        if (lpRect == nullptr) {
+            g_hasClippedCursor.store(false);
+        } else if (res) {
+            g_hasClippedCursor.store(true);
+        }
         return res;
     }
 
@@ -551,6 +561,11 @@ namespace DX11Hook {
         // 【杜绝光标锁定与边缘受限】当模组 UI 激活时，若外部传入非空矩形试图锁定或限制光标区域，
         // 直接返回 TRUE 表示操作成功，而不将光标限制在局部矩形内，保障用户在全屏大地图上光标能全屏自由无拘束移动。
         if (MapRenderState::IsUIActive() && lpRect != nullptr) {
+            return TRUE;
+        }
+        // 当处于第一人称准心游玩且我们已对光标加锁时，阻断外部（游戏底层或其它模块）传入的 NULL 解锁调用，
+        // 防止游玩过程中光标被意外解开并漂移至窗口右上角或任务栏
+        if (g_hasClippedCursor.load() && lpRect == nullptr && !MapRenderState::IsUIActive() && (g_hasPlayer && g_localPlayer != nullptr) && !IsMinecraftNativeScreenOpen()) {
             return TRUE;
         }
         if (oClipCursor) return oClipCursor(lpRect);
@@ -705,9 +720,6 @@ namespace DX11Hook {
 
     using CursorHelper::SafeReleaseClientMouse;
     using CursorHelper::SafeGrabClientMouse;
-    inline bool IsMinecraftNativeScreenOpen() {
-        return CursorHelper::IsMinecraftNativeScreenOpen(g_clientInstance);
-    }
 
     inline void SafeHideHardwareCursor() {
         int guard = 0;
@@ -772,13 +784,13 @@ namespace DX11Hook {
             if (uMsg == WM_KILLFOCUS) return 0;
         }
 
-        // 焦点与窗口激活状态切换：确保无条件解除 ClipCursor，并在 UI 激活时保障硬件光标立即可见
+        // 焦点与窗口激活状态切换：确保失焦时解除 ClipCursor，并在 UI 激活时保障硬件光标立即可见
         if (uMsg == WM_KILLFOCUS || (uMsg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE) || (uMsg == WM_ACTIVATEAPP && wParam == FALSE)) {
-            ClipCursor(NULL);
+            SafeClipCursorInternal(NULL);
             g_tabHeld = false;
         } else if (uMsg == WM_SETFOCUS || (uMsg == WM_ACTIVATE && LOWORD(wParam) != WA_INACTIVE) || (uMsg == WM_ACTIVATEAPP && wParam != FALSE)) {
-            ClipCursor(NULL);
             if (MapRenderState::IsUIActive()) {
+                SafeClipCursorInternal(NULL);
                 SafeReleaseClientMouse();
                 CURSORINFO curInfo = { sizeof(CURSORINFO) };
                 if (GetCursorInfo(&curInfo) && !(curInfo.flags & CURSOR_SHOWING)) {
@@ -800,7 +812,9 @@ namespace DX11Hook {
                     default:                            win32Cursor = IDC_ARROW; break;
                 }
                 SetCursor(LoadCursor(NULL, win32Cursor));
-            } else if (!IsMinecraftNativeScreenOpen()) {
+            } else if (IsMinecraftNativeScreenOpen()) {
+                SafeClipCursorInternal(NULL);
+            } else {
                 SafeGrabClientMouse();
                 SafeHideHardwareCursor();
             }
@@ -1165,7 +1179,6 @@ namespace DX11Hook {
                         SafeShowHardwareCursor();
                     } else {
                         SafeGrabClientMouse();
-                        SafeClipCursorInternal(NULL);
                         SafeHideHardwareCursor();
                     }
                     return 1;
@@ -1235,7 +1248,6 @@ namespace DX11Hook {
                     }
                     if (!MapRenderState::IsUIActive()) {
                         SafeGrabClientMouse();
-                        SafeClipCursorInternal(NULL);
                         SafeHideHardwareCursor();
                     }
                     return 1;
@@ -3551,14 +3563,15 @@ namespace DX11Hook {
         draw_list->AddTriangleFilled(rotate(0, -8.0f * aScale), rotate(-5.0f * aScale, 8.0f * aScale), rotate(5.0f * aScale, 8.0f * aScale), GetPlayerArrowColor());
     }
 
-    inline void UpdateRegionTexture(uint64_t hash, int& texCount) {
+    inline void UpdateRegionTexture(uint64_t hash, int& texCount, int maxTex = 8) {
         if (!g_pd3dDevice || !g_pd3dDeviceContext) return;
         
         bool isKnown = (g_regionTextures.find(hash) != g_regionTextures.end());
-        if (!isKnown && texCount >= 8) return;
+        if ((!isKnown || g_regionTextures[hash] == nullptr) && texCount >= maxTex) return;
 
         // 内存对齐以支持极速 64 位空域探测
         alignas(8) static uint8_t tempBuffer[256 * 256 * 4];
+        std::memset(tempBuffer, 0, sizeof(tempBuffer));
         if (MapCacheManager::FetchRegionTextureData(hash, tempBuffer, !isKnown)) {
             
             // 透明区块免疫技术：如果这片区域完全没探索过，彻底免渲染
@@ -3596,23 +3609,25 @@ namespace DX11Hook {
                         g_regionSRVs[hash] = srv;
                     }
                 }
-            } else if (g_regionTextures[hash] != nullptr) {
+            } else if (g_regionTextures[hash] != nullptr && !isEmpty) {
+                texCount++;
                 g_pd3dDeviceContext->UpdateSubresource(g_regionTextures[hash], 0, NULL, tempBuffer, 256 * 4, 0);
             }
         }
     }
 
     // 四叉树多级金字塔：构建或更新 Level 1 与 Level 2 合并纹理
-    inline void UpdateBranchTexture(uint64_t branchHash, int& texCount) {
+    inline void UpdateBranchTexture(uint64_t branchHash, int& texCount, int maxTex = 4) {
         if (!g_pd3dDevice || !g_pd3dDeviceContext) return;
 
         bool isKnown = (g_branchTextures.find(branchHash) != g_branchTextures.end());
         if (isKnown && !MapCacheManager::IsBranchPyramidDirty(branchHash)) {
             return;
         }
-        if (!isKnown && texCount >= 1) return;
+        if ((!isKnown || g_branchTextures[branchHash] == nullptr) && texCount >= maxTex) return;
 
         alignas(8) static uint8_t tempBranchBuffer[256 * 256 * 4];
+        std::memset(tempBranchBuffer, 0, sizeof(tempBranchBuffer));
         if (MapCacheManager::FetchBranchPyramidTextureData(branchHash, tempBranchBuffer, !isKnown)) {
             bool isEmpty = true;
             uint64_t* ptr64 = (uint64_t*)tempBranchBuffer;
@@ -3645,7 +3660,8 @@ namespace DX11Hook {
                         g_branchSRVs[branchHash] = srv;
                     }
                 }
-            } else if (g_branchTextures[branchHash] != nullptr) {
+            } else if (g_branchTextures[branchHash] != nullptr && !isEmpty) {
+                texCount++;
                 g_pd3dDeviceContext->UpdateSubresource(g_branchTextures[branchHash], 0, NULL, tempBranchBuffer, 256 * 4, 0);
             }
         }
@@ -6337,21 +6353,36 @@ namespace DX11Hook {
     };
 
     [[nodiscard]] inline std::optional<SeedMapLegendLayout> MakeSeedMapLegendLayout(int viewDim) {
+        if (MapRenderState::bigMapHideUI || MapRenderState::showExportPNGScreen) return std::nullopt;
         const auto dimension = SeedMapManager::DimensionFromGameDimensionId(viewDim);
         if (!dimension) return std::nullopt;
         const auto layers = CollectEnabledSeedMapLayers(*dimension);
         if (layers.empty()) return std::nullopt;
 
-        constexpr float width = 226.0f;
-        constexpr float right = 18.0f;
-        constexpr float bottom = 18.0f;
-        constexpr float rowHeight = 28.0f;
-        constexpr float headerHeight = 34.0f;
+        const float curScale = std::clamp(MapRenderState::globalUIScale, 0.25f, 4.0f);
+        const bool hasZoomButtons = MapRenderState::showZoomButtons && !MapRenderState::showExportPNGScreen && !MapRenderState::bigMapHideUI;
+        const float zBtnSz = 32.0f * curScale;
+        // 当缩放按钮存在时，避开右下角缩放按钮区域 (按钮尺寸 + 右边距 + 10px 间距)，平铺于缩放按钮左侧
+        const float right = hasZoomButtons ? (20.0f * curScale + zBtnSz + 10.0f * curScale) : (20.0f * curScale);
+        const float bottom = 20.0f * curScale;
+
+        // 根据最长图层文本动态计算宽度，自适应多语言与字号，且限制最小与最大边界
+        float maxTextW = ImGui::CalcTextSize(LanguageManager::GetText("SEED_MAP_LEGEND")).x;
+        for (const auto layer : layers) {
+            float tw = ImGui::CalcTextSize(SeedMapLayerText(layer)).x;
+            if (tw > maxTextW) maxTextW = tw;
+        }
+        const float width = std::clamp(maxTextW + (24.0f + 7.0f + 32.0f) * curScale, 190.0f * curScale, 360.0f * curScale);
+
+        const float rowHeight = 28.0f * curScale;
+        const float headerHeight = 34.0f * curScale;
         const ImGuiIO& io = ImGui::GetIO();
-        const float maximumHeight = std::max(112.0f, io.DisplaySize.y - bottom * 2.0f);
+        const float sidebarBottom = 20.0f * curScale + 175.0f * curScale + 15.0f * curScale;
+        const float maximumHeight = std::max(80.0f * curScale, io.DisplaySize.y - bottom - sidebarBottom);
         const float height = std::min(maximumHeight, headerHeight + rowHeight * static_cast<float>(layers.size()));
-        const float y = std::max(bottom, io.DisplaySize.y - bottom - height);
-        return SeedMapLegendLayout{ImVec2(io.DisplaySize.x - width - right, y), ImVec2(width, height)};
+        const float x = io.DisplaySize.x - width - right;
+        const float y = std::max(sidebarBottom, io.DisplaySize.y - bottom - height);
+        return SeedMapLegendLayout{ImVec2(x, y), ImVec2(width, height)};
     }
 
     [[nodiscard]] inline bool IsMouseOverSeedMapLegend(int viewDim) {
@@ -6370,10 +6401,11 @@ namespace DX11Hook {
         const auto layers = CollectEnabledSeedMapLayers(*dimension);
         if (layers.empty()) return;
 
+        const float curScale = std::clamp(MapRenderState::globalUIScale, 0.25f, 4.0f);
         ImGui::SetCursorScreenPos(layout->position);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, OreColor(25, 25, 25, 235));
         ImGui::PushStyleColor(ImGuiCol_Border, OreColor(100, 100, 100));
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f * curScale);
         if (ImGui::BeginChild("##SeedMapLegend", layout->size, true, ImGuiWindowFlags_NoNavFocus)) {
             ImGui::TextColored(OreColor(234, 197, 79), "%s",
                                LanguageManager::GetText("SEED_MAP_LEGEND"));
@@ -6381,9 +6413,9 @@ namespace DX11Hook {
             for (const auto layer : layers) {
                 ImGui::PushID(static_cast<int>(layer));
                 const ImVec2 iconPosition = ImGui::GetCursorScreenPos();
-                DrawSeedMapIcon(ImGui::GetWindowDrawList(), layer, iconPosition, 20.0f);
-                ImGui::Dummy(ImVec2(24.0f, 20.0f));
-                ImGui::SameLine(0.0f, 7.0f);
+                DrawSeedMapIcon(ImGui::GetWindowDrawList(), layer, iconPosition, 20.0f * curScale);
+                ImGui::Dummy(ImVec2(24.0f * curScale, 20.0f * curScale));
+                ImGui::SameLine(0.0f, 7.0f * curScale);
                 ImGui::AlignTextToFramePadding();
                 ImGui::TextUnformatted(SeedMapLayerText(layer));
                 ImGui::PopID();
@@ -7416,6 +7448,7 @@ namespace DX11Hook {
         static bool s_isSelectingExportBox = false;
         static float s_exportDragStartX = 0.0f;
         static float s_exportDragStartZ = 0.0f;
+        static std::chrono::steady_clock::time_point s_lastZoomTime{};
 
         float exportBarX = 0.0f, exportBarY = 0.0f, exportBarW = 0.0f, exportBarH = 0.0f;
         bool isMouseOverExportBar = false;
@@ -7718,6 +7751,7 @@ namespace DX11Hook {
         }
 
         if (io.MouseWheel != 0.0f && isHoveringCanvas) {
+            s_lastZoomTime = std::chrono::steady_clock::now();
             float oldZoom = MapRenderState::bigMapZoom;
             float zoomRate = io.KeyCtrl ? 1.30f : 1.15f;
             float newZoom = std::clamp(oldZoom * std::pow(zoomRate, io.MouseWheel), 0.01f, 50.0f);
@@ -7755,11 +7789,13 @@ namespace DX11Hook {
         float savedBigMapZoom = MapRenderState::bigMapZoom;
         float savedBigMapOffsetX = MapRenderState::bigMapOffsetX;
         float savedBigMapOffsetZ = MapRenderState::bigMapOffsetZ;
+        bool isOpeningAnim = false;
         if (MapRenderState::openingAnimation) {
             auto nowAnim = std::chrono::steady_clock::now();
             float elapsedSec = std::chrono::duration<float>(nowAnim - MapRenderState::g_bigMapOpenTime).count();
             constexpr float kAnimDuration = 0.22f;
             if (elapsedSec >= 0.0f && elapsedSec < kAnimDuration) {
+                isOpeningAnim = true;
                 float t = elapsedSec / kAnimDuration;
                 float invT = 1.0f - t;
                 float easeOutCubic = 1.0f - invT * invT * invT;
@@ -7787,22 +7823,41 @@ namespace DX11Hook {
         MapRenderState::g_viewedMaxRz = endRz;
 
         int texturesCreatedThisFrame = 0;
+
+        // 运动状态检测：拖拽平移、快速滚轮缩放、UI缩放按钮、选区拖拽、镜头跳转动画或开启动画期间
+        auto nowMotionTime = std::chrono::steady_clock::now();
+        float zoomElapsedMs = std::chrono::duration<float, std::milli>(nowMotionTime - s_lastZoomTime).count();
+        bool isActivelyZooming = (zoomElapsedMs < 250.0f);
+        bool isMapInMotion = s_isDraggingMap || s_isMidDraggingMap || isActivelyZooming || s_isSelectingExportBox || MapRenderState::cameraHopActive || isOpeningAnim;
+
+        // 时间预算控制：运动期间严格控制单帧构建耗时不超过 0.5ms，静止时放宽至 3.5ms
+        auto tBuildStart = std::chrono::steady_clock::now();
+        float maxBuildTimeMs = isMapInMotion ? 0.5f : 3.5f;
+        auto isOverBudget = [&]() -> bool {
+            return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tBuildStart).count() >= maxBuildTimeMs;
+        };
+
         {
             // [统一渲染] 所有维度(地表/洞穴/下界/末地)均使用缓存区域纹理
             // 洞穴/下界扫描数据已通过 UpdateFromScan 写入缓存, 可显示所有已保存数据
             // UpdateMapTexture 仍为小地图提供实时纹理
             UpdateMapTexture();
 
-            // 1. 显存 GC 智能保护：仅在超出容量门限时淘汰最远离视野中心的纹理，杜绝缩放平移时的颠簸
+            // 1. 显存 GC 智能保护：仅淘汰视野外部且最远离中心的过剩纹理，绝对禁止淘汰视口内正在可见的纹理！（运动中跳过以杜绝微卡顿）
             static int s_vramGcTimer = 0;
-            if (++s_vramGcTimer > 300) {
+            if (!isMapInMotion && ++s_vramGcTimer > 300) {
                 s_vramGcTimer = 0;
-                if (g_regionSRVs.size() > 512) {
+                // 单区域高精纹理缓存门限：提升至 1024 个（约 256MB 显存），并严禁淘汰视口内部可见区域
+                if (g_regionSRVs.size() > 1024) {
                     std::vector<std::pair<uint64_t, float>> candidates;
                     float viewCenterRx = (startRx + endRx) * 0.5f;
                     float viewCenterRz = (startRz + endRz) * 0.5f;
                     for (auto& p : g_regionSRVs) {
                         int rx, rz; MapCacheManager::DecodeRegionHash(p.first, rx, rz);
+                        // 核心保护：若处于当前视口可见范围内，绝对禁止淘汰！
+                        if (rx >= startRx && rx <= endRx && rz >= startRz && rz <= endRz) {
+                            continue;
+                        }
                         float dx = (float)rx - viewCenterRx;
                         float dz = (float)rz - viewCenterRz;
                         candidates.push_back({p.first, dx * dx + dz * dz});
@@ -7810,18 +7865,23 @@ namespace DX11Hook {
                     std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
                         return a.second > b.second;
                     });
-                    size_t toRemove = g_regionSRVs.size() - 512;
-                    for (size_t i = 0; i < toRemove && i < candidates.size(); ++i) {
-                        uint64_t k = candidates[i].first;
-                        if (g_regionSRVs[k]) g_regionSRVs[k]->Release();
-                        g_regionSRVs.erase(k);
-                        if (g_regionTextures[k]) g_regionTextures[k]->Release();
-                        g_regionTextures.erase(k);
-                        MapCacheManager::MarkTextureDirty(k);
+                    size_t targetKeep = 1024;
+                    if (g_regionSRVs.size() > targetKeep) {
+                        size_t toRemove = std::min(g_regionSRVs.size() - targetKeep, candidates.size());
+                        for (size_t i = 0; i < toRemove; ++i) {
+                            uint64_t k = candidates[i].first;
+                            if (g_regionSRVs[k]) g_regionSRVs[k]->Release();
+                            g_regionSRVs.erase(k);
+                            if (g_regionTextures[k]) g_regionTextures[k]->Release();
+                            g_regionTextures.erase(k);
+                            // 注意：严禁在此调用 MarkTextureDirty(k)！释放显存不等于磁盘数据改变，
+                            // 否则会导致脏标记死循环和地貌反复变黑！
+                        }
                     }
                 }
 
-                if (g_branchSRVs.size() > 256) {
+                // 金字塔分支合并纹理门限：提升至 1024 个（约 256MB 显存），严禁淘汰当前视口分支
+                if (g_branchSRVs.size() > 1024) {
                     std::vector<std::pair<uint64_t, float>> branchCandidates;
                     float viewCenterRx = (startRx + endRx) * 0.5f;
                     float viewCenterRz = (startRz + endRz) * 0.5f;
@@ -7829,8 +7889,17 @@ namespace DX11Hook {
                         int bLevel = 1, brx = 0, brz = 0;
                         bool bCave = false;
                         MapCacheManager::DecodeBranchHash(p.first, bLevel, brx, brz, bCave);
-                        float brCenterX = (float)(brx * (1 << bLevel)) + (float)(1 << (bLevel - 1));
-                        float brCenterZ = (float)(brz * (1 << bLevel)) + (float)(1 << (bLevel - 1));
+                        int bSpan = (1 << bLevel);
+                        int bMinRx = brx * bSpan;
+                        int bMaxRx = bMinRx + bSpan - 1;
+                        int bMinRz = brz * bSpan;
+                        int bMaxRz = bMinRz + bSpan - 1;
+                        // 核心保护：若分支与当前大地图视口有交集，绝对禁止淘汰！
+                        if (!(bMaxRx < startRx || bMinRx > endRx || bMaxRz < startRz || bMinRz > endRz)) {
+                            continue;
+                        }
+                        float brCenterX = (float)bMinRx + (float)bSpan * 0.5f;
+                        float brCenterZ = (float)bMinRz + (float)bSpan * 0.5f;
                         float dx = brCenterX - viewCenterRx;
                         float dz = brCenterZ - viewCenterRz;
                         branchCandidates.push_back({p.first, dx * dx + dz * dz});
@@ -7838,13 +7907,16 @@ namespace DX11Hook {
                     std::sort(branchCandidates.begin(), branchCandidates.end(), [](const auto& a, const auto& b) {
                         return a.second > b.second;
                     });
-                    size_t toRemove = g_branchSRVs.size() - 256;
-                    for (size_t i = 0; i < toRemove && i < branchCandidates.size(); ++i) {
-                        uint64_t bk = branchCandidates[i].first;
-                        if (g_branchSRVs[bk]) g_branchSRVs[bk]->Release();
-                        g_branchSRVs.erase(bk);
-                        if (g_branchTextures[bk]) g_branchTextures[bk]->Release();
-                        g_branchTextures.erase(bk);
+                    size_t targetKeep = 1024;
+                    if (g_branchSRVs.size() > targetKeep) {
+                        size_t toRemove = std::min(g_branchSRVs.size() - targetKeep, branchCandidates.size());
+                        for (size_t i = 0; i < toRemove; ++i) {
+                            uint64_t bk = branchCandidates[i].first;
+                            if (g_branchSRVs[bk]) g_branchSRVs[bk]->Release();
+                            g_branchSRVs.erase(bk);
+                            if (g_branchTextures[bk]) g_branchTextures[bk]->Release();
+                            g_branchTextures.erase(bk);
+                        }
                     }
                 }
             }
@@ -7856,11 +7928,12 @@ namespace DX11Hook {
                 draw_list->AddCallback(PointSamplerCallback, nullptr);
             }
 
-            // 3. 异步批量更新当前脏纹理，受单帧配额 8 严格限制（拖拽平移期间暂停更新以确保极致流畅）
-            if (!s_isDraggingMap) {
+            // 3. 异步批量更新当前脏纹理，受单帧配额 8 严格限制（拖拽平移、快速缩放等运动期间暂停更新以确保极致流畅）
+            if (!isMapInMotion) {
                 std::vector<uint64_t> dirtyHashes;
                 MapCacheManager::PopDirtyTextureHashes(dirtyHashes, 8);
                 for (uint64_t dHash : dirtyHashes) {
+                    if (isOverBudget()) break;
                     UpdateRegionTexture(dHash, texturesCreatedThisFrame);
                 }
             }
@@ -7886,7 +7959,7 @@ namespace DX11Hook {
                     s_cachedBranchMaxRx = -1; // 强制失效缓存
                 }
 
-                int margin = span * 4; // 预留 4 个分支跨度的外扩缓冲
+                int margin = span * 8; // 预留 8 个分支跨度的外扩缓冲，避免边缘拖拽时频繁重新空间查询
                 bool branchCacheValid = (startRx >= s_cachedBranchMinRx && endRx <= s_cachedBranchMaxRx &&
                                          startRz >= s_cachedBranchMinRz && endRz <= s_cachedBranchMaxRz &&
                                          pyramidLevel == s_cachedPyramidLevel && isCave == s_cachedBranchCave);
@@ -7901,14 +7974,27 @@ namespace DX11Hook {
                     MapCacheManager::GetExistingBranchHashesInView(s_cachedBranchMinRx, s_cachedBranchMaxRx, s_cachedBranchMinRz, s_cachedBranchMaxRz, pyramidLevel, isCave, s_cachedBranchHashesInView);
                 }
 
+                // 脏分支版本化零锁检测机制：单次原子读取版本号，仅当版本号变更时单次批量获取脏集合，彻底杜绝遍历几百个分支时的反复加锁竞争
+                static std::unordered_set<uint64_t> s_dirtyBranchesInView;
+                static uint32_t s_cachedDirtyBranchVersion = 0xFFFFFFFFu;
+                uint32_t currentDirtyVer = MapCacheManager::GetBranchDirtyVersion();
+                if (s_cachedDirtyBranchVersion != currentDirtyVer) {
+                    MapCacheManager::GetDirtyBranchSet(s_dirtyBranchesInView, s_cachedDirtyBranchVersion);
+                }
+
                 int branchesCreatedThisFrame = 0;
                 float viewCenterWx = (minWx + maxWx) * 0.5f;
                 float viewCenterWz = (minWz + maxWz) * 0.5f;
                 float centerBrxF = viewCenterWx / branchWorldSize - 0.5f;
                 float centerBrzF = viewCenterWz / branchWorldSize - 0.5f;
 
-                uint64_t bestMissingBranchHash = 0;
-                float bestMissingDistSq = FLT_MAX;
+                // 维护距离视野中心最近的待构建分支候选列表（最多 8 个候选）
+                struct BranchCandidate {
+                    uint64_t hash;
+                    float distSq;
+                };
+                BranchCandidate candidates[8];
+                int candCount = 0;
 
                 // 第一阶段：遍历视口分支并绘制已就绪分支纹理
                 for (uint64_t bHash : s_cachedBranchHashesInView) {
@@ -7925,30 +8011,42 @@ namespace DX11Hook {
                     }
 
                     auto bIt = g_branchSRVs.find(bHash);
-                    if (bIt != g_branchSRVs.end() && bIt->second != nullptr) {
+                    bool isKnown = (bIt != g_branchSRVs.end());
+                    bool hasValidTexture = (isKnown && bIt->second != nullptr);
+                    if (hasValidTexture) {
                         float sx_min = std::floor(cx + (brx * branchWorldSize - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
                         float sy_min = std::floor(cy + (brz * branchWorldSize - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
                         float sx_max = std::floor(cx + ((brx + 1) * branchWorldSize - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
                         float sy_max = std::floor(cy + ((brz + 1) * branchWorldSize - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
                         draw_list->AddImage((void*)bIt->second, ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
-                    } else {
-                        // 分支未就绪，单次遍历维护距离视野中心最近的待构建候选，彻底剔除 std::sort 与动态容器分配
-                        if (bIt == g_branchSRVs.end() || MapCacheManager::IsBranchPyramidDirty(bHash)) {
-                            float dAx = (float)brx - centerBrxF;
-                            float dAz = (float)brz - centerBrzF;
-                            float distSq = dAx * dAx + dAz * dAz;
-                            if (distSq < bestMissingDistSq) {
-                                bestMissingDistSq = distSq;
-                                bestMissingBranchHash = bHash;
+                    }
+
+                    // 零锁脏检查：从版本化无锁快照比对，仅当分支未探知或明确脏时才加入构建候选队列
+                    bool isDirty = isKnown && (s_dirtyBranchesInView.find(bHash) != s_dirtyBranchesInView.end());
+                    if (!isKnown || isDirty) {
+                        float dAx = (float)brx - centerBrxF;
+                        float dAz = (float)brz - centerBrzF;
+                        float distSq = dAx * dAx + dAz * dAz;
+                        if (candCount < 8) {
+                            candidates[candCount++] = { bHash, distSq };
+                        } else {
+                            int worstIdx = 0;
+                            for (int ci = 1; ci < 8; ++ci) {
+                                if (candidates[ci].distSq > candidates[worstIdx].distSq) worstIdx = ci;
+                            }
+                            if (distSq < candidates[worstIdx].distSq) {
+                                candidates[worstIdx] = { bHash, distSq };
                             }
                         }
                     }
                 }
 
                 // 第二阶段：平滑回退绘制未就绪分支下的子叶子区域纹理
-                // 反向遍历显存中已加载的区域纹理表（最多 512 个），将查表量从上万次降至数十次
+                // 关键优化：若子区域对应的父级分支在 g_branchSRVs 中已经拥有有效纹理（已在第一阶段绘制），
+                // 则直接跳过该叶子区域的重复绘制！杜绝数百个多余的 DrawIndexed 与纹理绑定开销！
                 for (const auto& [leafHash, srv] : g_regionSRVs) {
                     if (!srv) continue;
+                    if (MapCacheManager::IsCaveHash(leafHash) != isCave) continue;
                     int rx = 0, rz = 0;
                     MapCacheManager::DecodeRegionHash(leafHash, rx, rz);
                     if (rx < startRx || rx > endRx || rz < startRz || rz > endRz) continue;
@@ -7956,9 +8054,9 @@ namespace DX11Hook {
                     int brx = rx >> pyramidLevel;
                     int brz = rz >> pyramidLevel;
                     uint64_t parentBranchHash = MapCacheManager::GetBranchHash(pyramidLevel, brx, brz, isCave);
-                    auto bIt = g_branchSRVs.find(parentBranchHash);
-                    if (bIt != g_branchSRVs.end() && bIt->second != nullptr) {
-                        continue; // 该叶子所属的父分支已整体绘制完毕，无需冗余绘制
+                    auto pIt = g_branchSRVs.find(parentBranchHash);
+                    if (pIt != g_branchSRVs.end() && pIt->second != nullptr) {
+                        continue;
                     }
 
                     float sx_min = std::floor(cx + (rx * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
@@ -7968,10 +8066,18 @@ namespace DX11Hook {
                     draw_list->AddImage((void*)srv, ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
                 }
 
-                // 第三阶段：拖拽静默机制与单帧按需构建就近分支纹理
-                // 拖拽地图过程中暂停执行同步纹理创建与 CPU 降采样，保障 144Hz 极致流畅；静止或松开鼠标后立即恢复单帧构建
-                if (!s_isDraggingMap && bestMissingBranchHash != 0 && branchesCreatedThisFrame < 1) {
-                    UpdateBranchTexture(bestMissingBranchHash, branchesCreatedThisFrame);
+                // 第三阶段：按距离视野中心由近及远构建分支纹理
+                // 运动中（拖拽或快速缩放）：对于 Level 2 (16 个 Region = 1048576 像素) 严禁在运动中同步构建；Level 1 (4 个 Region) 每帧最多允许构建 1 个，且必须在时间预算 (0.5ms) 内。
+                // 静止时：每帧最多构建 3 个，且受时间预算 (3.5ms) 保护，防止掉帧。
+                int branchQuota = isMapInMotion ? (pyramidLevel == 2 ? 0 : 1) : 3;
+                if (candCount > 1) {
+                    std::sort(candidates, candidates + candCount, [](const auto& a, const auto& b) {
+                        return a.distSq < b.distSq;
+                    });
+                }
+                for (int ci = 0; ci < candCount && branchesCreatedThisFrame < branchQuota; ++ci) {
+                    if (isOverBudget()) break;
+                    UpdateBranchTexture(candidates[ci].hash, branchesCreatedThisFrame, branchQuota);
                 }
             } else {
                 // 常规模式：带 Margin 边缘缓冲的真实区域空间缓存
@@ -7984,7 +8090,7 @@ namespace DX11Hook {
                     s_cachedRegionMaxRx = -1; // 强制失效缓存
                 }
 
-                int margin = 4; // 预留 4 个 Region 外扩缓冲
+                int margin = 8; // 预留 8 个 Region 外扩缓冲，平移时减少重复空间索引查询
                 bool regionCacheValid = (startRx >= s_cachedRegionMinRx && endRx <= s_cachedRegionMaxRx &&
                                          startRz >= s_cachedRegionMinRz && endRz <= s_cachedRegionMaxRz &&
                                          isCave == s_cachedRegionCave);
@@ -8004,27 +8110,26 @@ namespace DX11Hook {
                     if (rx < startRx || rx > endRx || rz < startRz || rz > endRz) continue;
 
                     auto srvIt = g_regionSRVs.find(hash);
-                    if (srvIt != g_regionSRVs.end()) {
-                        if (srvIt->second != nullptr) {
-                            float sx_min = std::floor(cx + (rx * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
-                            float sy_min = std::floor(cy + (rz * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
-                            float sx_max = std::floor(cx + ((rx + 1) * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
-                            float sy_max = std::floor(cy + ((rz + 1) * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
-                            draw_list->AddImage((void*)srvIt->second, ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
-                        }
+                    if (srvIt != g_regionSRVs.end() && srvIt->second != nullptr) {
+                        float sx_min = std::floor(cx + (rx * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                        float sy_min = std::floor(cy + (rz * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                        float sx_max = std::floor(cx + ((rx + 1) * 256.0f - g_smoothPX) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetX);
+                        float sy_max = std::floor(cy + ((rz + 1) * 256.0f - g_smoothPZ) * MapRenderState::bigMapZoom + MapRenderState::bigMapOffsetZ);
+                        draw_list->AddImage((void*)srvIt->second, ImVec2(sx_min, sy_min), ImVec2(sx_max, sy_max));
                     } else {
                         missingHashes.push_back(hash);
                     }
                 }
 
-                // 拖拽地图过程中暂停创建新区域纹理；静止或松开鼠标后按到视口中心的距离受配额限制按需异步加载与建图
-                if (!s_isDraggingMap && !missingHashes.empty() && texturesCreatedThisFrame < 8) {
+                // 视口内缺失区域异步配额建图：运动中最多建 1 个（且受 0.5ms 时间预算），静止时每帧最多 4 个并受 3.5ms 时间预算
+                int regionQuota = isMapInMotion ? 1 : 4;
+                if (!missingHashes.empty() && texturesCreatedThisFrame < regionQuota) {
                     float viewCenterWx = (minWx + maxWx) * 0.5f;
                     float viewCenterWz = (minWz + maxWz) * 0.5f;
                     float centerRxF = viewCenterWx / 256.0f - 0.5f;
                     float centerRzF = viewCenterWz / 256.0f - 0.5f;
 
-                    size_t sortCount = std::min<size_t>(8, missingHashes.size());
+                    size_t sortCount = std::min<size_t>((size_t)regionQuota, missingHashes.size());
                     std::partial_sort(missingHashes.begin(), missingHashes.begin() + sortCount, missingHashes.end(), [&](uint64_t a, uint64_t b) {
                         int ax, az; MapCacheManager::DecodeRegionHash(a, ax, az);
                         int bx, bz; MapCacheManager::DecodeRegionHash(b, bx, bz);
@@ -8036,9 +8141,10 @@ namespace DX11Hook {
                     });
 
                     for (size_t i = 0; i < sortCount; ++i) {
+                        if (isOverBudget()) break;
                         uint64_t mHash = missingHashes[i];
-                        if (texturesCreatedThisFrame >= 8) break;
-                        UpdateRegionTexture(mHash, texturesCreatedThisFrame);
+                        if (texturesCreatedThisFrame >= regionQuota) break;
+                        UpdateRegionTexture(mHash, texturesCreatedThisFrame, regionQuota);
                         auto srvIt = g_regionSRVs.find(mHash);
                         if (srvIt != g_regionSRVs.end() && srvIt->second != nullptr) {
                             int rx, rz; MapCacheManager::DecodeRegionHash(mHash, rx, rz);
@@ -9794,39 +9900,6 @@ namespace DX11Hook {
             ImGui::PopStyleColor();
         }
 
-        // [双击新建路径点] 在大地图空白处双击直接打开创建路径点窗口
-        if (isHoveringCanvas && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !MapRenderState::showExportPNGScreen && !MapRenderState::bigMapHideUI && !triggerWpMenu && !triggerDeathMenu && !triggerEntityMenu) {
-            int bx = (int)std::floor(curHoverWx);
-            int bz = (int)std::floor(curHoverWz);
-            int by = 320;
-            if (viewDim == 1) {
-                by = 64;
-            } else {
-                int16_t cachedY = MapCacheManager::GetCachedSurfaceHeight(bx, bz, isCave);
-                if (cachedY != MapCacheManager::HEIGHT_UNKNOWN && cachedY > -64 && cachedY < 319) {
-                    by = (int)cachedY;
-                }
-                if (viewDim == 0 && MapCacheManager::IsCachedWater(bx, bz, isCave) && by < 63) {
-                    by = 63;
-                }
-            }
-            if (viewDim == 1 && MapRenderState::preferOverworldWaypoints) {
-                MapRenderState::addWaypointX = bx * 8;
-                MapRenderState::addWaypointY = (by == 320) ? 64 : by;
-                MapRenderState::addWaypointZ = bz * 8;
-                MapRenderState::addWaypointDim = 0;
-                MapRenderState::addWaypointIsCave = 0;
-            } else {
-                MapRenderState::addWaypointX = bx;
-                MapRenderState::addWaypointY = (by == 320) ? 64 : by;
-                MapRenderState::addWaypointZ = bz;
-                MapRenderState::addWaypointDim = viewDim;
-                MapRenderState::addWaypointIsCave = (viewDim == 0) ? (isCave ? 1 : 0) : -1;
-            }
-            MapRenderState::triggerAddWaypoint = true;
-            MapRenderState::addWaypointFromBigMap = true;
-            MapRenderState::showWaypointUI = true;
-        }
 
         // [Space / 自定义快捷键快速重置视角] 快速回到玩家位置并锁定跟随
         bool triggerCenter = false;
@@ -10540,6 +10613,7 @@ namespace DX11Hook {
 
             // 执行平滑无漂移以屏幕中心为锚点的缩放 (范围 0.01f ~ 50.0f)
             if (clickZoomIn && canZoomIn) {
+                s_lastZoomTime = std::chrono::steady_clock::now();
                 float oldZoom = MapRenderState::bigMapZoom;
                 float zoomFactor = io.KeyCtrl ? 1.40f : 1.20f;
                 float newZoom = oldZoom * zoomFactor;
@@ -10553,6 +10627,7 @@ namespace DX11Hook {
                 s_isDraggingMap = false;
             }
             if (clickZoomOut && canZoomOut) {
+                s_lastZoomTime = std::chrono::steady_clock::now();
                 float oldZoom = MapRenderState::bigMapZoom;
                 float zoomFactor = io.KeyCtrl ? 1.40f : 1.20f;
                 float newZoom = oldZoom / zoomFactor;
@@ -13986,27 +14061,26 @@ namespace DX11Hook {
     }
 
     inline void UpdateCursorState() {
-        static bool s_hasClipped = false;
         static bool s_lastUIActive = false;
+        static bool s_lastAnyScreenActive = false;
+        static RECT s_lastClipRect = { 0, 0, 0, 0 };
 
         // 1. 如果正在退出进程：彻底解除裁剪并退出
         if (MapRenderState::g_isShuttingDown.load()) {
-            if (s_hasClipped) {
+            if (g_hasClippedCursor.load()) {
                 SafeClipCursorInternal(NULL);
-                s_hasClipped = false;
             }
             return;
         }
 
         HWND hwnd = g_hWnd ? g_hWnd : FindWindowW(L"Minecraft", NULL);
         if (!hwnd) hwnd = GetForegroundWindow();
-        bool isForeground = (hwnd && GetForegroundWindow() == hwnd);
+        bool isForeground = (hwnd && GetForegroundWindow() == hwnd && !IsIconic(hwnd));
 
-        // 2. 如果窗口不在前台，例如失焦或切屏：必须立即无条件解除任何裁剪
+        // 2. 如果窗口不在前台或处于最小化状态（失焦、切屏等）：必须立即无条件解除任何裁剪
         if (!isForeground) {
-            if (s_hasClipped) {
+            if (g_hasClippedCursor.load()) {
                 SafeClipCursorInternal(NULL);
-                s_hasClipped = false;
             }
             return;
         }
@@ -14015,13 +14089,13 @@ namespace DX11Hook {
         bool isNativeScreen = IsMinecraftNativeScreenOpen();
         bool isTyping = NativeIME::isTyping.load();
         bool inWorld = (g_hasPlayer && g_localPlayer != nullptr);
+        bool anyScreenActive = uiActiveNow || isNativeScreen || isTyping || !inWorld;
 
         // 3. 模组界面状态发生跳变时的瞬时交接：
         // 无论用户是通过按键、点击按钮、弹窗关闭还是传送等任何途径关闭了模组界面，
         // 都在状态跳变的下一帧立即完成控制权交接，从根源上杜绝任何时序脱节
         if (s_lastUIActive && !uiActiveNow) {
             SafeGrabClientMouse();
-            SafeClipCursorInternal(NULL);
             SafeHideHardwareCursor();
         } else if (!s_lastUIActive && uiActiveNow) {
             SafeReleaseClientMouse();
@@ -14030,44 +14104,164 @@ namespace DX11Hook {
         }
         s_lastUIActive = uiActiveNow;
 
-        // 4. 模组界面激活期间：保障光标自由无裁剪，并动态设置 ImGui 对应的样式光标
-        if (uiActiveNow) {
+        // 4. 原生界面/模组弹窗开启瞬间的光标位置精准还原（恢复原版物品栏/箱子/暂停/聊天框光标记忆）：
+        // 游戏处于十字准心游玩时，硬件光标被安全锁定在画面中心以防止误触任务栏与窗口控制按钮。
+        // 当用户打开物品栏 (E)、容器、工作台、熔炉、聊天框 (T)、暂停菜单 (ESC) 或模组弹窗时，
+        // 立即解除光标裁剪，并将其位置无缝还原至上次悬停处的相对位置，彻底消灭“每次打开光标都跑回屏幕中央”的违和感！
+        bool justOpenedScreen = (!s_lastAnyScreenActive && anyScreenActive);
+        if (justOpenedScreen) {
             SafeClipCursorInternal(NULL);
-            CURSORINFO curInfo = { sizeof(CURSORINFO) };
-            if (GetCursorInfo(&curInfo)) {
-                if (!(curInfo.flags & CURSOR_SHOWING)) {
-                    SafeShowHardwareCursor();
+
+            if (!MapRenderState::showBigMap && MapRenderState::g_hasSavedScreenPos) {
+                RECT rcClient;
+                if (GetClientRect(hwnd, &rcClient) && (rcClient.right > rcClient.left) && (rcClient.bottom > rcClient.top)) {
+                    POINT ptTL = { rcClient.left, rcClient.top };
+                    POINT ptBR = { rcClient.right, rcClient.bottom };
+                    ClientToScreen(hwnd, &ptTL);
+                    ClientToScreen(hwnd, &ptBR);
+
+                    int width = ptBR.x - ptTL.x;
+                    int height = ptBR.y - ptTL.y;
+                    if (width > 0 && height > 0) {
+                        int targetX = ptTL.x + (int)(MapRenderState::g_lastScreenNormX * (float)width);
+                        int targetY = ptTL.y + (int)(MapRenderState::g_lastScreenNormY * (float)height);
+                        targetX = std::clamp(targetX, (int)ptTL.x, (int)ptBR.x - 1);
+                        targetY = std::clamp(targetY, (int)ptTL.y, (int)ptBR.y - 1);
+
+                        SafeSetCursorPosInternal(targetX, targetY);
+
+                        if (uiActiveNow && ImGui::GetCurrentContext()) {
+                            POINT ptClient = { targetX, targetY };
+                            ScreenToClient(hwnd, &ptClient);
+                            ImGui::GetIO().MousePos = ImVec2((float)ptClient.x, (float)ptClient.y);
+                        }
+                    }
                 }
-                ImGuiMouseCursor cursor = ImGui::GetCurrentContext() ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
-                LPCTSTR win32Cursor = IDC_ARROW;
-                switch (cursor) {
-                    case ImGuiMouseCursor_Arrow:        win32Cursor = IDC_ARROW; break;
-                    case ImGuiMouseCursor_TextInput:    win32Cursor = IDC_IBEAM; break;
-                    case ImGuiMouseCursor_ResizeAll:    win32Cursor = IDC_SIZEALL; break;
-                    case ImGuiMouseCursor_ResizeEW:     win32Cursor = IDC_SIZEWE; break;
-                    case ImGuiMouseCursor_ResizeNS:     win32Cursor = IDC_SIZENS; break;
-                    case ImGuiMouseCursor_ResizeNESW:   win32Cursor = IDC_SIZENESW; break;
-                    case ImGuiMouseCursor_ResizeNWSE:   win32Cursor = IDC_SIZENWSE; break;
-                    case ImGuiMouseCursor_Hand:         win32Cursor = IDC_HAND; break;
-                    case ImGuiMouseCursor_NotAllowed:   win32Cursor = IDC_NO; break;
-                    default:                            win32Cursor = IDC_ARROW; break;
-                }
-                SafeSetCursorInternal(LoadCursor(NULL, win32Cursor));
             }
+
+            if (isNativeScreen) {
+                SafeShowHardwareCursor();
+                SafeReleaseClientMouse();
+            }
+        }
+
+        // 5. 当处于模组界面、原生菜单/容器、打字状态或尚未进入活跃世界时：
+        // 必须保障光标完全自由无裁剪，并动态设置 ImGui 对应的样式光标；
+        // 并在交互期间持续采样记录用户在界面内的当前光标悬停相对坐标（大地图除外，大地图拥有独立坐标记忆体系）
+        if (anyScreenActive) {
+            if (g_hasClippedCursor.load()) {
+                SafeClipCursorInternal(NULL);
+            }
+
+            if (!justOpenedScreen && !MapRenderState::showBigMap) {
+                POINT curPt;
+                if (GetCursorPos(&curPt)) {
+                    RECT rcClient;
+                    if (GetClientRect(hwnd, &rcClient) && (rcClient.right > rcClient.left) && (rcClient.bottom > rcClient.top)) {
+                        POINT ptTL = { rcClient.left, rcClient.top };
+                        POINT ptBR = { rcClient.right, rcClient.bottom };
+                        ClientToScreen(hwnd, &ptTL);
+                        ClientToScreen(hwnd, &ptBR);
+                        if (curPt.x >= ptTL.x && curPt.x < ptBR.x && curPt.y >= ptTL.y && curPt.y < ptBR.y) {
+                            float width = (float)(ptBR.x - ptTL.x);
+                            float height = (float)(ptBR.y - ptTL.y);
+                            if (width > 0.0f && height > 0.0f) {
+                                MapRenderState::g_lastScreenNormX = (float)(curPt.x - ptTL.x) / width;
+                                MapRenderState::g_lastScreenNormY = (float)(curPt.y - ptTL.y) / height;
+                                MapRenderState::g_hasSavedScreenPos = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (uiActiveNow) {
+                CURSORINFO curInfo = { sizeof(CURSORINFO) };
+                if (GetCursorInfo(&curInfo)) {
+                    if (!(curInfo.flags & CURSOR_SHOWING)) {
+                        SafeShowHardwareCursor();
+                    }
+                    ImGuiMouseCursor cursor = ImGui::GetCurrentContext() ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
+                    LPCTSTR win32Cursor = IDC_ARROW;
+                    switch (cursor) {
+                        case ImGuiMouseCursor_Arrow:        win32Cursor = IDC_ARROW; break;
+                        case ImGuiMouseCursor_TextInput:    win32Cursor = IDC_IBEAM; break;
+                        case ImGuiMouseCursor_ResizeAll:    win32Cursor = IDC_SIZEALL; break;
+                        case ImGuiMouseCursor_ResizeEW:     win32Cursor = IDC_SIZEWE; break;
+                        case ImGuiMouseCursor_ResizeNS:     win32Cursor = IDC_SIZENS; break;
+                        case ImGuiMouseCursor_ResizeNESW:   win32Cursor = IDC_SIZENESW; break;
+                        case ImGuiMouseCursor_ResizeNWSE:   win32Cursor = IDC_SIZENWSE; break;
+                        case ImGuiMouseCursor_Hand:         win32Cursor = IDC_HAND; break;
+                        case ImGuiMouseCursor_NotAllowed:   win32Cursor = IDC_NO; break;
+                        default:                            win32Cursor = IDC_ARROW; break;
+                    }
+                    SafeSetCursorInternal(LoadCursor(NULL, win32Cursor));
+                }
+            }
+            s_lastAnyScreenActive = anyScreenActive;
             return;
         }
 
-        // 5. 纯第一人称准心游玩画面（无模组界面、无原生菜单、非打字、处于活跃世界前台）：
-        // 严禁鼠标指针与十字准星同时出现！
-        // 若检测到硬件光标仍异常残留显示在画面上，立即将其隐藏并确保游戏捕获鼠标。
-        // 绝不调用破坏性的置空，保留系统箭头句柄完整性，确保后续原生菜单指针正常显示
-        if (!isNativeScreen && !isTyping && inWorld && isForeground) {
-            CURSORINFO curInfo = { sizeof(CURSORINFO) };
-            if (GetCursorInfo(&curInfo) && (curInfo.flags & CURSOR_SHOWING)) {
-                SafeHideHardwareCursor();
-                SafeGrabClientMouse();
+        // 6. 界面关闭瞬间采样最后光标位置：
+        if (s_lastAnyScreenActive && !anyScreenActive && !MapRenderState::showBigMap) {
+            POINT curPt;
+            if (GetCursorPos(&curPt)) {
+                RECT rcClient;
+                if (GetClientRect(hwnd, &rcClient) && (rcClient.right > rcClient.left) && (rcClient.bottom > rcClient.top)) {
+                    POINT ptTL = { rcClient.left, rcClient.top };
+                    POINT ptBR = { rcClient.right, rcClient.bottom };
+                    ClientToScreen(hwnd, &ptTL);
+                    ClientToScreen(hwnd, &ptBR);
+                    if (curPt.x >= ptTL.x && curPt.x < ptBR.x && curPt.y >= ptTL.y && curPt.y < ptBR.y) {
+                        float width = (float)(ptBR.x - ptTL.x);
+                        float height = (float)(ptBR.y - ptTL.y);
+                        if (width > 0.0f && height > 0.0f) {
+                            MapRenderState::g_lastScreenNormX = (float)(curPt.x - ptTL.x) / width;
+                            MapRenderState::g_lastScreenNormY = (float)(curPt.y - ptTL.y) / height;
+                            MapRenderState::g_hasSavedScreenPos = true;
+                        }
+                    }
+                }
             }
         }
+
+        // 7. 纯第一人称准心游玩画面（无模组界面、无原生菜单、非打字、处于活跃世界前台）：
+        // 游戏窗口化全屏或窗口模式下，将系统硬件光标严格锁定在游戏画面中央的微小安全矩形内 (8x8 像素)。
+        // 彻底杜绝光标在后台漂移至窗口右上角触发最小化/最大化/关闭按钮，或漂移至屏幕底部触发任务栏误触！
+        // 游戏底层使用 RawInput (WM_INPUT) 读取鼠标相对位移，中央微矩形锁定完全不影响 360 度视角自由旋转。
+        RECT rcClient;
+        if (GetClientRect(hwnd, &rcClient) && (rcClient.right > rcClient.left) && (rcClient.bottom > rcClient.top)) {
+            POINT ptTL = { rcClient.left, rcClient.top };
+            POINT ptBR = { rcClient.right, rcClient.bottom };
+            ClientToScreen(hwnd, &ptTL);
+            ClientToScreen(hwnd, &ptBR);
+
+            int cx = (ptTL.x + ptBR.x) / 2;
+            int cy = (ptTL.y + ptBR.y) / 2;
+            RECT targetClip = { cx - 4, cy - 4, cx + 4, cy + 4 };
+
+            RECT curClip = {};
+            bool needClip = !g_hasClippedCursor.load() ||
+                            !GetClipCursor(&curClip) ||
+                            (curClip.left != targetClip.left || curClip.top != targetClip.top ||
+                             curClip.right != targetClip.right || curClip.bottom != targetClip.bottom);
+
+            if (needClip) {
+                SafeSetCursorPosInternal(cx, cy);
+                SafeClipCursorInternal(&targetClip);
+                s_lastClipRect = targetClip;
+            }
+        }
+
+        // 严禁鼠标指针与十字准星同时出现！
+        // 若检测到硬件光标仍异常残留显示在画面上，立即将其隐藏并确保游戏捕获鼠标
+        CURSORINFO curInfo = { sizeof(CURSORINFO) };
+        if (GetCursorInfo(&curInfo) && (curInfo.flags & CURSOR_SHOWING)) {
+            SafeHideHardwareCursor();
+            SafeGrabClientMouse();
+        }
+
+        s_lastAnyScreenActive = anyScreenActive;
     }
 
     inline bool IsClientScreenBlockingRender(ClientInstance* ci, bool isUIActive) {

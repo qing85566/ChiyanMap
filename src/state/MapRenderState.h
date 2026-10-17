@@ -44,6 +44,11 @@ namespace MapRenderState {
     inline SavedCursorPos g_lastBigMapCursorPos = { -1, -1 };
     inline bool g_hasSavedBigMapCursor = false;
 
+    // [原生界面与模组弹窗光标记忆] 记录离开物品栏、容器、暂停菜单等界面时的光标相对坐标，在重新打开时精准还原原版行为
+    inline float g_lastScreenNormX = 0.5f;
+    inline float g_lastScreenNormY = 0.5f;
+    inline bool g_hasSavedScreenPos = false;
+
     // 当前玩家所处生物群系名称 (拆分为原始命名空间ID与本地化名称)
     inline std::string rawBiomeName = "minecraft:unknown";
     inline std::string translatedBiomeName = "Unknown Biome";

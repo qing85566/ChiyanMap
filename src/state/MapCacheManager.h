@@ -135,6 +135,8 @@ namespace MapCacheManager {
 
     // [四叉树多级金字塔] 检查并烘焙降采样分支纹理 (Level 1 = 2x2 区域, Level 2 = 4x4 区域)
     bool IsBranchPyramidDirty(uint64_t branchHash);
+    uint32_t GetBranchDirtyVersion();
+    void GetDirtyBranchSet(std::unordered_set<uint64_t>& outSet, uint32_t& outVersion);
     bool FetchBranchPyramidTextureData(uint64_t branchHash, uint8_t* outBuffer, bool forceCopy = false);
     void MarkBranchPyramidDirtyForRegion(int rx, int rz, bool isCave);
 

@@ -335,16 +335,29 @@ inline std::condition_variable g_cacheWriteCV;
 inline std::atomic<bool> g_cacheWritePending{false};
 inline std::atomic<bool> g_cacheWriteExit{false};
 inline std::thread* g_cacheWriteThread = nullptr;
-// 预分配缓冲 (仅 worker 线程访问，无需加锁)
+// 预分配双缓冲 (worker 线程与前台提交线程交替使用，杜绝丢弃写入)
 inline mce::Color (*g_cacheWriteColors)[MAP_DATA_SIZE] = nullptr;
 inline float (*g_cacheWriteHeights)[MAP_DATA_SIZE] = nullptr;
 inline uint8_t (*g_cacheWriteLights)[MAP_DATA_SIZE] = nullptr;
-// 请求参数 (由扫描线程写入，worker 线程读取，通过 g_cacheWritePending 标志同步)
+
+inline mce::Color (*g_cacheStageColors)[MAP_DATA_SIZE] = nullptr;
+inline float (*g_cacheStageHeights)[MAP_DATA_SIZE] = nullptr;
+inline uint8_t (*g_cacheStageLights)[MAP_DATA_SIZE] = nullptr;
+
+// 请求参数 (主缓冲)
 inline int g_cacheWriteX = 0;
 inline int g_cacheWriteZ = 0;
 inline int g_cacheWriteDim = 0;
 inline bool g_cacheWriteIsCave = false;
 inline std::vector<MapCacheManager::BiomeEntry> g_cacheWriteBiomes;
+
+// 请求参数 (舞台缓冲)
+inline int g_cacheStageX = 0;
+inline int g_cacheStageZ = 0;
+inline int g_cacheStageDim = 0;
+inline bool g_cacheStageIsCave = false;
+inline std::vector<MapCacheManager::BiomeEntry> g_cacheStageBiomes;
+inline bool g_cacheStagePending = false;
 
 inline int g_currentScanX = -99999;
 inline int g_currentScanZ = -99999;
@@ -366,7 +379,9 @@ inline void AbortActiveScanAndPendingWrites() {
     {
         std::lock_guard<std::mutex> lock(g_cacheWriteMutex);
         g_cacheWritePending.store(false);
+        g_cacheStagePending = false;
         g_cacheWriteBiomes.clear();
+        g_cacheStageBiomes.clear();
     }
     g_cacheWriteCV.notify_one();
 
@@ -398,6 +413,8 @@ inline void CacheWriteWorkerFunc() {
             if (!g_cacheWritePending.load() || MapRenderState::g_isShuttingDown.load()) {
                 g_cacheWritePending.store(false);
                 g_cacheWriteBiomes.clear();
+                g_cacheStagePending = false;
+                g_cacheStageBiomes.clear();
                 continue;
             }
 
@@ -406,6 +423,8 @@ inline void CacheWriteWorkerFunc() {
                 MapCacheManager::GetLoadedDimensionId() != g_cacheWriteDim) {
                 g_cacheWritePending.store(false);
                 g_cacheWriteBiomes.clear();
+                g_cacheStagePending = false;
+                g_cacheStageBiomes.clear();
                 continue;
             }
 
@@ -430,41 +449,82 @@ inline void CacheWriteWorkerFunc() {
 
         {
             std::lock_guard<std::mutex> lock(g_cacheWriteMutex);
-            g_cacheWritePending.store(false);
+            if (g_cacheStagePending && !MapRenderState::g_isShuttingDown.load() &&
+                MapRenderState::currentDimensionId == g_cacheStageDim &&
+                MapCacheManager::GetLoadedDimensionId() == g_cacheStageDim) {
+                // 存在排队等待提交的最新扫描数据，交换主缓冲与舞台缓冲指针，立刻接力写入！
+                std::swap(g_cacheWriteColors, g_cacheStageColors);
+                std::swap(g_cacheWriteHeights, g_cacheStageHeights);
+                std::swap(g_cacheWriteLights, g_cacheStageLights);
+                g_cacheWriteX = g_cacheStageX;
+                g_cacheWriteZ = g_cacheStageZ;
+                g_cacheWriteDim = g_cacheStageDim;
+                g_cacheWriteIsCave = g_cacheStageIsCave;
+                g_cacheWriteBiomes = std::move(g_cacheStageBiomes);
+                g_cacheStageBiomes.clear();
+                g_cacheStagePending = false;
+                g_cacheWritePending.store(true);
+            } else {
+                g_cacheStagePending = false;
+                g_cacheStageBiomes.clear();
+                g_cacheWritePending.store(false);
+            }
         }
     }
 }
 
-// 提交缓存写入请求 (非阻塞，若 worker 仍在处理上一次请求则跳过)
+// 提交缓存写入请求 (非阻塞双缓冲流水线，绝不丢弃任何扫描产物)
 inline void SubmitCacheWrite(int x, int z, int dim, bool isCave, std::vector<MapCacheManager::BiomeEntry>& biomes) {
-    if (g_cacheWritePending.load()) return;  // worker 忙，跳过 (数据已在前台缓冲，下次扫描会再写)
     if (MapRenderState::currentDimensionId != dim) return; // 提交时校验物理维度
     if (MapCacheManager::GetLoadedDimensionId() != dim) return; // 提交时校验加载维度
 
-    // 懒启动持久化 worker 线程
+    // 懒启动持久化 worker 线程并预分配双缓冲
     if (!g_cacheWriteThread) {
         g_cacheWriteColors = new mce::Color[MAP_DATA_SIZE][MAP_DATA_SIZE];
         g_cacheWriteHeights = new float[MAP_DATA_SIZE][MAP_DATA_SIZE];
         g_cacheWriteLights = new uint8_t[MAP_DATA_SIZE][MAP_DATA_SIZE];
+        g_cacheStageColors = new mce::Color[MAP_DATA_SIZE][MAP_DATA_SIZE];
+        g_cacheStageHeights = new float[MAP_DATA_SIZE][MAP_DATA_SIZE];
+        g_cacheStageLights = new uint8_t[MAP_DATA_SIZE][MAP_DATA_SIZE];
         g_cacheWriteThread = new std::thread(CacheWriteWorkerFunc);
     }
 
     {
-        std::lock_guard<std::mutex> lock(g_mapDataMutex);
-        std::memcpy(g_cacheWriteColors, g_mapColorsBack, sizeof(g_mapColorsBack));
-        std::memcpy(g_cacheWriteHeights, g_mapHeightsBack, sizeof(g_mapHeightsBack));
-        std::memcpy(g_cacheWriteLights, g_mapLightsBack, sizeof(g_mapLightsBack));
-    }
-    {
         std::lock_guard<std::mutex> lock(g_cacheWriteMutex);
-        g_cacheWriteX = x;
-        g_cacheWriteZ = z;
-        g_cacheWriteDim = dim;
-        g_cacheWriteIsCave = isCave;
-        g_cacheWriteBiomes.swap(biomes);
-        g_cacheWritePending.store(true);
+        if (!g_cacheWritePending.load()) {
+            {
+                std::lock_guard<std::mutex> mapLock(g_mapDataMutex);
+                std::memcpy(g_cacheWriteColors, g_mapColorsBack, sizeof(g_mapColorsBack));
+                std::memcpy(g_cacheWriteHeights, g_mapHeightsBack, sizeof(g_mapHeightsBack));
+                std::memcpy(g_cacheWriteLights, g_mapLightsBack, sizeof(g_mapLightsBack));
+            }
+            g_cacheWriteX = x;
+            g_cacheWriteZ = z;
+            g_cacheWriteDim = dim;
+            g_cacheWriteIsCave = isCave;
+            g_cacheWriteBiomes = std::move(biomes);
+            biomes.clear();
+            g_cacheWritePending.store(true);
+            g_cacheWriteCV.notify_one();
+        } else {
+            // Worker 正在写磁盘，暂存到 stage 缓冲，等待 worker 完成当前批次后无缝接力
+            {
+                std::lock_guard<std::mutex> mapLock(g_mapDataMutex);
+                std::memcpy(g_cacheStageColors, g_mapColorsBack, sizeof(g_mapColorsBack));
+                std::memcpy(g_cacheStageHeights, g_mapHeightsBack, sizeof(g_mapHeightsBack));
+                std::memcpy(g_cacheStageLights, g_mapLightsBack, sizeof(g_mapLightsBack));
+            }
+            g_cacheStageX = x;
+            g_cacheStageZ = z;
+            g_cacheStageDim = dim;
+            g_cacheStageIsCave = isCave;
+            if (!biomes.empty()) {
+                g_cacheStageBiomes.insert(g_cacheStageBiomes.end(), biomes.begin(), biomes.end());
+                biomes.clear();
+            }
+            g_cacheStagePending = true;
+        }
     }
-    g_cacheWriteCV.notify_one();
 }
 
 inline void ShutdownCacheWriteThread() {
@@ -476,10 +536,14 @@ inline void ShutdownCacheWriteThread() {
         g_cacheWriteThread = nullptr;
         g_cacheWriteExit.store(false);
         g_cacheWritePending.store(false);
+        g_cacheStagePending = false;
     }
     if (g_cacheWriteColors) { delete[] g_cacheWriteColors; g_cacheWriteColors = nullptr; }
     if (g_cacheWriteHeights) { delete[] g_cacheWriteHeights; g_cacheWriteHeights = nullptr; }
     if (g_cacheWriteLights) { delete[] g_cacheWriteLights; g_cacheWriteLights = nullptr; }
+    if (g_cacheStageColors) { delete[] g_cacheStageColors; g_cacheStageColors = nullptr; }
+    if (g_cacheStageHeights) { delete[] g_cacheStageHeights; g_cacheStageHeights = nullptr; }
+    if (g_cacheStageLights) { delete[] g_cacheStageLights; g_cacheStageLights = nullptr; }
 }
 
 // ==========================================
@@ -4070,7 +4134,6 @@ LL_TYPE_INSTANCE_HOOK(
             } else {
                 // 模组自身界面关闭：无条件重新捕获鼠标并隐藏硬件光标，彻底打破死锁
                 this->grabMouse();
-                ClipCursor(NULL);
                 CursorHelper::SafeHideHardwareCursor();
             }
         } else if (justRegainedFocus) {
@@ -4080,7 +4143,6 @@ LL_TYPE_INSTANCE_HOOK(
                 CursorHelper::SafeShowHardwareCursor();
             } else if (!CursorHelper::IsMinecraftNativeScreenOpen(this)) {
                 this->grabMouse();
-                ClipCursor(NULL);
                 CursorHelper::SafeHideHardwareCursor();
             }
         } else if (currentUIState) {
@@ -4095,7 +4157,6 @@ LL_TYPE_INSTANCE_HOOK(
             CURSORINFO curInfo = { sizeof(CURSORINFO) };
             if (GetCursorInfo(&curInfo) && (curInfo.flags & CURSOR_SHOWING)) {
                 this->grabMouse();
-                ClipCursor(NULL);
                 CursorHelper::SafeHideHardwareCursor();
             }
         }
@@ -4141,8 +4202,12 @@ LL_TYPE_INSTANCE_HOOK(
             int moveDistZ = pz - g_currentScanZ;
             bool isCaveMode = (MapRenderState::currentDimensionId == 1) || MapRenderState::g_caveModeActive;
 
-            if (std::abs(moveDistX) >= 64 || std::abs(moveDistZ) >= 64) {
-                // 远距离跳转/传送：重新整幅预填
+            if (std::abs(moveDistX) >= 256 || std::abs(moveDistZ) >= 256) {
+                // 远距离跳转/传送 (超出缓冲区半径)：先提交当前已有扫描数据入缓存，杜绝丢弃已探明区块
+                if (g_scanDimension == MapRenderState::currentDimensionId &&
+                    g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                    SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, isCaveMode, g_scanBiomeEntries);
+                }
                 g_anarchySurfChunks.clear();
                 g_anarchyCaveChunks.clear();
                 g_currentScanX = px;
@@ -4161,6 +4226,12 @@ LL_TYPE_INSTANCE_HOOK(
                     g_mapDataUpdated.store(true);
                 }
             } else if (moveDistX != 0 || moveDistZ != 0) {
+                // 移动前先提交当前已扫描切片入缓存
+                if (g_scanChunkIndex > 0 &&
+                    g_scanDimension == MapRenderState::currentDimensionId &&
+                    g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                    SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, isCaveMode, g_scanBiomeEntries);
+                }
                 // 平移现有网格与GPU纹理，并用缓存填补边缘空缺 (onlyIfMissing = true)
                 ShiftScanGrid(g_mapColorsBack, moveDistX, moveDistZ);
                 ShiftScanGrid(g_mapHeightsBack, moveDistX, moveDistZ);
@@ -4204,8 +4275,12 @@ LL_TYPE_INSTANCE_HOOK(
             int shiftZ = pz - g_currentScanZ;
             bool isCaveMode = (MapRenderState::currentDimensionId == 1) || MapRenderState::g_caveModeActive;
 
-            if (std::abs(shiftX) >= 64 || std::abs(shiftZ) >= 64) {
-                // 异常跳转/传送 (平移量超过缓冲区): 重新整幅预填
+            if (std::abs(shiftX) >= 256 || std::abs(shiftZ) >= 256) {
+                // 异常跳转/传送 (平移量超过缓冲区): 先提交已扫数据入缓存，再重新整幅预填
+                if (g_scanDimension == MapRenderState::currentDimensionId &&
+                    g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                    SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, isCaveMode, g_scanBiomeEntries);
+                }
                 g_currentScanX = px;
                 g_currentScanZ = pz;
                 MapCacheManager::PrefillMapGrid(px, pz, g_mapColorsBack, g_mapHeightsBack, isCaveMode, false, g_textureData, g_mapLightsBack);
@@ -4226,6 +4301,12 @@ LL_TYPE_INSTANCE_HOOK(
                 g_scanPerimeterIndex = 0;
                 g_scanChunkIndex = 0;
             } else {
+                // 平移前先提交当前已扫描切片入缓存，确保跑图时不丢弃任何已扫描地块
+                if (g_scanChunkIndex > 0 &&
+                    g_scanDimension == MapRenderState::currentDimensionId &&
+                    g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                    SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, isCaveMode, g_scanBiomeEntries);
+                }
                 // 平移后台缓冲与GPU纹理
                 ShiftScanGrid(g_mapColorsBack, shiftX, shiftZ);
                 ShiftScanGrid(g_mapHeightsBack, shiftX, shiftZ);
@@ -4487,10 +4568,12 @@ LL_TYPE_INSTANCE_HOOK(
                         int chunkStartZ = curChunkZ << 4;
 
                         // 极速跳过未就绪区块，杜绝冗余异常开销
-                        if (!IsChunkReady(region, chunkStartX + 8, (int)g_playerY, chunkStartZ + 8) &&
-                            SafeGetSurfaceY(region, chunkStartX + 8, chunkStartZ + 8) == -32000) {
-                            g_scanChunkIndex++;
-                            continue;
+                        if (!IsChunkReady(region, chunkStartX + 8, (int)g_playerY, chunkStartZ + 8)) {
+                            short probeY = SafeGetSurfaceY(region, chunkStartX + 8, chunkStartZ + 8);
+                            if (probeY <= -64 || probeY == -32000) {
+                                g_scanChunkIndex++;
+                                continue;
+                            }
                         }
 
                         // [无规则区块历史探测] 洞穴采样区块特征提取
@@ -4580,6 +4663,23 @@ LL_TYPE_INSTANCE_HOOK(
                         g_scanChunkIndex++;
                         g_scanRadius = g_scanChunkIndex;
 
+                        // 首个中心区块（玩家脚下区块）完成后立即触发前台更新与缓存写入，确保第 0 帧中心立足点立即可见并落盘！
+                        if (g_scanChunkIndex == 1) {
+                            {
+                                std::lock_guard<std::mutex> lock(g_mapDataMutex);
+                                std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                                std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                                std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
+                                g_lastRenderX = g_currentScanX;
+                                g_lastRenderZ = g_currentScanZ;
+                                g_mapDataUpdated.store(true);
+                            }
+                            if (g_scanDimension == MapRenderState::currentDimensionId &&
+                                g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                                SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, true, g_scanBiomeEntries);
+                            }
+                        }
+
                         auto now = std::chrono::high_resolution_clock::now();
                         int maxMicroSec = 1500;
                         if (std::chrono::duration_cast<std::chrono::microseconds>(now - scanStartTime).count() > maxMicroSec) {
@@ -4588,8 +4688,9 @@ LL_TYPE_INSTANCE_HOOK(
                         }
                     }
 
-                    // 增量周期性提交 (每 80ms)，实现每秒 12 次高频平滑渲染，杜绝任何可见延迟
+                    // 增量周期性提交 (每 80ms 前台纹理更新，每 500ms 异步磁盘缓存提交)，实现高频平滑渲染与持久化两不误
                     static auto s_lastCaveCommit = std::chrono::steady_clock::now();
+                    static auto s_lastCaveCacheCommit = std::chrono::steady_clock::now();
                     auto nowCave = std::chrono::steady_clock::now();
                     if (std::chrono::duration_cast<std::chrono::milliseconds>(nowCave - s_lastCaveCommit).count() >= 80) {
                         s_lastCaveCommit = nowCave;
@@ -4600,6 +4701,13 @@ LL_TYPE_INSTANCE_HOOK(
                         g_lastRenderX = g_currentScanX;
                         g_lastRenderZ = g_currentScanZ;
                         g_mapDataUpdated.store(true);
+                    }
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(nowCave - s_lastCaveCacheCommit).count() >= 500) {
+                        s_lastCaveCacheCommit = nowCave;
+                        if (g_scanDimension == MapRenderState::currentDimensionId &&
+                            g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                            SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, true, g_scanBiomeEntries);
+                        }
                     }
 
                     if (g_scanChunkIndex >= TOTAL_SCAN_CHUNKS) {
@@ -4673,10 +4781,12 @@ LL_TYPE_INSTANCE_HOOK(
                         int chunkStartZ = curChunkZ << 4;
 
                         // 极速跳过未就绪区块，杜绝冗余异常开销
-                        if (!IsChunkReady(region, chunkStartX + 8, (int)g_playerY, chunkStartZ + 8) &&
-                            SafeGetSurfaceY(region, chunkStartX + 8, chunkStartZ + 8) == -32000) {
-                            g_scanChunkIndex++;
-                            continue;
+                        if (!IsChunkReady(region, chunkStartX + 8, (int)g_playerY, chunkStartZ + 8)) {
+                            short probeY = SafeGetSurfaceY(region, chunkStartX + 8, chunkStartZ + 8);
+                            if (probeY <= -64 || probeY == -32000) {
+                                g_scanChunkIndex++;
+                                continue;
+                            }
                         }
 
                         // [无规则区块历史探测] 地表采样区块特征提取
@@ -4871,7 +4981,7 @@ LL_TYPE_INSTANCE_HOOK(
                                 }
 
                                 // 3. 计算底层实心方块的基础颜色
-                                mce::Color finalColor(0.08f, 0.08f, 0.08f, 1.0f);
+                                mce::Color finalColor(0.0f, 0.0f, 0.0f, 0.0f);
                                 bool curIsSwamp = IsSwampDualToneBiome(s_biomeName);
                                 BiomeTintTriple curFallbackTriple{s_cachedGrass, s_cachedFoliage, s_cachedWater, curIsSwamp};
                                 if (curIsSwamp) {
@@ -4968,19 +5078,23 @@ LL_TYPE_INSTANCE_HOOK(
                                     finalColor.b *= MapRenderState::roofObsidianDarkening;
                                 }
 
-                                g_mapColorsBack[arrX][arrZ] = finalColor;
+                                if (finalColor.a > 0.01f) {
+                                    g_mapColorsBack[arrX][arrZ] = finalColor;
 
-                                // 6. 采样方块光照与天空光照 (供大地图/小地图光照与昼夜系统使用)
-                                int floorIntrinsic = BlockColorMap::GetIntrinsicBlockLight(blockName);
-                                if (floorIntrinsic > maxIntrinsicLight) maxIntrinsicLight = floorIntrinsic;
-                                uint8_t lightFloor = SafeGetPackedLight(region, targetX, std::clamp(floorY + 1, -64, 319), targetZ, maxIntrinsicLight, true);
-                                if (waterDepth > 0 || overlayCount > 0) {
-                                    uint8_t lightTop = SafeGetPackedLight(region, targetX, std::clamp(highestLightSampleY, -64, 319), targetZ, maxIntrinsicLight, true);
-                                    int skyMax = std::max((lightFloor >> 4) & 0x0F, (lightTop >> 4) & 0x0F);
-                                    int blkMax = std::max(lightFloor & 0x0F, lightTop & 0x0F);
-                                    g_mapLightsBack[arrX][arrZ] = (uint8_t)((skyMax << 4) | blkMax);
-                                } else {
-                                    g_mapLightsBack[arrX][arrZ] = lightFloor;
+                                    // 6. 采样方块光照与天空光照 (供大地图/小地图光照与昼夜系统使用)
+                                    int floorIntrinsic = BlockColorMap::GetIntrinsicBlockLight(blockName);
+                                    if (floorIntrinsic > maxIntrinsicLight) maxIntrinsicLight = floorIntrinsic;
+                                    uint8_t lightFloor = SafeGetPackedLight(region, targetX, std::clamp(floorY + 1, -64, 319), targetZ, maxIntrinsicLight, true);
+                                    if (waterDepth > 0 || overlayCount > 0) {
+                                        uint8_t lightTop = SafeGetPackedLight(region, targetX, std::clamp(highestLightSampleY, -64, 319), targetZ, maxIntrinsicLight, true);
+                                        int skyMax = std::max((lightFloor >> 4) & 0x0F, (lightTop >> 4) & 0x0F);
+                                        int blkMax = std::max(lightFloor & 0x0F, lightTop & 0x0F);
+                                        g_mapLightsBack[arrX][arrZ] = (uint8_t)((skyMax << 4) | blkMax);
+                                    } else {
+                                        g_mapLightsBack[arrX][arrZ] = lightFloor;
+                                    }
+                                } else if (g_mapColorsBack[arrX][arrZ].a <= 0.01f) {
+                                    g_mapColorsBack[arrX][arrZ] = mce::Color(0.0f, 0.0f, 0.0f, 0.0f);
                                 }
                             } else {
                                 // topY <= -64 或 -32000 (区块未就绪/加载中):
@@ -4993,15 +5107,21 @@ LL_TYPE_INSTANCE_HOOK(
                         g_scanChunkIndex++;
                         g_scanRadius = g_scanChunkIndex;
 
-                        // 首个中心区块（玩家脚下区块）完成后立即触发前台更新，确保第 0 帧中心立足点立即可见！
+                        // 首个中心区块（玩家脚下区块）完成后立即触发前台更新与缓存写入，确保第 0 帧中心立足点立即可见并落盘！
                         if (g_scanChunkIndex == 1) {
-                            std::lock_guard<std::mutex> lock(g_mapDataMutex);
-                            std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
-                            std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
-                            std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
-                            g_lastRenderX = g_currentScanX;
-                            g_lastRenderZ = g_currentScanZ;
-                            g_mapDataUpdated.store(true);
+                            {
+                                std::lock_guard<std::mutex> lock(g_mapDataMutex);
+                                std::memcpy(g_mapHeights, g_mapHeightsBack, sizeof(g_mapHeights));
+                                std::memcpy(g_mapColors, g_mapColorsBack, sizeof(g_mapColors));
+                                std::memcpy(g_mapLights, g_mapLightsBack, sizeof(g_mapLights));
+                                g_lastRenderX = g_currentScanX;
+                                g_lastRenderZ = g_currentScanZ;
+                                g_mapDataUpdated.store(true);
+                            }
+                            if (g_scanDimension == MapRenderState::currentDimensionId &&
+                                g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                                SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, false, g_scanBiomeEntries);
+                            }
                         }
 
                         auto now = std::chrono::high_resolution_clock::now();
@@ -5012,8 +5132,9 @@ LL_TYPE_INSTANCE_HOOK(
                         }
                     }
 
-                    // 增量周期性提交 (每 80ms)，实现每秒 12 次高频平滑渲染，杜绝任何可见延迟
+                    // 增量周期性提交 (每 80ms 前台纹理更新，每 500ms 异步磁盘缓存提交)，实现高频平滑渲染与持久化两不误
                     static auto s_lastSurfaceCommit = std::chrono::steady_clock::now();
+                    static auto s_lastSurfaceCacheCommit = std::chrono::steady_clock::now();
                     auto nowSurface = std::chrono::steady_clock::now();
                     if (std::chrono::duration_cast<std::chrono::milliseconds>(nowSurface - s_lastSurfaceCommit).count() >= 80) {
                         s_lastSurfaceCommit = nowSurface;
@@ -5024,6 +5145,13 @@ LL_TYPE_INSTANCE_HOOK(
                         g_lastRenderX = g_currentScanX;
                         g_lastRenderZ = g_currentScanZ;
                         g_mapDataUpdated.store(true);
+                    }
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(nowSurface - s_lastSurfaceCacheCommit).count() >= 500) {
+                        s_lastSurfaceCacheCommit = nowSurface;
+                        if (g_scanDimension == MapRenderState::currentDimensionId &&
+                            g_scanDimension == MapCacheManager::GetLoadedDimensionId()) {
+                            SubmitCacheWrite(g_currentScanX, g_currentScanZ, g_scanDimension, false, g_scanBiomeEntries);
+                        }
                     }
 
                     if (g_scanChunkIndex >= TOTAL_SCAN_CHUNKS) {
