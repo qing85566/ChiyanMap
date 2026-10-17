@@ -14,6 +14,8 @@
 
 > 📖 **Comprehensive Guides**: Detailed documentation and tutorials are available in the [Docs Directory](./docs/README.md).
 
+![ChiyanMap Fullscreen World Map Preview](./assets/worldmap.jpg)
+
 ---
 
 ## 🌟 Key Features
@@ -102,6 +104,7 @@ xmake
 ```text
 ChiyanMap/
 ├── .github/                 # GitHub CI/CD workflows and Issue/PR templates
+├── assets/                  # Media assets and in-game preview screenshots
 ├── docs/                    # Complete user documentation and guides (en/ & zh/ suites)
 ├── heads/                   # High-resolution entity radar icon assets (PNG)
 ├── lang/                    # Localization dictionaries for 16 languages (JSON)

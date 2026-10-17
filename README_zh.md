@@ -14,6 +14,8 @@
 
 > 📖 **全功能使用指南与教程**：欢迎查阅仓库根目录下的 [详细中文文档库 (docs/)](./docs/README_zh.md)。
 
+![ChiyanMap 全屏大地图效果预览](./assets/worldmap.jpg)
+
 ---
 
 ## 🌟 核心特性
@@ -102,6 +104,7 @@ xmake
 ```text
 ChiyanMap/
 ├── .github/                 # GitHub CI/CD 工作流与 Issue/PR 模板
+├── assets/                  # 宣传预览图与界面截图资源
 ├── docs/                    # 完整用户手册与详细使用指南（中英双语完整文档）
 ├── heads/                   # 原版实体与生物雷达高分辨率头像素材（PNG）
 ├── lang/                    # 16 国语言本地化国际化 JSON 翻译字典
