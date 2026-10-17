@@ -92,8 +92,8 @@ mods/ChiyanMap/
 ├── breadcrumbs/*.json             # 探索历史移动足迹
 └── backups/*.json                 # 手动/自动备份快照
 ```
-详尽的各目录职责与文件格式说明，亦可参阅 [运行时目录架构总览](../README_zh.md#运行时目录架构与文件说明-modschiyanmap)。
+详尽的各目录职责与文件格式说明，亦可参阅 [运行时目录架构总览](../README_zh.md#运行时目录架构与文件说明-modschiyanmap)。关于 `config.json` 各配置项的完整逐行注释与取值说明，请查阅 [配置文件注释全解指南 (09-config-json.md)](./09-config-json.md)。
 
 ---
 
-[← 上一章：07 - 种子地图与结构预测](./07-seedmap.md) | [返回文档首页](../README_zh.md)
+[← 上一章：07 - 种子地图与结构预测](./07-seedmap.md) | [下一章：09 - 配置文件注释与参数全解指南 →](./09-config-json.md)

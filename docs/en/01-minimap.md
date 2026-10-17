@@ -24,7 +24,7 @@ Press **`M`** to open the fullscreen World Map and click the gear icon to enter 
 - **Visibility Toggle**: Press **`N`** to instantly hide or show the MiniMap with zero impact on core game rendering.
 
 ### 1.3 Enlarge MiniMap Mode
-Press the default hotkey **`Z`** to activate the temporary zoom view:
+Press the default hotkey **`X`** to activate the temporary zoom view:
 - The MiniMap instantly expands and re-centers on the screen with more than 2x the standard viewing radius.
 - Releasing the key (or toggling it again) immediately returns the map to its corner layout—ideal for rapid tactical orientation in caves or intense combat.
 

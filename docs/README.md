@@ -18,6 +18,7 @@ Welcome to the comprehensive user manual and configuration guide for **ChiyanMap
 | **06** | [World Map Freehand Drawing & Annotations](./en/06-drawing-annotations.md) | Freehand pens, polylines, arrows, geometric shapes, text labels, multi-layer management, and full undo (`Ctrl+Z`) / redo (`Ctrl+Y`) |
 | **07** | [Seed Map & Structure Predictions](./en/07-seedmap.md) | World seed auto-capture, full structure predictions (Villages, Strongholds, Ancient Cities, etc.), slime chunk overlays, and biome preview |
 | **08** | [Hotkeys, Settings & Performance Tuning](./en/08-settings-and-hotkeys.md) | Single-key/combo rebinding, real-time search filters, factory reset, SQLite WAL storage engine, and multi-threaded write batching |
+| **09** | [Configuration File (config.json) Reference](./en/09-config-json.md) | Exhaustive annotated JSON dictionary, data types, value ranges, defaults, and tuning notes for `config.json` |
 
 ---
 
@@ -30,7 +31,7 @@ Welcome to the comprehensive user manual and configuration guide for **ChiyanMap
 | **`N`** | Toggle MiniMap Visibility | In-game anytime |
 | **`Y`** | Toggle MiniMap Shape (Circle ⟷ Square) | In-game anytime |
 | **`J`** | Toggle MiniMap Rotation (Player Rotation ⟷ Locked to North) | In-game anytime |
-| **`Z`** | Temporarily Enlarge MiniMap | In-game anytime |
+| **`X`** | Temporarily Enlarge MiniMap | In-game anytime |
 | **`[` / `]`** | Switch to Previous / Next Waypoint Set (Toast notification) | In-game anytime |
 | **`Tab` (Hold)** | Temporarily Show / Hide Entity Heads on World Map | World Map active |
 | **`Shift` + Drag** | Select Box to Export High-Resolution PNG | World Map active |

@@ -93,8 +93,8 @@ mods/ChiyanMap/
 └── backups/*.json                 # Manual and automated snapshot archives
 ```
 
-For detailed component descriptions, see the [Runtime Directory Structure Guide](../README.md#runtime-directory-structure--file-breakdown-modschiyanmap).
+For detailed component descriptions, see the [Runtime Directory Structure Guide](../README.md#runtime-directory-structure--file-breakdown-modschiyanmap). For line-by-line annotations and parameter definitions for `config.json`, see the [Configuration File Reference Guide (09-config-json.md)](./09-config-json.md).
 
 ---
 
-[← Previous Chapter: 07 - Seed Map & Structure Predictions](./07-seedmap.md) | [Back to Docs Index](../README.md)
+[← Previous Chapter: 07 - Seed Map & Structure Predictions](./07-seedmap.md) | [Next Chapter: 09 - Configuration File Annotated Reference →](./09-config-json.md)
