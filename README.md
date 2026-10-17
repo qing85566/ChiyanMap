@@ -118,7 +118,7 @@ ChiyanMap/
 │   ├── render/              # Shading, textures, and atlas rendering
 │   │   ├── BlockColorMap.h/.cpp # Block ID/State to RGBA color and elevation hillshading
 │   │   ├── EntityIconManager.h  # Entity head icon texture loading, caching, and radar rendering
-│   │   └── XaeroGuiAtlas.h      # Procedural and vector GUI icon atlas rendering
+│   │   └── MapGuiAtlas.h        # Procedural and vector GUI icon atlas rendering
 │   ├── state/               # State machine, data models, and business logic
 │   │   ├── AnarchyManager.h/.cpp     # Anarchy chunk modification history and footprint detection
 │   │   ├── DatabaseManager.h/.cpp    # Persistent storage and caching backend

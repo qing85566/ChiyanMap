@@ -8,9 +8,9 @@
 
 #pragma comment(lib, "shlwapi.lib")
 
-namespace XaeroGuiAtlas {
+namespace MapGuiAtlas {
 
-inline const unsigned char kXaeroGuiPngData[] = {
+inline const unsigned char kMapGuiPngData[] = {
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x06, 0x00, 0x00, 0x00, 0x5c, 0x72, 0xa8,
     0x66, 0x00, 0x00, 0x00, 0x09, 0x70, 0x48, 0x59, 0x73, 0x00, 0x00, 0x0b, 0x13, 0x00, 0x00, 0x0b,
@@ -507,10 +507,10 @@ inline const unsigned char kXaeroGuiPngData[] = {
     0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
 };
 
-inline ID3D11ShaderResourceView* g_xaeroGuiSRV = nullptr;
+inline ID3D11ShaderResourceView* g_mapGuiSRV = nullptr;
 
-inline ID3D11ShaderResourceView* GetXaeroGuiSRV(ID3D11Device* pDevice) {
-    if (g_xaeroGuiSRV) return g_xaeroGuiSRV;
+inline ID3D11ShaderResourceView* GetMapGuiSRV(ID3D11Device* pDevice) {
+    if (g_mapGuiSRV) return g_mapGuiSRV;
     if (!pDevice) return nullptr;
 
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -526,7 +526,7 @@ inline ID3D11ShaderResourceView* GetXaeroGuiSRV(ID3D11Device* pDevice) {
         return nullptr;
     }
 
-    IStream* pStream = SHCreateMemStream(kXaeroGuiPngData, sizeof(kXaeroGuiPngData));
+    IStream* pStream = SHCreateMemStream(kMapGuiPngData, sizeof(kMapGuiPngData));
     if (!pStream) {
         pFactory->Release();
         if (needUninit) CoUninitialize();
@@ -625,17 +625,17 @@ inline ID3D11ShaderResourceView* GetXaeroGuiSRV(ID3D11Device* pDevice) {
     ID3D11Texture2D* pTexture = nullptr;
     hr = pDevice->CreateTexture2D(&desc, &initData, &pTexture);
     if (SUCCEEDED(hr) && pTexture) {
-        hr = pDevice->CreateShaderResourceView(pTexture, nullptr, &g_xaeroGuiSRV);
+        hr = pDevice->CreateShaderResourceView(pTexture, nullptr, &g_mapGuiSRV);
         pTexture->Release();
     }
 
-    return g_xaeroGuiSRV;
+    return g_mapGuiSRV;
 }
 
-inline void ReleaseXaeroGuiSRV() {
-    if (g_xaeroGuiSRV) {
-        g_xaeroGuiSRV->Release();
-        g_xaeroGuiSRV = nullptr;
+inline void ReleaseMapGuiSRV() {
+    if (g_mapGuiSRV) {
+        g_mapGuiSRV->Release();
+        g_mapGuiSRV = nullptr;
     }
 }
 
@@ -670,4 +670,4 @@ inline constexpr Sprite SPRITE_WP_HIDE_DISABLED  = {149, 16, 16, 16};
 inline constexpr Sprite SPRITE_WP_CLOSE_ON_HOP   = {181, 16, 16, 16};
 inline constexpr Sprite SPRITE_WP_KEEP_ON_HOP    = {197, 16, 16, 16};
 
-} // namespace XaeroGuiAtlas
+} // namespace MapGuiAtlas

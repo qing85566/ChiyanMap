@@ -118,7 +118,7 @@ ChiyanMap/
 │   ├── render/              # 贴图、着色与图集渲染层
 │   │   ├── BlockColorMap.h/.cpp # 方块 ID/State 转地图着色与高程阴影算法
 │   │   ├── EntityIconManager.h  # 实体头像纹理加载、缓存与雷达标记渲染
-│   │   └── XaeroGuiAtlas.h      # 矢量与程序化 GUI 图集渲染
+│   │   └── MapGuiAtlas.h        # 矢量与程序化 GUI 图集渲染
 │   ├── state/               # 核心状态机、数据模型与业务管理器
 │   │   ├── AnarchyManager.h/.cpp     # 无规则区块历史变动与建筑痕迹探测
 │   │   ├── DatabaseManager.h/.cpp    # 本地数据持久化存储底层
