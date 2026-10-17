@@ -1417,8 +1417,11 @@ namespace LanguageManager {
                 } else {
                     MapRenderState::globalUIScale = MapRenderState::GetOptimalUIScale();
                 }
-                if (MapRenderState::globalUIScale <= 0.0f) {
-                    MapRenderState::globalUIScale = MapRenderState::GetOptimalUIScale();
+                if (MapRenderState::globalUIScale < 0.50f) {
+                    MapRenderState::globalUIScale = (MapRenderState::globalUIScale <= 0.0f) ? MapRenderState::GetOptimalUIScale() : 0.50f;
+                }
+                if (MapRenderState::globalUIScale > 2.50f) {
+                    MapRenderState::globalUIScale = 2.50f;
                 }
                 MapRenderState::miniMapScale = j.value("miniMapScale", 1.0f);
                 MapRenderState::miniMapZoomRadius = j.value("miniMapZoomRadius", 50.0f);
@@ -1541,7 +1544,7 @@ namespace LanguageManager {
                 MapRenderState::show3DWaypointDistance = j.value("show3DWaypointDistance", true);
 
                 MapRenderState::waypoint3DClampToScreen = j.value("waypoint3DClampToScreen", true);
-                MapRenderState::waypoint3DMaxDistance = j.value("waypoint3DMaxDistance", 5000);
+                MapRenderState::waypoint3DMaxDistance = std::clamp(j.value("waypoint3DMaxDistance", 5000), 0, 10000);
                 MapRenderState::waypoint3DBeamOpacity = std::clamp(j.value("waypoint3DBeamOpacity", 0.65f), 0.10f, 1.00f);
                 MapRenderState::waypoint3DBeamRadius = std::clamp(j.value("waypoint3DBeamRadius", 0.40f), 0.10f, 1.50f);
                 MapRenderState::waypoint3DScale = std::clamp(j.value("waypoint3DScale", 1.0f), 0.50f, 2.00f);
@@ -1757,6 +1760,7 @@ namespace LanguageManager {
         j["showMiniMap"] = MapRenderState::showMiniMap;
         j["isSquareMap"] = MapRenderState::isSquareMap;
         j["rotateMiniMap"] = MapRenderState::rotateMiniMap;
+        MapRenderState::globalUIScale = std::clamp(MapRenderState::globalUIScale, 0.50f, 2.50f);
         j["globalUIScale"] = MapRenderState::globalUIScale;
         j["uiTextScale"] = MapRenderState::globalUIScale;
         j["miniMapScale"] = MapRenderState::miniMapScale;
@@ -1871,10 +1875,10 @@ namespace LanguageManager {
         j["show3DWaypointDistance"] = MapRenderState::show3DWaypointDistance;
 
         j["waypoint3DClampToScreen"] = MapRenderState::waypoint3DClampToScreen;
-        j["waypoint3DMaxDistance"] = MapRenderState::waypoint3DMaxDistance;
+        j["waypoint3DMaxDistance"] = std::clamp(MapRenderState::waypoint3DMaxDistance, 0, 10000);
         j["waypoint3DBeamOpacity"] = MapRenderState::waypoint3DBeamOpacity;
         j["waypoint3DBeamRadius"] = MapRenderState::waypoint3DBeamRadius;
-        j["waypoint3DScale"] = MapRenderState::waypoint3DScale;
+        j["waypoint3DScale"] = std::clamp(MapRenderState::waypoint3DScale, 0.50f, 2.00f);
         j["show3DDeathpoints"] = MapRenderState::show3DDeathpoints;
 
         // 无规则与区块历史探测

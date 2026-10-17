@@ -1353,17 +1353,17 @@ inline void GetBlendedBiomeTints(BlockSource& region, int targetX, int targetZ, 
 #include "render/BlockColorMap.h"
 
 // [辅助] 判断方块是否为隐形/技术性覆盖方块（地图扫描应穿透保留底层方块，不渲染为黑洞或杂色）
-inline bool IsInvisibleOrTechnicalOverlay(std::string const& rawName) noexcept {
+inline bool IsInvisibleOrTechnicalOverlay(std::string_view rawName) noexcept {
     return BlockColorMap::IsInvisibleOrTechnicalOverlay(rawName);
 }
 
 // [原木与菌柄判断] 检测方块是否为有年轮/树皮朝向区分的原木或菌柄
-inline bool IsPillarLogOrStem(std::string const& rawName) noexcept {
+inline bool IsPillarLogOrStem(std::string_view rawName) noexcept {
     return BlockColorMap::IsPillarLogOrStem(rawName);
 }
 
 // [水平放置原木转树皮名称] 水平放置时映射为对应树皮材质 (_log -> _wood, _stem -> _hyphae)
-inline std::string GetHorizontalWoodName(std::string const& name) {
+inline std::string GetHorizontalWoodName(std::string_view name) {
     return BlockColorMap::GetHorizontalWoodName(name);
 }
 
@@ -1527,26 +1527,26 @@ inline bool IsAirLikeName(std::string const& name) noexcept {
 // [辅助] 判断方块名是否为"石头类"灰色污染候选
 // 地表扫描中, 部分加载区块 SafeGetSurfaceY 可能返回洞穴天花板Y, 读取到石头/深板岩等,
 // 写入缓存造成地表大地图灰色块状污染。检测到此类方块时回退查缓存地表Y重新读取。
-inline bool IsStoneLikeBlock(std::string const& name) noexcept {
+inline bool IsStoneLikeBlock(std::string_view name) noexcept {
     // stone 必须先于 sandstone/redstone 等含 "stone" 子串的非石头方块排除
-    if (name.find("sandstone") != std::string::npos) return false;
-    if (name.find("redstone") != std::string::npos) return false;
-    if (name.find("glowstone") != std::string::npos) return false;
-    if (name.find("lodestone") != std::string::npos) return false;
-    if (name.find("end_stone") != std::string::npos) return false;
-    if (name.find("blackstone") != std::string::npos) return false;
-    if (name.find("dripstone") != std::string::npos) return false;
-    if (name.find("moss_block") != std::string::npos) return false;
+    if (name.find("sandstone") != std::string_view::npos) return false;
+    if (name.find("redstone") != std::string_view::npos) return false;
+    if (name.find("glowstone") != std::string_view::npos) return false;
+    if (name.find("lodestone") != std::string_view::npos) return false;
+    if (name.find("end_stone") != std::string_view::npos) return false;
+    if (name.find("blackstone") != std::string_view::npos) return false;
+    if (name.find("dripstone") != std::string_view::npos) return false;
+    if (name.find("moss_block") != std::string_view::npos) return false;
     // 真正的石头类: stone/cobblestone/andesite/diorite/granite/deepslate/tuff/bedrock/gravel
-    return name.find("stone") != std::string::npos ||
-           name.find("cobble") != std::string::npos ||
-           name.find("andesite") != std::string::npos ||
-           name.find("diorite") != std::string::npos ||
-           name.find("granite") != std::string::npos ||
-           name.find("deepslate") != std::string::npos ||
-           name.find("tuff") != std::string::npos ||
-           name.find("bedrock") != std::string::npos ||
-           name.find("gravel") != std::string::npos;
+    return name.find("stone") != std::string_view::npos ||
+           name.find("cobble") != std::string_view::npos ||
+           name.find("andesite") != std::string_view::npos ||
+           name.find("diorite") != std::string_view::npos ||
+           name.find("granite") != std::string_view::npos ||
+           name.find("deepslate") != std::string_view::npos ||
+           name.find("tuff") != std::string_view::npos ||
+           name.find("bedrock") != std::string_view::npos ||
+           name.find("gravel") != std::string_view::npos;
 }
 
 // ==========================================

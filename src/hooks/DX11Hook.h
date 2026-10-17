@@ -50,6 +50,7 @@
 #include "state/DrawingManager.h"
 #include "state/SpecialGridManager.h"
 #include "state/DatabaseManager.h"
+#include "hooks/InputIMEHelper.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -664,196 +665,8 @@ namespace DX11Hook {
         if (oExecuteCommandLists) oExecuteCommandLists(pQueue, NumCommandLists, ppCommandLists);
     }
 
-    // 【原生独立输入系统】悬浮宿主模式，归属于游戏窗口但无跨线程死锁，支持完整的中文及多语言输入法
-    namespace NativeIME {
-        inline std::atomic<bool> isTyping{false};
-        inline char* targetBuffer = nullptr;
-        inline size_t targetBufferSize = 0;
-        inline char localBuffer[512] = {0};
-        inline WNDPROC oEditProc = nullptr;
-        inline HWND hImeWnd = nullptr;
-
-        inline std::wstring Utf8ToUtf16(const std::string& utf8) {
-            if (utf8.empty()) return L"";
-            int sizeNeeded = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.length(), NULL, 0);
-            if (sizeNeeded <= 0) return L"";
-            std::wstring result(sizeNeeded, 0);
-            MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.length(), &result[0], sizeNeeded);
-            return result;
-        }
-
-        inline std::string Utf16ToUtf8(const std::wstring& utf16) {
-            if (utf16.empty()) return "";
-            int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), (int)utf16.length(), NULL, 0, NULL, NULL);
-            if (sizeNeeded <= 0) return "";
-            std::string result(sizeNeeded, 0);
-            WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), (int)utf16.length(), &result[0], sizeNeeded, NULL, NULL);
-            return result;
-        }
-
-        inline void Close() {
-            if (isTyping.load() && hImeWnd) {
-                PostMessage(hImeWnd, WM_CLOSE, 0, 0);
-                isTyping = false;
-            }
-        }
-
-        inline LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-            // 【修复系统快捷键】将 F1~F24 快捷键透传给游戏窗口 (例如 F11 全屏切换)
-            if (msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
-                if (wParam >= VK_F1 && wParam <= VK_F24) {
-                    PostMessage(g_hWnd, msg, wParam, lParam);
-                    return 0; // 拦截掉，防止发给文本框产生无效音效
-                }
-            }
-            if (msg == WM_KEYDOWN) {
-                if (wParam == VK_RETURN) { // 回车确认
-                    NativeIME::Close();
-                    return 0;
-                } else if (wParam == VK_ESCAPE) { // Esc取消
-                    NativeIME::Close();
-                    return 0;
-                }
-            }
-            // 【修复光标被隐形/覆盖】Windows 默认的文本光标 (I-Beam) 是纯黑色细线，在深灰背景下会完全隐形！
-            // 这里我们强制将鼠标悬浮在输入框时也显示为系统的白色标准箭头，确保它在最顶层绝对可见！
-            if (msg == WM_SETCURSOR) {
-                SetCursor(LoadCursor(NULL, IDC_ARROW));
-                return TRUE;
-            }
-            return CallWindowProc(oEditProc, hwnd, msg, wParam, lParam);
-        }
-
-        inline void Open(char* buf, size_t bufSize, const char* title) {
-            if (isTyping.load()) {
-                Close();
-                if (targetBuffer == buf) return; // 再次点击同一按钮则仅仅是关闭
-            }
-            isTyping = true;
-            targetBuffer = buf;
-            targetBufferSize = bufSize;
-            strncpy_s(localBuffer, sizeof(localBuffer), buf ? buf : "", _TRUNCATE);
-
-            std::thread([]() {
-                WNDCLASSW wc = {0};
-                wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
-                    if (msg == WM_CREATE) {
-                        // 文本框右侧留出 32 像素给关闭按钮 (X)
-                        HWND hEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
-                            10, 10, 270, 22, hwnd, (HMENU)1, NULL, NULL);
-                        
-                        std::wstring wInit = Utf8ToUtf16(localBuffer);
-                        SendMessageW(hEdit, WM_SETTEXT, 0, (LPARAM)wInit.c_str());
-                        SendMessageW(hEdit, EM_SETSEL, (WPARAM)wInit.length(), (LPARAM)wInit.length());
-                        oEditProc = (WNDPROC)SetWindowLongPtr(hEdit, GWLP_WNDPROC, (LONG_PTR)EditProc);
-                        
-                        static HFONT s_imeFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-                        SendMessage(hEdit, WM_SETFONT, (WPARAM)s_imeFont, MAKELPARAM(FALSE, 0));
-                    } else if (msg == WM_COMMAND) {
-                        // 【核心优化：实时 UTF-8 双向同步】输入变更时，立即转为 UTF-8 写入目标缓冲
-                        if (HIWORD(wParam) == EN_CHANGE) {
-                            HWND hEdit = (HWND)lParam;
-                            int len = GetWindowTextLengthW(hEdit);
-                            if (len >= 0) {
-                                std::wstring wStr(len + 1, 0);
-                                GetWindowTextW(hEdit, &wStr[0], len + 1);
-                                wStr.resize(len);
-                                std::string u8Text = Utf16ToUtf8(wStr);
-                                strncpy_s(localBuffer, sizeof(localBuffer), u8Text.c_str(), _TRUNCATE);
-                                if (targetBuffer) {
-                                    strncpy_s(targetBuffer, targetBufferSize, u8Text.c_str(), _TRUNCATE);
-                                }
-                            }
-                        }
-                    } else if (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORSTATIC) {
-                        HDC hdc = (HDC)wParam;
-                        SetTextColor(hdc, RGB(240, 240, 240)); 
-                        SetBkColor(hdc, RGB(35, 35, 35));      
-                        static HBRUSH hBrush = CreateSolidBrush(RGB(35, 35, 35));
-                        return (LRESULT)hBrush;
-                    } else if (msg == WM_PAINT) {
-                        PAINTSTRUCT ps;
-                        HDC hdc = BeginPaint(hwnd, &ps);
-                        RECT rc; GetClientRect(hwnd, &rc);
-                        HBRUSH bg = CreateSolidBrush(RGB(35, 35, 35));
-                        FillRect(hdc, &rc, bg);
-                        DeleteObject(bg);
-                        
-                        // 绘制边框
-                        HPEN pen = CreatePen(PS_SOLID, 2, RGB(80, 80, 80));
-                        HGDIOBJ oldPen = SelectObject(hdc, pen);
-                        MoveToEx(hdc, 0, 0, NULL);
-                        LineTo(hdc, rc.right, 0);
-                        LineTo(hdc, rc.right, rc.bottom);
-                        LineTo(hdc, 0, rc.bottom);
-                        LineTo(hdc, 0, 0);
-                        SelectObject(hdc, oldPen);
-                        DeleteObject(pen);
-                        
-                        // 绘制关闭按钮 (X)
-                        SetBkMode(hdc, TRANSPARENT);
-                        SetTextColor(hdc, RGB(220, 80, 80));
-                        RECT rcX = { rc.right - 28, 0, rc.right, rc.bottom };
-                        DrawTextW(hdc, L"X", -1, &rcX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-                        EndPaint(hwnd, &ps);
-                        return 0;
-                    } else if (msg == WM_LBUTTONDOWN) {
-                        int x = LOWORD(lParam);
-                        int y = HIWORD(lParam);
-                        RECT rc; GetClientRect(hwnd, &rc);
-                        if (x >= rc.right - 30 && x <= rc.right && y >= 0 && y <= rc.bottom) {
-                            NativeIME::Close();
-                        }
-                    } else if (msg == WM_SETCURSOR) {
-                        // 【修复指针覆盖问题】强制此小窗口内显示标准箭头鼠标
-                        SetCursor(LoadCursor(NULL, IDC_ARROW));
-                        return TRUE;
-                    } else if (msg == WM_CLOSE) {
-                        isTyping = false;
-                        PostQuitMessage(0);
-                    }
-                    return DefWindowProcW(hwnd, msg, wParam, lParam);
-                };
-                wc.hInstance = GetModuleHandle(NULL);
-                wc.lpszClassName = L"NativeIMEWnd";
-                RegisterClassW(&wc);
-
-                RECT rcGame;
-                if (g_hWnd) {
-                    GetClientRect(g_hWnd, &rcGame);
-                    ClientToScreen(g_hWnd, (LPPOINT)&rcGame.left);
-                    ClientToScreen(g_hWnd, (LPPOINT)&rcGame.right);
-                } else {
-                    rcGame = {0, 0, 1920, 1080}; 
-                }
-                int w = 320; int h = 42;
-                int x = rcGame.left + (rcGame.right - rcGame.left - w) / 2;
-                int y = rcGame.top + (rcGame.bottom - rcGame.top - h) / 2;
-
-                HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"NativeIMEWnd", L"",
-                    WS_POPUP, x, y, w, h, g_hWnd, NULL, wc.hInstance, NULL);
-
-                hImeWnd = hwnd;
-                ShowWindow(hwnd, SW_SHOW);
-                UpdateWindow(hwnd);
-                
-                SetForegroundWindow(hwnd);
-                SetFocus(GetDlgItem(hwnd, 1)); // 精确聚焦到输入框子控件
-
-                MSG msg;
-                while (GetMessage(&msg, NULL, 0, 0)) {
-                    TranslateMessage(&msg);
-                    DispatchMessage(&msg);
-                }
-
-                hImeWnd = nullptr;
-                UnregisterClassW(L"NativeIMEWnd", wc.hInstance);
-            }).detach();
-        }
-    }
+    namespace NativeIME = InputIMEHelper;
+    using InputIMEHelper::InputTextWithIME;
 
     inline ImGuiKey VirtualKeyToImGuiKey(int vk) {
         if (vk >= '0' && vk <= '9') return (ImGuiKey)(ImGuiKey_0 + (vk - '0'));
@@ -937,6 +750,23 @@ namespace DX11Hook {
 
         // 【防暂停黑科技】欺骗游戏底层，防止因为唤出原生的中文输入窗口导致游戏自动暂停！
         if (isNativeTyping) {
+            // 当用户在当前输入框之外点击鼠标时，立即关闭原生输入控件并解除焦点脱离光标
+            if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN) {
+                POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+                ClientToScreen(hWnd, &pt);
+                int tx = NativeIME::targetX.load();
+                int ty = NativeIME::targetY.load();
+                int tw = NativeIME::targetW.load();
+                int th = NativeIME::targetH.load();
+                if (pt.x < tx || pt.x > tx + tw || pt.y < ty || pt.y > ty + th) {
+                    NativeIME::Close();
+                    isNativeTyping = false;
+                }
+            } else if (uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN || uMsg == WM_NCMBUTTONDOWN) {
+                NativeIME::Close();
+                isNativeTyping = false;
+            }
+
             if (uMsg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE) return 0;
             if (uMsg == WM_ACTIVATEAPP && wParam == FALSE) return 0;
             if (uMsg == WM_KILLFOCUS) return 0;
@@ -1558,10 +1388,12 @@ namespace DX11Hook {
             bool isCave = (MapRenderState::currentDimensionId == 1 || MapRenderState::g_caveModeActive);
             int curDim = MapRenderState::currentDimensionId;
             bool enableLighting = MapRenderState::mapLighting;
+            float skyBright = MapRenderState::ComputeSkyLightBrightness(MapRenderState::g_gameTimeTicks.load(), curDim, false);
 
-            for (int x = 0; x < MAP_DATA_SIZE; x++) {
-                for (int z = 0; z < MAP_DATA_SIZE; z++) {
-                    int index = (z * MAP_DATA_SIZE + x) * 4;
+            for (int z = 0; z < MAP_DATA_SIZE; z++) {
+                int rowOffset = z * MAP_DATA_SIZE;
+                for (int x = 0; x < MAP_DATA_SIZE; x++) {
+                    int index = (rowOffset + x) * 4;
                     mce::Color col = localColors[x][z];
 
                     if (col.a > 0.01f) {
@@ -1581,7 +1413,7 @@ namespace DX11Hook {
                         float fr = std::clamp(col.r * shade, 0.0f, 1.0f);
                         float fg = std::clamp(col.g * shade, 0.0f, 1.0f);
                         float fb = std::clamp(col.b * shade, 0.0f, 1.0f);
-                        MapRenderState::ApplyMapLighting(fr, fg, fb, localLights[x][z], isCave, curDim, enableLighting, false);
+                        MapRenderState::ApplyMapLightingPrecomputed(fr, fg, fb, localLights[x][z], isCave, curDim, enableLighting, skyBright);
 
                         bakedData[index]     = (uint8_t)(std::clamp(fr, 0.0f, 1.0f) * 255.0f);
                         bakedData[index + 1] = (uint8_t)(std::clamp(fg, 0.0f, 1.0f) * 255.0f);
@@ -2184,7 +2016,9 @@ namespace DX11Hook {
         float uiScale = std::clamp(MapRenderState::globalUIScale * MapRenderState::waypoint3DScale, 0.25f, 3.0f);
         float edgePad = 38.0f * uiScale;
 
-        std::vector<Waypoint3DEntry> entries;
+        static std::vector<Waypoint3DEntry> s_3dEntries;
+        s_3dEntries.clear();
+        auto& entries = s_3dEntries;
 
         // 收集常规路径点
         {
@@ -2680,11 +2514,19 @@ namespace DX11Hook {
         // [小地图多行 HUD 信息显示系统]
         // ==========================================
         struct InfoLine {
-            std::string text;
+            char text[128];
             ImU32 color;
         };
-        std::vector<InfoLine> hudLines;
-        hudLines.reserve(5);
+        InfoLine hudLines[8];
+        int hudLineCount = 0;
+
+        auto addHudLine = [&](const char* str, ImU32 col) {
+            if (hudLineCount < 8 && str && str[0] != '\0') {
+                strncpy_s(hudLines[hudLineCount].text, sizeof(hudLines[hudLineCount].text), str, _TRUNCATE);
+                hudLines[hudLineCount].color = col;
+                hudLineCount++;
+            }
+        };
 
         // 1. 坐标与下界/主世界双向换算
         if (MapRenderState::infoShowCoords) {
@@ -2706,7 +2548,7 @@ namespace DX11Hook {
                 snprintf(coordBuf, sizeof(coordBuf), "%d, %d, %d",
                     g_playerBlockX, (int)std::floor(g_playerY), g_playerBlockZ);
             }
-            hudLines.push_back({ coordBuf, IM_COL32(255, 255, 255, 255) });
+            addHudLine(coordBuf, IM_COL32(255, 255, 255, 255));
         }
 
         // 1.5. 区块局部坐标与区块索引
@@ -2718,7 +2560,7 @@ namespace DX11Hook {
             char chunkBuf[96];
             snprintf(chunkBuf, sizeof(chunkBuf), "%s: [%d, %d] in [%d, %d]",
                 LanguageManager::GetText("LABEL_CHUNK"), lx, lz, cxIdx, czIdx);
-            hudLines.push_back({ chunkBuf, IM_COL32(200, 225, 255, 255) });
+            addHudLine(chunkBuf, IM_COL32(200, 225, 255, 255));
         }
 
         // 2. 玩家朝向及轴向与角度
@@ -2767,7 +2609,7 @@ namespace DX11Hook {
             char facingBuf[96];
             snprintf(facingBuf, sizeof(facingBuf), "%s: %s (%s) (%.1f\xc2\xb0)",
                 LanguageManager::GetText("LABEL_FACING"), dirStr, axisStr, normYaw);
-            hudLines.push_back({ facingBuf, IM_COL32(230, 230, 255, 255) });
+            addHudLine(facingBuf, IM_COL32(230, 230, 255, 255));
         }
 
         // 2.5. 精准视线角度 (水平偏航角 Yaw 与 垂直俯仰角 Pitch)
@@ -2780,12 +2622,12 @@ namespace DX11Hook {
             char angleBuf[96];
             snprintf(angleBuf, sizeof(angleBuf), "%s: %.1f\xc2\xb0 / %.1f\xc2\xb0",
                 LanguageManager::GetText("LABEL_ANGLES"), normYaw, normPitch);
-            hudLines.push_back({ angleBuf, IM_COL32(230, 230, 255, 255) });
+            addHudLine(angleBuf, IM_COL32(230, 230, 255, 255));
         }
 
         // 3. 生物群系 (直接显示群系名称，不带前缀)
         if (MapRenderState::infoShowBiome && !MapRenderState::translatedBiomeName.empty()) {
-            hudLines.push_back({ MapRenderState::translatedBiomeName, IM_COL32(200, 240, 200, 255) });
+            addHudLine(MapRenderState::translatedBiomeName.c_str(), IM_COL32(200, 240, 200, 255));
         }
 
         // 3.2. 实时天气状态 (晴天 / 降雨 / 降雪 / 雷暴)
@@ -2818,7 +2660,7 @@ namespace DX11Hook {
             char weatherBuf[96];
             snprintf(weatherBuf, sizeof(weatherBuf), "%s: %s",
                 LanguageManager::GetText("LABEL_WEATHER"), weatherStr);
-            hudLines.push_back({ weatherBuf, weatherCol });
+            addHudLine(weatherBuf, weatherCol);
         }
 
         // 3.5. 实时光照等级 (方块光照 / 天空光照)
@@ -2833,7 +2675,7 @@ namespace DX11Hook {
                     LanguageManager::GetText("LABEL_BLOCK_LIGHT"), bl,
                     LanguageManager::GetText("LABEL_SKY_LIGHT"), sl);
                 ImU32 lightCol = (totalL <= 0) ? IM_COL32(255, 120, 100, 255) : IM_COL32(255, 235, 140, 255);
-                hudLines.push_back({ lightBuf, lightCol });
+                addHudLine(lightBuf, lightCol);
             }
         }
 
@@ -2879,19 +2721,19 @@ namespace DX11Hook {
             } else {
                 snprintf(timeBuf, sizeof(timeBuf), "%s", realTimeBuf);
             }
-            hudLines.push_back({ timeBuf, IM_COL32(255, 240, 180, 255) });
+            addHudLine(timeBuf, IM_COL32(255, 240, 180, 255));
         }
 
         // 统一绘制 HUD 文本
-        if (!hudLines.empty()) {
+        if (hudLineCount > 0) {
             bool inUpperHalf = (cy <= displayH * 0.5f);
             float availableH = inUpperHalf ? (displayH - (cy + IM_MAP_R + 14.0f) - 8.0f)
                                            : (cy - IM_MAP_R - 14.0f - 8.0f);
-            float maxFitFontSize = (availableH > 20.0f) ? (availableH / (hudLines.size() * 1.25f)) : fontSize;
+            float maxFitFontSize = (availableH > 20.0f) ? (availableH / (hudLineCount * 1.25f)) : fontSize;
             float hudFontSize = std::clamp(fontSize, 11.0f, std::max(11.0f, maxFitFontSize));
 
             float lineSpacing = hudFontSize * 1.25f;
-            float totalTextHeight = (hudLines.size() - 1) * lineSpacing + hudFontSize;
+            float totalTextHeight = (hudLineCount - 1) * lineSpacing + hudFontSize;
 
             // 检查小地图下方是否能容纳全部文本信息
             float textTopBelow = cy + IM_MAP_R + 12.0f + hudFontSize;
@@ -2907,12 +2749,13 @@ namespace DX11Hook {
             } else {
                 // 下方空间不足，将所有文本移至小地图上方（从上至下排列）
                 float bottomLineY = cy - IM_MAP_R - 12.0f - hudFontSize;
-                lineY = bottomLineY - (hudLines.size() - 1) * lineSpacing;
+                lineY = bottomLineY - (hudLineCount - 1) * lineSpacing;
                 if (lineY < 6.0f) lineY = 6.0f; // 顶部安全防溢出边界
             }
 
-            for (const auto& item : hudLines) {
-                ImVec2 txtSize = font->CalcTextSizeA(hudFontSize, FLT_MAX, 0.0f, item.text.c_str());
+            for (int i = 0; i < hudLineCount; ++i) {
+                const auto& item = hudLines[i];
+                ImVec2 txtSize = font->CalcTextSizeA(hudFontSize, FLT_MAX, 0.0f, item.text);
                 float padX = std::clamp(6.0f * (hudFontSize / 18.0f), 5.0f, 12.0f);
                 float padY = std::clamp(2.0f * (hudFontSize / 18.0f), 1.0f, 4.0f);
                 float lineX = cx - txtSize.x * 0.5f;
@@ -2932,8 +2775,8 @@ namespace DX11Hook {
                         ImVec2(txtPos.x + txtSize.x + padX, txtPos.y + txtSize.y + padY),
                         IM_COL32(15, 15, 15, 140), 4.0f);
                 }
-                draw_list->AddText(font, hudFontSize, ImVec2(txtPos.x + 1.0f, txtPos.y + 1.0f), IM_COL32(0, 0, 0, 220), item.text.c_str());
-                draw_list->AddText(font, hudFontSize, txtPos, item.color, item.text.c_str());
+                draw_list->AddText(font, hudFontSize, ImVec2(txtPos.x + 1.0f, txtPos.y + 1.0f), IM_COL32(0, 0, 0, 220), item.text);
+                draw_list->AddText(font, hudFontSize, txtPos, item.color, item.text);
                 lineY += lineSpacing;
             }
         }
@@ -3434,7 +3277,9 @@ namespace DX11Hook {
                 WaypointLabelAABB labelBox;
             };
 
-            std::vector<MiniMapWpItem> items;
+            static std::vector<MiniMapWpItem> s_miniMapItems;
+            s_miniMapItems.clear();
+            auto& items = s_miniMapItems;
             items.reserve(WaypointManager::g_waypoints.size());
 
             for (const auto& wp : WaypointManager::g_waypoints) {
@@ -3527,7 +3372,9 @@ namespace DX11Hook {
             if (MapRenderState::declutterWaypointLabels) {
                 // 近距离轻量聚合
                 float clusterThreshSq = (8.0f * MapRenderState::globalUIScale) * (8.0f * MapRenderState::globalUIScale);
-                std::vector<bool> merged(items.size(), false);
+                static std::vector<uint8_t> s_merged;
+                s_merged.assign(items.size(), 0);
+                auto& merged = s_merged;
                 for (size_t i = 0; i < items.size(); ++i) {
                     if (!items[i].inMap || merged[i]) continue;
                     for (size_t j = i + 1; j < items.size(); ++j) {
@@ -4045,24 +3892,9 @@ namespace DX11Hook {
                 float spacing = ImGui::GetStyle().ItemSpacing.x;
                 float searchW = availW - resetBtnW - spacing;
                 if (hasSearch) searchW -= (iconBtnW + spacing);
-                searchW -= (iconBtnW + spacing);
 
                 ImGui::SetNextItemWidth(std::max(searchW, 80.0f * curScale));
-                ImGui::InputTextWithHint("##MiniMapSearch", LanguageManager::GetText("SEARCH_SETTINGS_HINT"), s_miniMapSearch, sizeof(s_miniMapSearch));
-                if (ImGui::IsItemHovered()) {
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                        NativeIME::Open(s_miniMapSearch, sizeof(s_miniMapSearch), LanguageManager::GetText("SEARCH_SETTINGS_HINT"));
-                    }
-                    ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-                }
-
-                ImGui::SameLine();
-                PushOreButtonStyle(OreButtonKind::Default);
-                if (ImGui::Button("\xe2\x9c\x8e##MiniMapSearchIME", ImVec2(iconBtnW, iconBtnW))) {
-                    NativeIME::Open(s_miniMapSearch, sizeof(s_miniMapSearch), LanguageManager::GetText("SEARCH_SETTINGS_HINT"));
-                }
-                PopOreButtonStyle();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
+                InputTextWithIME("##MiniMapSearch", s_miniMapSearch, sizeof(s_miniMapSearch), LanguageManager::GetText("SEARCH_SETTINGS_HINT"));
 
                 if (hasSearch) {
                     ImGui::SameLine();
@@ -4667,25 +4499,12 @@ namespace DX11Hook {
                     float spacing = ImGui::GetStyle().ItemSpacing.x;
                     float totalAvail = ImGui::GetContentRegionAvail().x;
                     float labelW = ImGui::CalcTextSize(LanguageManager::GetText("RADAR_FILTER_INCLUDE")).x;
-                    float inputW = std::clamp(totalAvail - labelW - btnSize * 2.0f - spacing * 2.0f - 16.0f * curScale, 110.0f * curScale, 220.0f * curScale);
+                    float inputW = std::clamp(totalAvail - labelW - btnSize - spacing - 16.0f * curScale, 110.0f * curScale, 260.0f * curScale);
 
                     ImGui::SetNextItemWidth(inputW);
-                    if (ImGui::InputTextWithHint("##RadarFilterInclude", LanguageManager::GetText("RADAR_FILTER_INCLUDE_HINT"), MapRenderState::radarFilterInclude, sizeof(MapRenderState::radarFilterInclude))) {
+                    if (InputTextWithIME("##RadarFilterInclude", MapRenderState::radarFilterInclude, sizeof(MapRenderState::radarFilterInclude), LanguageManager::GetText("RADAR_FILTER_INCLUDE_HINT"))) {
                         LanguageManager::SaveConfig();
                     }
-                    if (ImGui::IsItemHovered()) {
-                        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                            NativeIME::Open(MapRenderState::radarFilterInclude, sizeof(MapRenderState::radarFilterInclude), LanguageManager::GetText("RADAR_FILTER_INCLUDE"));
-                        }
-                        ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-                    }
-                    ImGui::SameLine();
-                    PushOreButtonStyle(OreButtonKind::Default);
-                    if (ImGui::Button("\xe2\x9c\x8e##RadarFilterIncIME", ImVec2(btnSize, btnSize))) {
-                        NativeIME::Open(MapRenderState::radarFilterInclude, sizeof(MapRenderState::radarFilterInclude), LanguageManager::GetText("RADAR_FILTER_INCLUDE"));
-                    }
-                    PopOreButtonStyle();
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
 
                     ImGui::SameLine();
                     PushOreButtonStyle(OreButtonKind::Default);
@@ -4705,25 +4524,12 @@ namespace DX11Hook {
                     float spacing = ImGui::GetStyle().ItemSpacing.x;
                     float totalAvail = ImGui::GetContentRegionAvail().x;
                     float labelW = ImGui::CalcTextSize(LanguageManager::GetText("RADAR_FILTER_EXCLUDE")).x;
-                    float inputW = std::clamp(totalAvail - labelW - btnSize * 2.0f - spacing * 2.0f - 16.0f * curScale, 110.0f * curScale, 220.0f * curScale);
+                    float inputW = std::clamp(totalAvail - labelW - btnSize - spacing - 16.0f * curScale, 110.0f * curScale, 260.0f * curScale);
 
                     ImGui::SetNextItemWidth(inputW);
-                    if (ImGui::InputTextWithHint("##RadarFilterExclude", LanguageManager::GetText("RADAR_FILTER_EXCLUDE_HINT"), MapRenderState::radarFilterExclude, sizeof(MapRenderState::radarFilterExclude))) {
+                    if (InputTextWithIME("##RadarFilterExclude", MapRenderState::radarFilterExclude, sizeof(MapRenderState::radarFilterExclude), LanguageManager::GetText("RADAR_FILTER_EXCLUDE_HINT"))) {
                         LanguageManager::SaveConfig();
                     }
-                    if (ImGui::IsItemHovered()) {
-                        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                            NativeIME::Open(MapRenderState::radarFilterExclude, sizeof(MapRenderState::radarFilterExclude), LanguageManager::GetText("RADAR_FILTER_EXCLUDE"));
-                        }
-                        ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-                    }
-                    ImGui::SameLine();
-                    PushOreButtonStyle(OreButtonKind::Default);
-                    if (ImGui::Button("\xe2\x9c\x8e##RadarFilterExcIME", ImVec2(btnSize, btnSize))) {
-                        NativeIME::Open(MapRenderState::radarFilterExclude, sizeof(MapRenderState::radarFilterExclude), LanguageManager::GetText("RADAR_FILTER_EXCLUDE"));
-                    }
-                    PopOreButtonStyle();
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
 
                     ImGui::SameLine();
                     PushOreButtonStyle(OreButtonKind::Default);
@@ -4888,24 +4694,9 @@ namespace DX11Hook {
                 float spacing = ImGui::GetStyle().ItemSpacing.x;
                 float searchW = availW - resetBtnW - spacing;
                 if (hasSearch) searchW -= (iconBtnW + spacing);
-                searchW -= (iconBtnW + spacing);
 
                 ImGui::SetNextItemWidth(std::max(searchW, 80.0f * curScale));
-                ImGui::InputTextWithHint("##BigMapSearch", LanguageManager::GetText("SEARCH_SETTINGS_HINT"), s_bigMapSearch, sizeof(s_bigMapSearch));
-                if (ImGui::IsItemHovered()) {
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                        NativeIME::Open(s_bigMapSearch, sizeof(s_bigMapSearch), LanguageManager::GetText("SEARCH_SETTINGS_HINT"));
-                    }
-                    ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-                }
-
-                ImGui::SameLine();
-                PushOreButtonStyle(OreButtonKind::Default);
-                if (ImGui::Button("\xe2\x9c\x8e##BigMapSearchIME", ImVec2(iconBtnW, iconBtnW))) {
-                    NativeIME::Open(s_bigMapSearch, sizeof(s_bigMapSearch), LanguageManager::GetText("SEARCH_SETTINGS_HINT"));
-                }
-                PopOreButtonStyle();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
+                InputTextWithIME("##BigMapSearch", s_bigMapSearch, sizeof(s_bigMapSearch), LanguageManager::GetText("SEARCH_SETTINGS_HINT"));
 
                 if (hasSearch) {
                     ImGui::SameLine();
@@ -5718,10 +5509,18 @@ namespace DX11Hook {
                         matchCount++;
                         float btnSize = ImGui::GetFrameHeight();
                         float totalAvail = ImGui::GetContentRegionAvail().x;
-                        float labelW = ImGui::CalcTextSize(LanguageManager::GetText("GUI_3D_MAX_DIST")).x;
-                        float sliderW = std::clamp(totalAvail - labelW - btnSize - 16.0f * curScale, 110.0f * curScale, 180.0f * curScale);
+                        float maxLabelW = std::max(ImGui::CalcTextSize(LanguageManager::GetText("GUI_3D_MAX_DIST")).x, ImGui::CalcTextSize(LanguageManager::GetText("GUI_3D_SCALE")).x);
+                        float inputDistW = 54.0f * curScale;
+                        float sliderW = std::clamp(totalAvail - maxLabelW - btnSize - inputDistW - 24.0f * curScale, 90.0f * curScale, 150.0f * curScale);
 
                         int maxDist = MapRenderState::waypoint3DMaxDistance;
+                        bool distChanged = false;
+                        static int s_bmWpDistInput = 5000;
+                        static bool s_bmWpDistActive = false;
+                        if (!s_bmWpDistActive) {
+                            s_bmWpDistInput = maxDist;
+                        }
+
                         char distFmt[64];
                         if (maxDist == 0) {
                             snprintf(distFmt, sizeof(distFmt), "%s", LanguageManager::GetText("GUI_3D_MAX_DIST_UNLIMITED"));
@@ -5731,44 +5530,108 @@ namespace DX11Hook {
 
                         ImGui::SetNextItemWidth(sliderW);
                         if (ImGui::SliderInt("##Waypoint3DMaxDistSlider", &maxDist, 0, 10000, distFmt)) {
-                            MapRenderState::waypoint3DMaxDistance = maxDist;
-                            LanguageManager::SaveConfig();
+                            s_bmWpDistInput = maxDist;
+                            distChanged = true;
                         }
                         ImGui::SameLine();
+                        ImGui::SetNextItemWidth(inputDistW);
+                        ImGui::InputInt("##Waypoint3DMaxDistInput", &s_bmWpDistInput, 0, 0);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s (0 - 10000m, 0 = %s)", LanguageManager::GetText("GUI_3D_MAX_DIST"), LanguageManager::GetText("GUI_3D_MAX_DIST_UNLIMITED"));
+                        }
+                        bool isDistActive = ImGui::IsItemActive();
+                        bool isDistDeactivated = ImGui::IsItemDeactivated();
+                        bool isDistEnter = ImGui::IsItemFocused() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
+                        if (isDistActive) {
+                            s_bmWpDistActive = true;
+                        }
+                        if ((s_bmWpDistActive && (isDistDeactivated || !isDistActive)) || isDistEnter) {
+                            s_bmWpDistActive = false;
+                            int clampedVal = std::clamp(s_bmWpDistInput, 0, 10000);
+                            if (clampedVal != MapRenderState::waypoint3DMaxDistance) {
+                                maxDist = clampedVal;
+                                distChanged = true;
+                            }
+                            s_bmWpDistInput = maxDist;
+                        }
+
+                        ImGui::SameLine();
                         if (ImGui::Button("\u21BA##Waypoint3DMaxDistReset", ImVec2(btnSize, btnSize))) {
-                            MapRenderState::waypoint3DMaxDistance = 5000;
-                            LanguageManager::SaveConfig();
+                            maxDist = 5000;
+                            s_bmWpDistInput = maxDist;
+                            distChanged = true;
                         }
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("%s (5000m)", LanguageManager::GetText("RESET"));
                         }
                         ImGui::SameLine();
                         ImGui::Text("%s", LanguageManager::GetText("GUI_3D_MAX_DIST"));
+
+                        if (distChanged) {
+                            MapRenderState::waypoint3DMaxDistance = maxDist;
+                            LanguageManager::SaveConfig();
+                        }
                     }
 
                     if (cat4Match || m_3dScale) {
                         matchCount++;
                         float btnSize = ImGui::GetFrameHeight();
                         float totalAvail = ImGui::GetContentRegionAvail().x;
-                        float labelW = ImGui::CalcTextSize(LanguageManager::GetText("GUI_3D_SCALE")).x;
-                        float sliderW = std::clamp(totalAvail - labelW - btnSize - 16.0f * curScale, 110.0f * curScale, 180.0f * curScale);
+                        float maxLabelW = std::max(ImGui::CalcTextSize(LanguageManager::GetText("GUI_3D_MAX_DIST")).x, ImGui::CalcTextSize(LanguageManager::GetText("GUI_3D_SCALE")).x);
+                        float inputScaleW = 54.0f * curScale;
+                        float sliderW = std::clamp(totalAvail - maxLabelW - btnSize - inputScaleW - 24.0f * curScale, 90.0f * curScale, 150.0f * curScale);
 
                         float wp3dScale = MapRenderState::waypoint3DScale;
+                        bool scaleChanged = false;
+                        static float s_bmWpScaleInput = 1.00f;
+                        static bool s_bmWpScaleActive = false;
+                        if (!s_bmWpScaleActive) {
+                            s_bmWpScaleInput = wp3dScale;
+                        }
+
                         ImGui::SetNextItemWidth(sliderW);
                         if (ImGui::SliderFloat("##Waypoint3DScaleSlider", &wp3dScale, 0.50f, 2.00f, "%.2fx")) {
-                            MapRenderState::waypoint3DScale = wp3dScale;
-                            LanguageManager::SaveConfig();
+                            s_bmWpScaleInput = wp3dScale;
+                            scaleChanged = true;
                         }
                         ImGui::SameLine();
+                        ImGui::SetNextItemWidth(inputScaleW);
+                        ImGui::InputFloat("##Waypoint3DScaleInput", &s_bmWpScaleInput, 0.0f, 0.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s (0.50x - 2.00x)", LanguageManager::GetText("GUI_3D_SCALE"));
+                        }
+                        bool isScaleActive = ImGui::IsItemActive();
+                        bool isScaleDeactivated = ImGui::IsItemDeactivated();
+                        bool isScaleEnter = ImGui::IsItemFocused() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
+                        if (isScaleActive) {
+                            s_bmWpScaleActive = true;
+                        }
+                        if ((s_bmWpScaleActive && (isScaleDeactivated || !isScaleActive)) || isScaleEnter) {
+                            s_bmWpScaleActive = false;
+                            float clampedVal = std::clamp(s_bmWpScaleInput, 0.50f, 2.00f);
+                            if (std::abs(clampedVal - MapRenderState::waypoint3DScale) > 0.001f) {
+                                wp3dScale = clampedVal;
+                                scaleChanged = true;
+                            }
+                            s_bmWpScaleInput = wp3dScale;
+                        }
+
+                        ImGui::SameLine();
                         if (ImGui::Button("\u21BA##Waypoint3DScaleReset", ImVec2(btnSize, btnSize))) {
-                            MapRenderState::waypoint3DScale = 1.00f;
-                            LanguageManager::SaveConfig();
+                            wp3dScale = 1.00f;
+                            s_bmWpScaleInput = wp3dScale;
+                            scaleChanged = true;
                         }
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("%s (1.00x)", LanguageManager::GetText("RESET"));
                         }
                         ImGui::SameLine();
                         ImGui::Text("%s", LanguageManager::GetText("GUI_3D_SCALE"));
+
+                        if (scaleChanged) {
+                            MapRenderState::waypoint3DScale = wp3dScale;
+                            LanguageManager::SaveConfig();
+                        }
                     }
 
                     ImGui::Unindent(15.0f * curScale);
@@ -5960,14 +5823,9 @@ namespace DX11Hook {
                     initialized = true;
                 }
 
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##EditWPInput", nameBuf, sizeof(nameBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                InputTextWithIME("##EditWPInput", nameBuf, sizeof(nameBuf));
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##EditWP")) { // U+270E Edit
-                    NativeIME::Open(nameBuf, sizeof(nameBuf), LanguageManager::GetText("WP_NAME"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::SameLine();
                 ImGui::Text("%s", LanguageManager::GetText("WP_NAME"));
 
@@ -6004,14 +5862,9 @@ namespace DX11Hook {
                 RenderWaypointColorPresets("EditWP", col, rgb, curScale);
 
                 // 文件夹输入与选择
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##EditWPFolder", folderBuf, sizeof(folderBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                InputTextWithIME("##EditWPFolder", folderBuf, sizeof(folderBuf));
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##EditFolderIME")) {
-                    NativeIME::Open(folderBuf, sizeof(folderBuf), LanguageManager::GetText("WP_FOLDER"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::SameLine();
                 ImGui::Text("%s", LanguageManager::GetText("WP_FOLDER"));
 
@@ -6890,7 +6743,7 @@ namespace DX11Hook {
             float inputW = ImGui::GetContentRegionAvail().x - applyBtnW - (status.isManual ? (resetBtnW + 8.0f * curScale) : 4.0f * curScale);
             if (inputW > 100.0f) {
                 ImGui::PushItemWidth(inputW);
-                bool enterPressed = ImGui::InputTextWithHint("##ManualSeedInput", LanguageManager::GetText("SEED_MAP_INPUT_HINT"), s_manualSeedBuf, sizeof(s_manualSeedBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+                bool enterPressed = InputTextWithIME("##ManualSeedInput", s_manualSeedBuf, sizeof(s_manualSeedBuf), LanguageManager::GetText("SEED_MAP_INPUT_HINT"), ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::PopItemWidth();
                 ImGui::SameLine();
                 bool applyClicked = ImGui::Button(LanguageManager::GetText("SEED_MAP_APPLY_SEED"), ImVec2(applyBtnW, 0.0f));
@@ -7154,36 +7007,17 @@ namespace DX11Hook {
 
             ImGui::Spacing();
 
-            // 3. 搜索过滤框（支持中文与多语言输入法）
+            // 3. 搜索过滤框（支持中文与多语言直接输入）
             static char s_drawerFilter[128] = "";
             bool hasFilter = (s_drawerFilter[0] != '\0');
-            float imeBtnW = 22.0f * curScale;
             float clearBtnW = hasFilter ? (22.0f * curScale) : 0.0f;
             float spacingW = 4.0f * curScale;
-            float rightBtnsW = imeBtnW + (hasFilter ? (clearBtnW + spacingW) : 0.0f);
-            float inputW = ImGui::GetContentRegionAvail().x - rightBtnsW - spacingW;
+            float rightBtnsW = hasFilter ? (clearBtnW + spacingW) : 0.0f;
+            float inputW = ImGui::GetContentRegionAvail().x - rightBtnsW;
 
             ImGui::PushItemWidth(inputW);
-            ImGui::InputTextWithHint("##DrawerSearchInput", LanguageManager::GetText("DRAWER_SEARCH_HINT"), s_drawerFilter, sizeof(s_drawerFilter));
+            InputTextWithIME("##DrawerSearchInput", s_drawerFilter, sizeof(s_drawerFilter), LanguageManager::GetText("DRAWER_SEARCH_HINT"));
             ImGui::PopItemWidth();
-
-            // 双击或右键点击输入框均可直接唤起原生多语言/中文输入框
-            if (ImGui::IsItemHovered()) {
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                    NativeIME::Open(s_drawerFilter, sizeof(s_drawerFilter), LanguageManager::GetText("DRAWER_SEARCH_HINT"));
-                }
-                ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-            }
-
-            ImGui::SameLine();
-            PushOreButtonStyle(OreButtonKind::Default);
-            if (ImGui::Button("\xe2\x9c\x8e##DrawerSearchIME", ImVec2(imeBtnW, 0.0f))) { // ✎ 原生中文输入法按钮
-                NativeIME::Open(s_drawerFilter, sizeof(s_drawerFilter), LanguageManager::GetText("DRAWER_SEARCH_HINT"));
-            }
-            PopOreButtonStyle();
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-            }
 
             if (hasFilter) {
                 ImGui::SameLine();
@@ -9214,14 +9048,14 @@ namespace DX11Hook {
 
             // X 坐标输入框
             ImGui::SetNextItemWidth(inputW);
-            bool enterX = ImGui::InputTextWithHint("##GotoX", "X", s_gotoXBuf, sizeof(s_gotoXBuf), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll);
+            bool enterX = InputTextWithIME("##GotoX", s_gotoXBuf, sizeof(s_gotoXBuf), "X", ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("BIGMAP_GOTO_TIP"));
 
             ImGui::SameLine();
 
             // Z 坐标输入框
             ImGui::SetNextItemWidth(inputW);
-            bool enterZ = ImGui::InputTextWithHint("##GotoZ", "Z", s_gotoZBuf, sizeof(s_gotoZBuf), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll);
+            bool enterZ = InputTextWithIME("##GotoZ", s_gotoZBuf, sizeof(s_gotoZBuf), "Z", ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("BIGMAP_GOTO_TIP"));
 
             ImGui::SameLine();
@@ -9828,25 +9662,51 @@ namespace DX11Hook {
             float sliderWidth = availWidth - (btnSize * 3.0f) - inputWidth - (popupSpacing * 4.0f);
             
             bool tScaleChanged = false;
+            static float s_scaleInputVal = 1.0f;
+            static bool s_scaleInputActive = false;
+            
+            if (!s_scaleInputActive) {
+                s_scaleInputVal = MapRenderState::globalUIScale;
+            }
             
             ImGui::PushItemWidth(sliderWidth);
-            tScaleChanged |= ImGui::SliderFloat("##UIScaleSlider", &MapRenderState::globalUIScale, 0.5f, 2.5f, "%.2f x");
+            if (ImGui::SliderFloat("##UIScaleSlider", &MapRenderState::globalUIScale, 0.5f, 2.5f, "%.2f x")) {
+                tScaleChanged = true;
+                s_scaleInputVal = MapRenderState::globalUIScale;
+            }
             ImGui::PopItemWidth();
             
             ImGui::SameLine();
             if (ImGui::ArrowButton("##UIScaleSub", ImGuiDir_Left)) {
-                MapRenderState::globalUIScale -= 0.1f;
+                MapRenderState::globalUIScale = std::max(0.50f, MapRenderState::globalUIScale - 0.1f);
+                s_scaleInputVal = MapRenderState::globalUIScale;
                 tScaleChanged = true;
             }
             
             ImGui::SameLine();
             ImGui::PushItemWidth(inputWidth);
-            tScaleChanged |= ImGui::InputFloat("##UIScaleInput", &MapRenderState::globalUIScale, 0.0f, 0.0f, "%.2f");
+            ImGui::InputFloat("##UIScaleInput", &s_scaleInputVal, 0.0f, 0.0f, "%.2f");
+            bool isInputActive = ImGui::IsItemActive();
+            bool isInputDeactivated = ImGui::IsItemDeactivated();
+            bool enterPressed = ImGui::IsItemFocused() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
+            if (isInputActive) {
+                s_scaleInputActive = true;
+            }
+            if ((s_scaleInputActive && (isInputDeactivated || !isInputActive)) || enterPressed) {
+                s_scaleInputActive = false;
+                float clampedVal = std::clamp(s_scaleInputVal, 0.50f, 2.50f);
+                if (std::abs(clampedVal - MapRenderState::globalUIScale) > 0.001f) {
+                    MapRenderState::globalUIScale = clampedVal;
+                    tScaleChanged = true;
+                }
+                s_scaleInputVal = MapRenderState::globalUIScale;
+            }
             ImGui::PopItemWidth();
             
             ImGui::SameLine();
             if (ImGui::ArrowButton("##UIScaleAdd", ImGuiDir_Right)) {
-                MapRenderState::globalUIScale += 0.1f;
+                MapRenderState::globalUIScale = std::min(2.50f, MapRenderState::globalUIScale + 0.1f);
+                s_scaleInputVal = MapRenderState::globalUIScale;
                 tScaleChanged = true;
             }
 
@@ -9854,6 +9714,7 @@ namespace DX11Hook {
             float optimalScale = MapRenderState::GetOptimalUIScale(ImGui::GetIO().DisplaySize.y);
             if (ImGui::Button("\u21BA##UIScaleReset", ImVec2(btnSize, btnSize))) {
                 MapRenderState::globalUIScale = optimalScale;
+                s_scaleInputVal = MapRenderState::globalUIScale;
                 tScaleChanged = true;
             }
             if (ImGui::IsItemHovered()) {
@@ -9861,7 +9722,8 @@ namespace DX11Hook {
             }
             
             if (tScaleChanged) {
-                if (MapRenderState::globalUIScale < 0.1f) MapRenderState::globalUIScale = 0.1f;
+                if (MapRenderState::globalUIScale < 0.50f) MapRenderState::globalUIScale = 0.50f;
+                if (MapRenderState::globalUIScale > 2.50f) MapRenderState::globalUIScale = 2.50f;
                 LanguageManager::SaveConfig();
             }
             
@@ -11025,28 +10887,14 @@ namespace DX11Hook {
                     countW = ImGui::CalcTextSize(countBuf).x + spacing;
                 }
 
-                float searchW = availW - iconBtnW - spacing;
+                float searchW = availW;
                 if (hasSearch) {
                     searchW -= (iconBtnW + spacing + countW);
                 }
                 searchW = std::max(searchW, 80.0f * curScale);
 
                 ImGui::SetNextItemWidth(searchW);
-                ImGui::InputTextWithHint("##HotkeySearch", LanguageManager::GetText("HOTKEY_SEARCH_HINT"), s_hotkeySearch, sizeof(s_hotkeySearch));
-                if (ImGui::IsItemHovered()) {
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                        NativeIME::Open(s_hotkeySearch, sizeof(s_hotkeySearch), LanguageManager::GetText("HOTKEY_SEARCH_HINT"));
-                    }
-                    ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-                }
-
-                ImGui::SameLine();
-                PushOreButtonStyle(OreButtonKind::Default);
-                if (ImGui::Button("\xe2\x9c\x8e##HotkeySearchIME", ImVec2(iconBtnW, iconBtnW))) {
-                    NativeIME::Open(s_hotkeySearch, sizeof(s_hotkeySearch), LanguageManager::GetText("HOTKEY_SEARCH_HINT"));
-                }
-                PopOreButtonStyle();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
+                InputTextWithIME("##HotkeySearch", s_hotkeySearch, sizeof(s_hotkeySearch), LanguageManager::GetText("HOTKEY_SEARCH_HINT"));
 
                 if (hasSearch) {
                     ImGui::SameLine();
@@ -11371,15 +11219,9 @@ namespace DX11Hook {
             static char searchBuf[256] = "";
             
             // 顶栏第一排：搜索栏与新建按钮
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 190.0f * curScale);
-            ImGui::InputTextWithHint("##WPSearch", LanguageManager::GetText("SEARCH_HINT"), searchBuf, sizeof(searchBuf));
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 150.0f * curScale);
+            InputTextWithIME("##WPSearch", searchBuf, sizeof(searchBuf), LanguageManager::GetText("SEARCH_HINT"));
             ImGui::PopItemWidth();
-            
-            ImGui::SameLine();
-            if (ImGui::Button("\xe2\x9c\x8e##Search")) {
-                NativeIME::Open(searchBuf, sizeof(searchBuf), LanguageManager::GetText("SEARCH_HINT"));
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
             
             ImGui::SameLine();
             if (ImGui::Button(LanguageManager::GetText("NEW_WP_BUTTON"), ImVec2(140.0f * curScale, 0))) {
@@ -12186,16 +12028,11 @@ namespace DX11Hook {
                 static char fNameBuf[128] = "";
                 if (ImGui::IsWindowAppearing()) { fNameBuf[0] = '\0'; }
                 ImGui::Text("%s:", LanguageManager::GetText("WP_FOLDER_NAME"));
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##NewFolderName", fNameBuf, sizeof(fNameBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                bool enterFolder = InputTextWithIME("##NewFolderName", fNameBuf, sizeof(fNameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##NewFolderIME")) {
-                    NativeIME::Open(fNameBuf, sizeof(fNameBuf), LanguageManager::GetText("WP_FOLDER_NAME"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::Spacing();
-                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0))) {
+                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0)) || enterFolder) {
                     if (fNameBuf[0] != '\0') {
                         WaypointManager::AddFolder(fNameBuf);
                         MapRenderState::waypointFolderFilter = fNameBuf;
@@ -12226,16 +12063,11 @@ namespace DX11Hook {
                     snprintf(rNameBuf, sizeof(rNameBuf), "%s", MapRenderState::waypointFolderFilter.c_str());
                 }
                 ImGui::Text("%s:", LanguageManager::GetText("WP_FOLDER_NAME"));
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##RenameFolderName", rNameBuf, sizeof(rNameBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                bool enterRenameFolder = InputTextWithIME("##RenameFolderName", rNameBuf, sizeof(rNameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##RenameFolderIME")) {
-                    NativeIME::Open(rNameBuf, sizeof(rNameBuf), LanguageManager::GetText("WP_FOLDER_NAME"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::Spacing();
-                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0))) {
+                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0)) || enterRenameFolder) {
                     if (rNameBuf[0] != '\0' && MapRenderState::waypointFolderFilter != rNameBuf) {
                         WaypointManager::RenameFolder(MapRenderState::waypointFolderFilter, rNameBuf);
                         MapRenderState::waypointFolderFilter = rNameBuf;
@@ -12289,16 +12121,11 @@ namespace DX11Hook {
                 static char sNameBuf[128] = "";
                 if (ImGui::IsWindowAppearing()) { sNameBuf[0] = '\0'; }
                 ImGui::Text("%s:", LanguageManager::GetText("WP_SET_NAME"));
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##NewSetName", sNameBuf, sizeof(sNameBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                bool enterNewSet = InputTextWithIME("##NewSetName", sNameBuf, sizeof(sNameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##NewSetIME")) {
-                    NativeIME::Open(sNameBuf, sizeof(sNameBuf), LanguageManager::GetText("WP_SET_NAME"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::Spacing();
-                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0))) {
+                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0)) || enterNewSet) {
                     if (sNameBuf[0] != '\0') {
                         WaypointManager::AddWaypointSet(sNameBuf);
                         WaypointManager::SetCurrentWaypointSet(sNameBuf);
@@ -12330,16 +12157,11 @@ namespace DX11Hook {
                     snprintf(srNameBuf, sizeof(srNameBuf), "%s", WaypointManager::GetCurrentWaypointSet().c_str());
                 }
                 ImGui::Text("%s:", LanguageManager::GetText("WP_SET_NAME"));
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##RenameSetName", srNameBuf, sizeof(srNameBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                bool enterRenameSet = InputTextWithIME("##RenameSetName", srNameBuf, sizeof(srNameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##RenameSetIME")) {
-                    NativeIME::Open(srNameBuf, sizeof(srNameBuf), LanguageManager::GetText("WP_SET_NAME"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::Spacing();
-                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0))) {
+                if (ImGui::Button(LanguageManager::GetText("WP_SAVE"), ImVec2(100.0f * curScale, 0)) || enterRenameSet) {
                     std::string curSet = WaypointManager::GetCurrentWaypointSet();
                     if (srNameBuf[0] != '\0' && curSet != srNameBuf && curSet != "gui.chiyan_default") {
                         WaypointManager::RenameWaypointSet(curSet, srNameBuf);
@@ -12430,31 +12252,125 @@ namespace DX11Hook {
                         LanguageManager::SaveConfig();
                     }
 
+                    float btnSize = ImGui::GetFrameHeight();
+                    float sliderW = 140.0f * curScale;
+                    float inputDistW = 54.0f * curScale;
+                    float inputScaleW = 54.0f * curScale;
+
                     // 最大渲染距离
                     int maxDist = MapRenderState::waypoint3DMaxDistance;
+                    bool distChanged = false;
+                    static int s_modalWpDistInput = 5000;
+                    static bool s_modalWpDistActive = false;
+                    if (!s_modalWpDistActive) {
+                        s_modalWpDistInput = maxDist;
+                    }
+
                     char distFmt[64];
                     if (maxDist == 0) {
                         snprintf(distFmt, sizeof(distFmt), "%s", LanguageManager::GetText("GUI_3D_MAX_DIST_UNLIMITED"));
                     } else {
                         snprintf(distFmt, sizeof(distFmt), "%d m", maxDist);
                     }
-                    ImGui::SetNextItemWidth(160.0f * curScale);
+
+                    ImGui::SetNextItemWidth(sliderW);
                     if (ImGui::SliderInt("##ModalWp3dMaxDist", &maxDist, 0, 10000, distFmt)) {
-                        MapRenderState::waypoint3DMaxDistance = maxDist;
-                        LanguageManager::SaveConfig();
+                        s_modalWpDistInput = maxDist;
+                        distChanged = true;
                     }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(inputDistW);
+                    ImGui::InputInt("##ModalWp3dMaxDistInput", &s_modalWpDistInput, 0, 0);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s (0 - 10000m, 0 = %s)", LanguageManager::GetText("GUI_3D_MAX_DIST"), LanguageManager::GetText("GUI_3D_MAX_DIST_UNLIMITED"));
+                    }
+                    bool isDistActive = ImGui::IsItemActive();
+                    bool isDistDeactivated = ImGui::IsItemDeactivated();
+                    bool isDistEnter = ImGui::IsItemFocused() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
+                    if (isDistActive) {
+                        s_modalWpDistActive = true;
+                    }
+                    if ((s_modalWpDistActive && (isDistDeactivated || !isDistActive)) || isDistEnter) {
+                        s_modalWpDistActive = false;
+                        int clampedVal = std::clamp(s_modalWpDistInput, 0, 10000);
+                        if (clampedVal != MapRenderState::waypoint3DMaxDistance) {
+                            maxDist = clampedVal;
+                            distChanged = true;
+                        }
+                        s_modalWpDistInput = maxDist;
+                    }
+
+                    ImGui::SameLine();
+                    if (ImGui::Button("\u21BA##ModalWp3dMaxDistReset", ImVec2(btnSize, btnSize))) {
+                        maxDist = 5000;
+                        s_modalWpDistInput = maxDist;
+                        distChanged = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s (5000m)", LanguageManager::GetText("RESET"));
+                    }
+
                     ImGui::SameLine();
                     ImGui::Text("%s", LanguageManager::GetText("GUI_3D_MAX_DIST"));
 
+                    if (distChanged) {
+                        MapRenderState::waypoint3DMaxDistance = maxDist;
+                        LanguageManager::SaveConfig();
+                    }
+
                     // 3D 尺寸
                     float scale3d = MapRenderState::waypoint3DScale;
-                    ImGui::SetNextItemWidth(160.0f * curScale);
+                    bool scaleChanged = false;
+                    static float s_modalWpScaleInput = 1.00f;
+                    static bool s_modalWpScaleActive = false;
+                    if (!s_modalWpScaleActive) {
+                        s_modalWpScaleInput = scale3d;
+                    }
+
+                    ImGui::SetNextItemWidth(sliderW);
                     if (ImGui::SliderFloat("##ModalWp3dScale", &scale3d, 0.50f, 2.00f, "%.2fx")) {
+                        s_modalWpScaleInput = scale3d;
+                        scaleChanged = true;
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(inputScaleW);
+                    ImGui::InputFloat("##ModalWp3dScaleInput", &s_modalWpScaleInput, 0.0f, 0.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s (0.50x - 2.00x)", LanguageManager::GetText("GUI_3D_SCALE"));
+                    }
+                    bool isScaleActive = ImGui::IsItemActive();
+                    bool isScaleDeactivated = ImGui::IsItemDeactivated();
+                    bool isScaleEnter = ImGui::IsItemFocused() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
+                    if (isScaleActive) {
+                        s_modalWpScaleActive = true;
+                    }
+                    if ((s_modalWpScaleActive && (isScaleDeactivated || !isScaleActive)) || isScaleEnter) {
+                        s_modalWpScaleActive = false;
+                        float clampedVal = std::clamp(s_modalWpScaleInput, 0.50f, 2.00f);
+                        if (std::abs(clampedVal - MapRenderState::waypoint3DScale) > 0.001f) {
+                            scale3d = clampedVal;
+                            scaleChanged = true;
+                        }
+                        s_modalWpScaleInput = scale3d;
+                    }
+
+                    ImGui::SameLine();
+                    if (ImGui::Button("\u21BA##ModalWp3dScaleReset", ImVec2(btnSize, btnSize))) {
+                        scale3d = 1.00f;
+                        s_modalWpScaleInput = scale3d;
+                        scaleChanged = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s (1.00x)", LanguageManager::GetText("RESET"));
+                    }
+
+                    ImGui::SameLine();
+                    ImGui::Text("%s", LanguageManager::GetText("GUI_3D_SCALE"));
+
+                    if (scaleChanged) {
                         MapRenderState::waypoint3DScale = scale3d;
                         LanguageManager::SaveConfig();
                     }
-                    ImGui::SameLine();
-                    ImGui::Text("%s", LanguageManager::GetText("GUI_3D_SCALE"));
 
                     ImGui::Unindent(15.0f * curScale);
                 }
@@ -12556,14 +12472,9 @@ namespace DX11Hook {
                     rgb[2] = (int)(col[2] * 255.0f);
                 }
 
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##NewWPInput", nameBuf, sizeof(nameBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                InputTextWithIME("##NewWPInput", nameBuf, sizeof(nameBuf));
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##NewWP")) {
-                    NativeIME::Open(nameBuf, sizeof(nameBuf), LanguageManager::GetText("WP_NAME"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::SameLine();
                 ImGui::Text("%s", LanguageManager::GetText("WP_NAME"));
                 
@@ -12600,14 +12511,9 @@ namespace DX11Hook {
                 RenderWaypointColorPresets("NewWP", col, rgb, curScale);
 
                 // 文件夹输入与已有文件夹快捷选择
-                ImGui::PushItemWidth(180.0f * curScale);
-                ImGui::InputText("##NewWPFolder", folderBuf, sizeof(folderBuf));
+                ImGui::PushItemWidth(210.0f * curScale);
+                InputTextWithIME("##NewWPFolder", folderBuf, sizeof(folderBuf));
                 ImGui::PopItemWidth();
-                ImGui::SameLine();
-                if (ImGui::Button("\xe2\x9c\x8e##NewWPFolderIME")) {
-                    NativeIME::Open(folderBuf, sizeof(folderBuf), LanguageManager::GetText("WP_FOLDER"));
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
                 ImGui::SameLine();
                 ImGui::Text("%s", LanguageManager::GetText("WP_FOLDER"));
 
@@ -13453,20 +13359,8 @@ namespace DX11Hook {
                 MapRenderState::showNewMapModal = false;
             }
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("MAP_NAME_INPUT"));
-            float imeBtnW = 28.0f * curScale;
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - imeBtnW - 4.0f * curScale);
-            bool enterPressed = ImGui::InputText("##NewMapNameInput", MapRenderState::newMapNameInput, sizeof(MapRenderState::newMapNameInput), ImGuiInputTextFlags_EnterReturnsTrue);
-            if (ImGui::IsItemHovered()) {
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                    NativeIME::Open(MapRenderState::newMapNameInput, sizeof(MapRenderState::newMapNameInput), LanguageManager::GetText("MAP_NAME_INPUT"));
-                }
-                ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("\xe2\x9c\x8e##NewMapNameIME", ImVec2(imeBtnW, 0.0f))) {
-                NativeIME::Open(MapRenderState::newMapNameInput, sizeof(MapRenderState::newMapNameInput), LanguageManager::GetText("MAP_NAME_INPUT"));
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            bool enterPressed = InputTextWithIME("##NewMapNameInput", MapRenderState::newMapNameInput, sizeof(MapRenderState::newMapNameInput), ImGuiInputTextFlags_EnterReturnsTrue);
 
             if (!errorMsg.empty()) {
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", errorMsg.c_str());
@@ -13520,21 +13414,8 @@ namespace DX11Hook {
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 MapRenderState::showRenameMapModal = false;
             }
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("MAP_NAME_INPUT"));
-            float renameImeBtnW = 28.0f * curScale;
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - renameImeBtnW - 4.0f * curScale);
-            bool enterPressed = ImGui::InputText("##RenameMapNameInput", MapRenderState::renameMapNameInput, sizeof(MapRenderState::renameMapNameInput), ImGuiInputTextFlags_EnterReturnsTrue);
-            if (ImGui::IsItemHovered()) {
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                    NativeIME::Open(MapRenderState::renameMapNameInput, sizeof(MapRenderState::renameMapNameInput), LanguageManager::GetText("MAP_NAME_INPUT"));
-                }
-                ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("\xe2\x9c\x8e##RenameMapNameIME", ImVec2(renameImeBtnW, 0.0f))) {
-                NativeIME::Open(MapRenderState::renameMapNameInput, sizeof(MapRenderState::renameMapNameInput), LanguageManager::GetText("MAP_NAME_INPUT"));
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("NATIVE_IME_TOOLTIP"));
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            bool enterPressed = InputTextWithIME("##RenameMapNameInput", MapRenderState::renameMapNameInput, sizeof(MapRenderState::renameMapNameInput), ImGuiInputTextFlags_EnterReturnsTrue);
 
             ImGui::Spacing();
             ImGui::Separator();
@@ -14260,6 +14141,7 @@ namespace DX11Hook {
                 pSwapChain->GetDesc(&sd);
                 g_hWnd = sd.OutputWindow;
                 if (!g_hWnd) g_hWnd = FindWindowW(L"Minecraft", NULL);
+                InputIMEHelper::SetGameHwnd(g_hWnd);
 
                 oWndProc = (WNDPROC)SetWindowLongPtr(g_hWnd, GWLP_WNDPROC, (LONG_PTR)WndProcHook);
                 ImGui::CreateContext();
@@ -14295,11 +14177,14 @@ namespace DX11Hook {
 
             auto renderImGuiFrame = [&](ID3D11RenderTargetView* rtv) {
                 ImGuiIO& io = ImGui::GetIO();
-                if (MapRenderState::globalUIScale < 0.1f) {
-                    MapRenderState::globalUIScale = MapRenderState::GetOptimalUIScale(io.DisplaySize.y);
+                if (MapRenderState::globalUIScale < 0.50f) {
+                    MapRenderState::globalUIScale = (MapRenderState::globalUIScale <= 0.0f) ? MapRenderState::GetOptimalUIScale(io.DisplaySize.y) : 0.50f;
+                }
+                if (MapRenderState::globalUIScale > 2.50f) {
+                    MapRenderState::globalUIScale = 2.50f;
                 }
                 float curScale = MapRenderState::globalUIScale;
-                if (curScale < 0.1f) curScale = 1.0f;
+                if (curScale < 0.50f) curScale = 1.0f;
                 if (!g_baseStyleSaved) {
                     g_baseImGuiStyle = ImGui::GetStyle();
                     g_baseStyleSaved = true;
@@ -14553,6 +14438,8 @@ namespace DX11Hook {
                 // [P3] 路径点集合切换 Toast 悬浮通知
                 RenderWaypointSetToast();
                 RenderMinimapToast();
+
+                InputIMEHelper::OnFrame();
 
                 ImGui::Render();
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());

@@ -845,30 +845,36 @@ namespace MapRenderState {
 
     inline float ComputeTerrainShading(float currentY, float northY, float westY, float northWestY, int slopeMode, bool enableDepth, bool isCave, uint8_t packedLight = 0x00) {
         float shade = 1.0f;
+        float verticalSlope = currentY - northY;
 
         if (slopeMode == 1) { // Legacy
-            float verticalSlope = currentY - northY;
             if (verticalSlope > 0.0f) shade = 1.15f;
             else if (verticalSlope < 0.0f) shade = 0.85f;
         } else if (slopeMode == 2) { // Default 3D (浮雕立体阴影)
-            float verticalSlope = currentY - northY;
             float diagonalSlope = currentY - northWestY;
-            float crossX = verticalSlope - diagonalSlope;
-            float crossZ = -verticalSlope;
-            float crossMagnitude = std::sqrt(crossX * crossX + 1.0f + crossZ * crossZ);
-            float cosAngle = (1.0f - crossZ) / (crossMagnitude * 1.41421356f);
-            if (cosAngle > 1.0f) cosAngle = 1.0f;
-            if (cosAngle < 0.0f) cosAngle = 0.0f;
-            float directLight = (cosAngle >= 0.999f) ? 0.6667f : (std::ceil(cosAngle * 10.0f) / 10.0f) * 0.6667f * 0.88388f;
-            shade = 0.50f + directLight;
+            if (verticalSlope == 0.0f && diagonalSlope == 0.0f) {
+                shade = 0.9714138f;
+            } else {
+                float crossX = verticalSlope - diagonalSlope;
+                float crossZ = -verticalSlope;
+                float crossMagnitude = std::sqrt(crossX * crossX + 1.0f + crossZ * crossZ);
+                float cosAngle = (1.0f - crossZ) / (crossMagnitude * 1.41421356f);
+                if (cosAngle > 1.0f) cosAngle = 1.0f;
+                if (cosAngle < 0.0f) cosAngle = 0.0f;
+                float directLight = (cosAngle >= 0.999f) ? 0.6667f : (std::ceil(cosAngle * 10.0f) / 10.0f) * 0.6667f * 0.88388f;
+                shade = 0.50f + directLight;
+            }
         } else { // Default 2D
-            float verticalSlope = currentY - northY;
-            float surfaceDirectionMagnitude = std::sqrt(verticalSlope * verticalSlope + 1.0f);
-            float cosAngle = (verticalSlope + 1.0f) / (surfaceDirectionMagnitude * 1.41421356f);
-            if (cosAngle > 1.0f) cosAngle = 1.0f;
-            if (cosAngle < 0.0f) cosAngle = 0.0f;
-            float directLight = (cosAngle >= 0.999f) ? 0.6667f : (std::ceil(cosAngle * 10.0f) / 10.0f) * 0.6667f * 0.88388f;
-            shade = 0.50f + directLight;
+            if (verticalSlope == 0.0f) {
+                shade = 0.9714138f;
+            } else {
+                float surfaceDirectionMagnitude = std::sqrt(verticalSlope * verticalSlope + 1.0f);
+                float cosAngle = (verticalSlope + 1.0f) / (surfaceDirectionMagnitude * 1.41421356f);
+                if (cosAngle > 1.0f) cosAngle = 1.0f;
+                if (cosAngle < 0.0f) cosAngle = 0.0f;
+                float directLight = (cosAngle >= 0.999f) ? 0.6667f : (std::ceil(cosAngle * 10.0f) / 10.0f) * 0.6667f * 0.88388f;
+                shade = 0.50f + directLight;
+            }
         }
 
         // 强自发光方块 (如熔岩/萤石/蛙明灯，blockLight >= 14) 凹陷于地面时，消除 0.50x 深褐色陡坡暗影，保留明亮熔融质感
@@ -919,9 +925,9 @@ namespace MapRenderState {
         return (int)std::round(sb * 32.0f);
     }
 
-    // 将方块光照与天空昼夜明暗动态应用到像素 RGB (0..255 浮点)
-    inline void ApplyMapLighting(float& r, float& g, float& b, uint8_t packedLight, bool isCave, int dimId, bool enableLighting, bool forceNighttime = false) noexcept {
-        if (!enableLighting && !forceNighttime) return;
+    // 使用预计算天空亮度的快速光照应用方法（高频循环优化）
+    inline void ApplyMapLightingPrecomputed(float& r, float& g, float& b, uint8_t packedLight, bool isCave, int dimId, bool enableLighting, float skyBright) noexcept {
+        if (!enableLighting) return;
 
         int skyL   = (packedLight >> 4) & 0x0F;
         int blockL = packedLight & 0x0F;
@@ -932,17 +938,11 @@ namespace MapRenderState {
             blockL = 7;
         }
 
-        float skyBright = ComputeSkyLightBrightness(g_gameTimeTicks.load(), dimId, forceNighttime);
-        float skyContrib = (skyL / 15.0f) * skyBright;
-        float blockContrib = (blockL / 15.0f);
+        float skyContrib = (skyL * (1.0f / 15.0f)) * skyBright;
+        float blockContrib = (blockL * (1.0f / 15.0f));
         float maxLight = std::max(skyContrib, blockContrib);
 
-        float ambient = 0.26f;
-        if (isCave || dimId == 1) {
-            ambient = 0.36f;
-        } else if (dimId == 2) {
-            ambient = 0.48f;
-        }
+        float ambient = (isCave || dimId == 1) ? 0.36f : ((dimId == 2) ? 0.48f : 0.26f);
         float lightMult = ambient + (1.0f - ambient) * maxLight;
 
         // 火把/熔岩等方块光源主导时赋予微暖色调，夜间月光主导时赋予微冷夜色
@@ -958,6 +958,13 @@ namespace MapRenderState {
         r *= rMult;
         g *= gMult;
         b *= bMult;
+    }
+
+    // 将方块光照与天空昼夜明暗动态应用到像素 RGB (0..255 浮点)
+    inline void ApplyMapLighting(float& r, float& g, float& b, uint8_t packedLight, bool isCave, int dimId, bool enableLighting, bool forceNighttime = false) noexcept {
+        if (!enableLighting && !forceNighttime) return;
+        float skyBright = ComputeSkyLightBrightness(g_gameTimeTicks.load(), dimId, forceNighttime);
+        ApplyMapLightingPrecomputed(r, g, b, packedLight, isCave, dimId, true, skyBright);
     }
 
     // ==================== 全局与分面板默认设置重置 ====================

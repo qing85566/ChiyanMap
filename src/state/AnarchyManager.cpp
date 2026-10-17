@@ -1,6 +1,7 @@
 #include "state/AnarchyManager.h"
 #include "state/MapRenderState.h"
 #include "state/LanguageManager.h"
+#include "hooks/InputIMEHelper.h"
 
 #include <mc/world/level/BlockSource.h>
 #include <mc/world/level/BlockPos.h>
@@ -1558,7 +1559,7 @@ namespace AnarchyManager {
                 }
                 ImGui::ColorEdit4(LanguageManager::GetText("ANARCHY_COLOR_OLD_BIOMES"), MapRenderState::anarchyOldBiomesColor);
                 static char seedBuf[64] = "-4172144997902289642";
-                ImGui::InputText(LanguageManager::GetText("ANARCHY_OLD_BIOMES_SEED"), seedBuf, sizeof(seedBuf));
+                InputIMEHelper::InputTextWithIME(LanguageManager::GetText("ANARCHY_OLD_BIOMES_SEED"), seedBuf, sizeof(seedBuf));
                 if (ImGui::Button(LanguageManager::GetText("ANARCHY_APPLY_SEED"))) {
                     try {
                         MapRenderState::anarchyOldBiomesSeed = std::stoll(seedBuf);
@@ -1669,7 +1670,7 @@ namespace AnarchyManager {
                         }
                     }
                 } else if (MapRenderState::anarchyHighwaysMode == 2) { // 自由距离列表模式
-                    if (ImGui::InputText(LanguageManager::GetText("ANARCHY_HIGHWAYS_CUSTOM_RINGS"), MapRenderState::anarchyHighwaysCustomRingsStr, sizeof(MapRenderState::anarchyHighwaysCustomRingsStr))) {
+                    if (InputIMEHelper::InputTextWithIME(LanguageManager::GetText("ANARCHY_HIGHWAYS_CUSTOM_RINGS"), MapRenderState::anarchyHighwaysCustomRingsStr, sizeof(MapRenderState::anarchyHighwaysCustomRingsStr))) {
                         LanguageManager::SaveConfig();
                     }
                 }

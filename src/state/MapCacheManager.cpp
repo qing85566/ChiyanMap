@@ -993,6 +993,22 @@ namespace MapCacheManager {
             ? std::min(MAP_DATA_RADIUS, MapRenderState::g_mapWritingDistance * 16)
             : MAP_DATA_RADIUS;
 
+        std::string dir = g_cacheDir + GetRegionSubdir(isCave);
+
+        // 缓存最近访问的区域指针与哈希，利用空间局部性消除每像素哈希表检索
+        uint64_t lastHash = (uint64_t)-1;
+        RegionData* currentRegion = nullptr;
+
+        // 收集本次扫描触碰到的所有区域（513x513 扫描至多触及 4~9 个区域）
+        struct TouchedReg {
+            int rx;
+            int rz;
+            uint64_t hash;
+            RegionData* reg;
+        };
+        TouchedReg touchedRegs[16];
+        int touchedCount = 0;
+
         for (int z = 0; z < MAP_DATA_SIZE; z++) {
             int dz = z - MAP_DATA_RADIUS;
             if (std::abs(dz) > maxWriteDist) continue;
@@ -1007,28 +1023,47 @@ namespace MapCacheManager {
                 int rx = (worldX < 0 ? (worldX + 1) / REGION_SIZE - 1 : worldX / REGION_SIZE);
                 int rz = (worldZ < 0 ? (worldZ + 1) / REGION_SIZE - 1 : worldZ / REGION_SIZE);
                 uint64_t hash = GetRegionHash(rx, rz, isCave);
-                
-                std::string dir = g_cacheDir + GetRegionSubdir(isCave);
-                if (g_loadedRegions.find(hash) == g_loadedRegions.end() || g_loadedRegions[hash] == nullptr) {
-                    RegionData* newRegion = new RegionData();
-                    newRegion->dimId = targetDim;
-                    newRegion->saveDir = dir;
-                    std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
-                    LoadRegionFromFile(filePath, *newRegion, isCave);
-                    newRegion->textureDirty = true;
-                    g_loadedRegions[hash] = newRegion;
-                    s_existingRegionFiles.insert(hash);
-                    s_dirtyTextureHashes.insert(hash);
+
+                if (hash != lastHash) {
+                    lastHash = hash;
+                    auto it = g_loadedRegions.find(hash);
+                    if (it == g_loadedRegions.end() || it->second == nullptr) {
+                        RegionData* newRegion = new RegionData();
+                        newRegion->dimId = targetDim;
+                        newRegion->saveDir = dir;
+                        std::string filePath = dir + "region_" + std::to_string(rx) + "_" + std::to_string(rz) + ".bin";
+                        LoadRegionFromFile(filePath, *newRegion, isCave);
+                        newRegion->textureDirty = true;
+                        g_loadedRegions[hash] = newRegion;
+                        s_existingRegionFiles.insert(hash);
+                        s_dirtyTextureHashes.insert(hash);
+                        currentRegion = newRegion;
+                    } else {
+                        currentRegion = it->second;
+                    }
+                    if (currentRegion) {
+                        currentRegion->dimId = targetDim;
+                        if (currentRegion->saveDir.empty()) {
+                            currentRegion->saveDir = dir;
+                        }
+                        // 登记到 touchedRegs 数组
+                        bool found = false;
+                        for (int i = 0; i < touchedCount; ++i) {
+                            if (touchedRegs[i].hash == hash) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found && touchedCount < 16) {
+                            touchedRegs[touchedCount++] = { rx, rz, hash, currentRegion };
+                        }
+                    }
                 }
 
-                RegionData* region = g_loadedRegions[hash];
+                RegionData* region = currentRegion;
                 if (!region) continue;
-                region->dimId = targetDim;
-                if (region->saveDir.empty()) {
-                    region->saveDir = dir;
-                }
-                int localX = worldX - (rx * REGION_SIZE); int localZ = worldZ - (rz * REGION_SIZE);
 
+                int localX = worldX - (rx * REGION_SIZE); int localZ = worldZ - (rz * REGION_SIZE);
                 float currentY = scanHeights[x][z];
                 int index = (localZ * REGION_SIZE + localX) * 4;
 
@@ -1049,14 +1084,20 @@ namespace MapCacheManager {
                 if (scanLights) {
                     region->lightLevels[heightIndex] = scanLights[x][z];
                 }
-
-                region->dirty = true;
-                region->textureDirty = true;
-                s_existingRegionFiles.insert(hash);
-                s_dirtyTextureHashes.insert(hash);
-                region->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
-                MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
             }
+        }
+
+        // 统一更新所触碰区域的脏标记、纹理脏标记与金字塔层级（从 26 万次像素级调用优化为 4~9 次区域级调用）
+        for (int i = 0; i < touchedCount; ++i) {
+            RegionData* reg = touchedRegs[i].reg;
+            if (reg) {
+                reg->dirty = true;
+                reg->textureDirty = true;
+                reg->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
+            }
+            s_existingRegionFiles.insert(touchedRegs[i].hash);
+            s_dirtyTextureHashes.insert(touchedRegs[i].hash);
+            MarkBranchPyramidDirtyForRegionUnlocked(touchedRegs[i].rx, touchedRegs[i].rz, isCave);
         }
     }
 
@@ -1083,6 +1124,8 @@ namespace MapCacheManager {
         int slopeMode = MapRenderState::terrainSlopes;
         bool depth = MapRenderState::terrainDepth;
         int regDim = (region->dimId >= 0) ? region->dimId : s_currentLoadedDimId;
+        bool enableLighting = MapRenderState::mapLighting;
+        float skyBright = MapRenderState::ComputeSkyLightBrightness(MapRenderState::g_gameTimeTicks.load(), regDim, forceNighttime);
 
         for (int z = 0; z < REGION_SIZE; ++z) {
             for (int x = 0; x < REGION_SIZE; ++x) {
@@ -1173,13 +1216,13 @@ namespace MapCacheManager {
                 float fg = (region->colors[idx + 1] / 255.0f) * shade;
                 float fb = (region->colors[idx + 2] / 255.0f) * shade;
 
-                MapRenderState::ApplyMapLighting(
+                MapRenderState::ApplyMapLightingPrecomputed(
                     fr, fg, fb,
                     region->lightLevels[hIdx],
                     isCave,
                     regDim,
-                    MapRenderState::mapLighting,
-                    forceNighttime
+                    enableLighting,
+                    skyBright
                 );
 
                 outBuffer[idx + 0] = (uint8_t)(std::clamp(fr, 0.0f, 1.0f) * 255.0f);
@@ -1725,6 +1768,12 @@ namespace MapCacheManager {
         if (s_currentLoadedMapId != MultiworldManager::GetActiveMapId()) return;
         std::string expectedDimStr = "dim_" + std::to_string(targetDim);
         if (g_cacheDir.find(expectedDimStr) == std::string::npos) return;
+        uint64_t lastHash = (uint64_t)-1;
+        RegionData* lastRegion = nullptr;
+        int lastRx = -999999, lastRz = -999999;
+        std::string lastBiomeName = "";
+        uint8_t lastBiomeIdx = BIOME_INDEX_UNKNOWN;
+
         for (const auto& e : entries) {
             // [群系合法性防护] 严格核实生物群系是否属于该维度，绝不将主世界群系写入下界/末地
             if (!IsValidBiomeForDimension(targetDim, e.name)) continue;
@@ -1736,28 +1785,41 @@ namespace MapCacheManager {
             int rz = (blockZ < 0 ? (blockZ + 1) / REGION_SIZE - 1 : blockZ / REGION_SIZE);
             uint64_t hash = GetRegionHash(rx, rz);
 
-            // 确保 region 在内存中（若未加载则跳过，下次扫描会补）
-            auto it = g_loadedRegions.find(hash);
-            if (it == g_loadedRegions.end() || it->second == nullptr) continue;
+            if (hash != lastHash) {
+                lastHash = hash;
+                lastRx = rx;
+                lastRz = rz;
+                auto it = g_loadedRegions.find(hash);
+                lastRegion = (it != g_loadedRegions.end()) ? it->second : nullptr;
+                lastBiomeName.clear();
+                lastBiomeIdx = BIOME_INDEX_UNKNOWN;
+            }
 
-            RegionData* region = it->second;
+            if (!lastRegion) continue;
+
             int localCellX = (blockX - rx * REGION_SIZE) / BIOME_CELL_SIZE;
             int localCellZ = (blockZ - rz * REGION_SIZE) / BIOME_CELL_SIZE;
             if (localCellX < 0 || localCellX >= BIOME_CELLS_PER_REGION ||
                 localCellZ < 0 || localCellZ >= BIOME_CELLS_PER_REGION) continue;
 
-            // 查找或插入 biomeTable
+            // 查找或插入 biomeTable (结合上一单元格缓存)
             uint8_t idx = BIOME_INDEX_UNKNOWN;
-            for (size_t i = 0; i < region->biomeTable.size() && i < 255; i++) {
-                if (region->biomeTable[i] == e.name) { idx = (uint8_t)i; break; }
+            if (!lastBiomeName.empty() && e.name == lastBiomeName && lastBiomeIdx != BIOME_INDEX_UNKNOWN) {
+                idx = lastBiomeIdx;
+            } else {
+                for (size_t i = 0; i < lastRegion->biomeTable.size() && i < 255; i++) {
+                    if (lastRegion->biomeTable[i] == e.name) { idx = (uint8_t)i; break; }
+                }
+                if (idx == BIOME_INDEX_UNKNOWN) {
+                    if (lastRegion->biomeTable.size() >= 255) continue; // 表满，跳过（极少见）
+                    lastRegion->biomeTable.push_back(e.name);
+                    idx = (uint8_t)(lastRegion->biomeTable.size() - 1);
+                }
+                lastBiomeName = e.name;
+                lastBiomeIdx = idx;
             }
-            if (idx == BIOME_INDEX_UNKNOWN) {
-                if (region->biomeTable.size() >= 255) continue; // 表满，跳过（极少见）
-                region->biomeTable.push_back(e.name);
-                idx = (uint8_t)(region->biomeTable.size() - 1);
-            }
-            region->biomeCells[localCellZ * BIOME_CELLS_PER_REGION + localCellX] = idx;
-            region->dirty = true;
+            lastRegion->biomeCells[localCellZ * BIOME_CELLS_PER_REGION + localCellX] = idx;
+            lastRegion->dirty = true;
         }
     }
 
@@ -1923,24 +1985,30 @@ namespace MapCacheManager {
 
                 if (boxMinX > boxMaxX || boxMinZ > boxMaxZ) continue;
 
-                for (int wx = boxMinX; wx <= boxMaxX; ++wx) {
-                    int arrX = wx - startX;
-                    int localX = wx - regMinX;
-                    for (int wz = boxMinZ; wz <= boxMaxZ; ++wz) {
-                        int arrZ = wz - startZ;
-                        int localZ = wz - regMinZ;
+                int regDim = (region->dimId >= 0) ? region->dimId : s_currentLoadedDimId;
+                bool enableLighting = MapRenderState::mapLighting;
+                float skyBright = MapRenderState::ComputeSkyLightBrightness(MapRenderState::g_gameTimeTicks.load(), regDim, false);
+
+                for (int wz = boxMinZ; wz <= boxMaxZ; ++wz) {
+                    int arrZ = wz - startZ;
+                    int localZ = wz - regMinZ;
+                    int regRowOffset = localZ * REGION_SIZE;
+                    int texRowOffset = arrZ * MAP_DATA_SIZE;
+                    for (int wx = boxMinX; wx <= boxMaxX; ++wx) {
+                        int arrX = wx - startX;
+                        int localX = wx - regMinX;
 
                         if (onlyIfMissing && outColors[arrX][arrZ].a > 0.01f) {
                             continue;
                         }
 
-                        int regColorIdx = (localZ * REGION_SIZE + localX) * 4;
+                        int hIdx = regRowOffset + localX;
+                        int regColorIdx = hIdx * 4;
                         uint8_t a = region->colors[regColorIdx + 3];
                         if (a >= 10) {
                             uint8_t r = region->colors[regColorIdx + 0];
                             uint8_t g = region->colors[regColorIdx + 1];
                             uint8_t b = region->colors[regColorIdx + 2];
-                            int hIdx = localZ * REGION_SIZE + localX;
                             int16_t h = region->heights[hIdx];
                             uint8_t packedLight = region->lightLevels[hIdx];
                             float currentY = (h != HEIGHT_UNKNOWN) ? (float)h : 64.0f;
@@ -1959,7 +2027,7 @@ namespace MapCacheManager {
                                     if (nh != HEIGHT_UNKNOWN && std::abs(currentY - (float)nh) < 64.0f) northY = (float)nh;
                                 }
                                 if (localX > 0) {
-                                    int16_t wh = region->heights[localZ * REGION_SIZE + (localX - 1)];
+                                    int16_t wh = region->heights[regRowOffset + (localX - 1)];
                                     if (wh != HEIGHT_UNKNOWN && std::abs(currentY - (float)wh) < 64.0f) westY = (float)wh;
                                 }
                                 if (localX > 0 && localZ > 0) {
@@ -1976,16 +2044,15 @@ namespace MapCacheManager {
                                 float fr = (r / 255.0f) * shade;
                                 float fg = (g / 255.0f) * shade;
                                 float fb = (b / 255.0f) * shade;
-                                int regDim = (region->dimId >= 0) ? region->dimId : s_currentLoadedDimId;
-                                MapRenderState::ApplyMapLighting(
+                                MapRenderState::ApplyMapLightingPrecomputed(
                                     fr, fg, fb,
                                     packedLight,
                                     isCave,
                                     regDim,
-                                    MapRenderState::mapLighting,
-                                    false
+                                    enableLighting,
+                                    skyBright
                                 );
-                                int texIdx = (arrZ * MAP_DATA_SIZE + arrX) * 4;
+                                int texIdx = (texRowOffset + arrX) * 4;
                                 outTextureData[texIdx + 0] = (uint8_t)(std::clamp(fr, 0.0f, 1.0f) * 255.0f);
                                 outTextureData[texIdx + 1] = (uint8_t)(std::clamp(fg, 0.0f, 1.0f) * 255.0f);
                                 outTextureData[texIdx + 2] = (uint8_t)(std::clamp(fb, 0.0f, 1.0f) * 255.0f);

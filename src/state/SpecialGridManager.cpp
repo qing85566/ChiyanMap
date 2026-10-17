@@ -347,6 +347,15 @@ namespace SpecialGridManager {
     }
 
     void RenderMinimapOverlays(ImDrawList* drawList, ImVec2 center, float radius, float zoomScale, float angleRad, float playerX, float playerZ, bool isSquare, ImVec2 mapMin, ImVec2 mapMax, int dimId) {
+        // [性能] 若所有小地图覆盖层均未开启，立即跳过后续全部矩阵三角函数计算与视口推入
+        bool hasOverlays = showRegionGrid || showMapArtGrid ||
+            (showSpawnChunks && showSpawnChunksOnMinimap && dimId == 0) ||
+            (showViewDistance && showViewDistanceOnMinimap && dimId == MapRenderState::currentDimensionId) ||
+            (showSimulationDistance && showSimulationDistanceOnMinimap && dimId == MapRenderState::currentDimensionId) ||
+            showWorldBorder ||
+            (persistentBreadcrumbsEnabled && MapRenderState::showFootsteps);
+        if (!hasOverlays) return;
+
         float c_rot = std::cos(angleRad);
         float s_rot = std::sin(angleRad);
 

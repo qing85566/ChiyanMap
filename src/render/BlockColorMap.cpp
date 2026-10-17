@@ -9,11 +9,11 @@
 
 namespace BlockColorMap {
 
-static void LogColorMissInternal(std::string const& tag, std::string const& name) {
+static void LogColorMissInternal(std::string_view tag, std::string_view name) {
     static std::unordered_set<std::string> s_loggedMisses;
     static std::mutex s_missLogMutex;
     std::lock_guard<std::mutex> lock(s_missLogMutex);
-    std::string key = tag + ":" + name;
+    std::string key = std::string(tag) + ":" + std::string(name);
     if (s_loggedMisses.size() < 1000 && s_loggedMisses.insert(key).second) {
         try {
             auto dataDir = chiyan_map::ChiyanMap::getInstance().getSelf().getDataDir();
@@ -25,10 +25,64 @@ static void LogColorMissInternal(std::string const& tag, std::string const& name
     }
 }
 
-bool IsInvisibleOrTechnicalOverlay(std::string const& rawName) noexcept {
+// 零堆分配的高性能小写视图提取器：
+// 对于绝大多数原版纯小写方块（如 minecraft:stone），直接返回原始 std::string_view；
+// 仅当包含大写字母且长度 < 128 时，在调用者栈缓存中转小写；极端长字符串回退堆分配
+struct FastLowerString {
+    char stackBuf[128];
+    std::string heapBuf;
+    std::string_view view;
+
+    explicit FastLowerString(std::string_view raw) noexcept {
+        bool hasUpper = false;
+        for (char c : raw) {
+            if (c >= 'A' && c <= 'Z') {
+                hasUpper = true;
+                break;
+            }
+        }
+        if (!hasUpper) {
+            view = raw;
+            return;
+        }
+        if (raw.size() < sizeof(stackBuf)) {
+            for (size_t i = 0; i < raw.size(); ++i) {
+                char c = raw[i];
+                if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+                stackBuf[i] = c;
+            }
+            view = std::string_view(stackBuf, raw.size());
+        } else {
+            heapBuf.assign(raw.data(), raw.size());
+            for (char& c : heapBuf) {
+                if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+            }
+            view = heapBuf;
+        }
+    }
+
+    constexpr std::string_view get() const noexcept { return view; }
+};
+
+inline bool IsCommonOpaqueSolid(std::string_view name) noexcept {
+    // 快速前缀过滤常见实心方块，避免进入后续几十个 substring 查找
+    if (name.rfind("minecraft:stone", 0) == 0 || name.rfind("minecraft:dirt", 0) == 0 ||
+        name.rfind("minecraft:grass_block", 0) == 0 || name.rfind("minecraft:deepslate", 0) == 0 ||
+        name.rfind("minecraft:netherrack", 0) == 0 || name.rfind("minecraft:end_stone", 0) == 0 ||
+        name.rfind("minecraft:sand", 0) == 0 || name.rfind("minecraft:gravel", 0) == 0 ||
+        name.rfind("minecraft:cobble", 0) == 0 || name.rfind("minecraft:tuff", 0) == 0 ||
+        name.rfind("minecraft:andesite", 0) == 0 || name.rfind("minecraft:diorite", 0) == 0 ||
+        name.rfind("minecraft:granite", 0) == 0 || name.rfind("minecraft:bedrock", 0) == 0) {
+        return true;
+    }
+    return false;
+}
+
+bool IsInvisibleOrTechnicalOverlay(std::string_view rawName) noexcept {
     if (rawName.empty()) return true;
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+    if (IsCommonOpaqueSolid(rawName)) return false;
+    FastLowerString lower(rawName);
+    std::string_view name = lower.get();
 
     if (name == "minecraft:air" || name == "air" ||
         name == "minecraft:cave_air" || name == "cave_air" ||
@@ -38,38 +92,38 @@ bool IsInvisibleOrTechnicalOverlay(std::string const& rawName) noexcept {
         name == "minecraft:glass_pane" || name == "glass_pane" ||
         name == "minecraft:hard_glass" || name == "hard_glass" ||
         name == "minecraft:hard_glass_pane" || name == "hard_glass_pane") return true;
-    if (name.find("barrier") != std::string::npos) return true;
-    if (name.find("light_block") != std::string::npos) return true;
-    if (name.find("structure_void") != std::string::npos) return true;
-    if (name.find("placeholder") != std::string::npos) return true;
-    if (name.find("unknown") != std::string::npos) return true;
-    if (name.find("info_update") != std::string::npos) return true;
-    if (name.find("invisiblebedrock") != std::string::npos || name.find("invisible_bedrock") != std::string::npos) return true;
-    if (name.find("movingblock") != std::string::npos || name.find("moving_block") != std::string::npos) return true;
-    if (name.find("pistonarmcollision") != std::string::npos || name.find("piston_arm_collision") != std::string::npos) return true;
-    if (name.find("border_block") != std::string::npos) return true;
+    if (name.find("barrier") != std::string_view::npos) return true;
+    if (name.find("light_block") != std::string_view::npos) return true;
+    if (name.find("structure_void") != std::string_view::npos) return true;
+    if (name.find("placeholder") != std::string_view::npos) return true;
+    if (name.find("unknown") != std::string_view::npos) return true;
+    if (name.find("info_update") != std::string_view::npos) return true;
+    if (name.find("invisiblebedrock") != std::string_view::npos || name.find("invisible_bedrock") != std::string_view::npos) return true;
+    if (name.find("movingblock") != std::string_view::npos || name.find("moving_block") != std::string_view::npos) return true;
+    if (name.find("pistonarmcollision") != std::string_view::npos || name.find("piston_arm_collision") != std::string_view::npos) return true;
+    if (name.find("border_block") != std::string_view::npos) return true;
     if (name == "minecraft:allow" || name == "allow" || name == "minecraft:deny" || name == "deny") return true;
     if (name == "minecraft:camera" || name == "camera") return true;
-    if (name.find("tripwire") != std::string::npos || name.find("trip_wire") != std::string::npos) return true;
-    if (name.find("frame") != std::string::npos && name.find("end_portal_frame") == std::string::npos) return true;
-    if (name.find("reserved") != std::string::npos) return true;
+    if (name.find("tripwire") != std::string_view::npos || name.find("trip_wire") != std::string_view::npos) return true;
+    if (name.find("frame") != std::string_view::npos && name.find("end_portal_frame") == std::string_view::npos) return true;
+    if (name.find("reserved") != std::string_view::npos) return true;
     return false;
 }
 
 // [原木与菌柄判断] 检测方块是否为有年轮/树皮朝向区分的原木或菌柄
-bool IsPillarLogOrStem(std::string const& rawName) noexcept {
-    if (rawName.empty()) return false;
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
-    if (name.find("wood") != std::string::npos || name.find("hyphae") != std::string::npos) return false;
-    if (name.find("log") != std::string::npos) return true;
-    if (name.find("crimson_stem") != std::string::npos || name.find("warped_stem") != std::string::npos) return true;
+bool IsPillarLogOrStem(std::string_view rawName) noexcept {
+    if (rawName.empty() || IsCommonOpaqueSolid(rawName)) return false;
+    FastLowerString lower(rawName);
+    std::string_view name = lower.get();
+    if (name.find("wood") != std::string_view::npos || name.find("hyphae") != std::string_view::npos) return false;
+    if (name.find("log") != std::string_view::npos) return true;
+    if (name.find("crimson_stem") != std::string_view::npos || name.find("warped_stem") != std::string_view::npos) return true;
     return false;
 }
 
 // [水平放置原木转树皮名称] 水平放置时映射为对应树皮材质 (_log -> _wood, _stem -> _hyphae)
-std::string GetHorizontalWoodName(std::string const& name) {
-    std::string result = name;
+std::string GetHorizontalWoodName(std::string_view name) {
+    std::string result(name);
     size_t pos = result.find("stem");
     if (pos != std::string::npos) {
         result.replace(pos, 4, "hyphae");
@@ -84,58 +138,57 @@ std::string GetHorizontalWoodName(std::string const& name) {
 }
 
 // [花朵方块判定] 用于 "Load Flowers" (加载花朵) 开关控制
-bool IsFlowerBlock(std::string const& rawName) noexcept {
-    if (rawName.empty()) return false;
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+bool IsFlowerBlock(std::string_view rawName) noexcept {
+    if (rawName.empty() || IsCommonOpaqueSolid(rawName)) return false;
+    FastLowerString lower(rawName);
+    std::string_view name = lower.get();
 
     // 排除带花树叶与花盆
-    if (name.find("leaves") != std::string::npos || name.find("flower_pot") != std::string::npos) return false;
+    if (name.find("leaves") != std::string_view::npos || name.find("flower_pot") != std::string_view::npos) return false;
 
-    if (name.find("dandelion") != std::string::npos ||
-        name.find("poppy") != std::string::npos ||
-        name.find("blue_orchid") != std::string::npos ||
-        name.find("allium") != std::string::npos ||
-        name.find("azure_bluet") != std::string::npos ||
-        name.find("tulip") != std::string::npos ||
-        name.find("oxeye_daisy") != std::string::npos ||
-        name.find("cornflower") != std::string::npos ||
-        name.find("lily_of_the_valley") != std::string::npos ||
-        name.find("wither_rose") != std::string::npos ||
-        name.find("torchflower") != std::string::npos ||
-        name.find("pitcher_plant") != std::string::npos ||
-        name.find("pitcher_crop") != std::string::npos ||
-        name.find("sunflower") != std::string::npos ||
-        name.find("lilac") != std::string::npos ||
-        name.find("rose_bush") != std::string::npos ||
-        name.find("peony") != std::string::npos ||
-        name.find("pink_petals") != std::string::npos ||
-        name.find("wildflowers") != std::string::npos ||
-        name.find("cactus_flower") != std::string::npos ||
-        name.find("eyeblossom") != std::string::npos ||
-        name.find("spore_blossom") != std::string::npos ||
-        name.find("red_flower") != std::string::npos ||
-        name.find("yellow_flower") != std::string::npos ||
-        name.find("chorus_flower") != std::string::npos ||
-        name.find("flowering_azalea") != std::string::npos) {
+    if (name.find("dandelion") != std::string_view::npos ||
+        name.find("poppy") != std::string_view::npos ||
+        name.find("blue_orchid") != std::string_view::npos ||
+        name.find("allium") != std::string_view::npos ||
+        name.find("azure_bluet") != std::string_view::npos ||
+        name.find("tulip") != std::string_view::npos ||
+        name.find("oxeye_daisy") != std::string_view::npos ||
+        name.find("cornflower") != std::string_view::npos ||
+        name.find("lily_of_the_valley") != std::string_view::npos ||
+        name.find("wither_rose") != std::string_view::npos ||
+        name.find("torchflower") != std::string_view::npos ||
+        name.find("pitcher_plant") != std::string_view::npos ||
+        name.find("pitcher_crop") != std::string_view::npos ||
+        name.find("sunflower") != std::string_view::npos ||
+        name.find("lilac") != std::string_view::npos ||
+        name.find("rose_bush") != std::string_view::npos ||
+        name.find("peony") != std::string_view::npos ||
+        name.find("pink_petals") != std::string_view::npos ||
+        name.find("wildflowers") != std::string_view::npos ||
+        name.find("cactus_flower") != std::string_view::npos ||
+        name.find("eyeblossom") != std::string_view::npos ||
+        name.find("spore_blossom") != std::string_view::npos ||
+        name.find("red_flower") != std::string_view::npos ||
+        name.find("yellow_flower") != std::string_view::npos ||
+        name.find("chorus_flower") != std::string_view::npos ||
+        name.find("flowering_azalea") != std::string_view::npos) {
         return true;
     }
     return false;
 }
 
 // [玻璃与染色玻璃判定] 用于 "Display Stained Glass" 开关控制
-bool IsGlassOrStainedGlassBlock(std::string const& rawName) noexcept {
-    if (rawName.empty()) return false;
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
-    return name.find("glass") != std::string::npos;
+bool IsGlassOrStainedGlassBlock(std::string_view rawName) noexcept {
+    if (rawName.empty() || IsCommonOpaqueSolid(rawName)) return false;
+    FastLowerString lower(rawName);
+    return lower.get().find("glass") != std::string_view::npos;
 }
 
 // [多层半透明方块 Overlay 取色] 支持染色玻璃、遮光玻璃、普通玻璃、半透明冰、黏液块、蜂蜜块、传送门逐层混合
-bool GetTranslucentOverlayColor(std::string const& rawName, mce::Color& outColor, float& outAlpha) noexcept {
-    if (rawName.empty()) return false;
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+bool GetTranslucentOverlayColor(std::string_view rawName, mce::Color& outColor, float& outAlpha) noexcept {
+    if (rawName.empty() || IsCommonOpaqueSolid(rawName)) return false;
+    FastLowerString lower(rawName);
+    std::string_view name = lower.get();
 
     // 1. 玻璃系列 (染色玻璃 / 遮光玻璃 / 普通透明玻璃)
     if (name.find("glass") != std::string::npos) {
@@ -223,10 +276,10 @@ bool GetTranslucentOverlayColor(std::string const& rawName, mce::Color& outColor
 }
 
 // [自发光方块内置亮度表] 供地图光照系统采样时保底自发光方块的光源亮度 (0..15)
-uint8_t GetIntrinsicBlockLight(std::string const& rawName) noexcept {
-    if (rawName.empty()) return 0;
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+uint8_t GetIntrinsicBlockLight(std::string_view rawName) noexcept {
+    if (rawName.empty() || IsCommonOpaqueSolid(rawName)) return 0;
+    FastLowerString lower(rawName);
+    std::string_view name = lower.get();
 
     if (name.find("lava") != std::string::npos ||
         name.find("glowstone") != std::string::npos ||
@@ -275,9 +328,9 @@ uint8_t GetIntrinsicBlockLight(std::string const& rawName) noexcept {
 // [原版地图调色板引擎 (Vanilla Map Color Mode)]
 // 严格遵循 Minecraft 原版 MapColor 标准 64 色系调色板，并支持可选群系染色
 // =========================================================================
-mce::Color GetVanillaBlockColor(std::string const& rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol, bool useBiomeColors) {
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+mce::Color GetVanillaBlockColor(std::string_view rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol, bool useBiomeColors) {
+    FastLowerString lower(rawName);
+    std::string_view name = lower.get();
 
     if (IsInvisibleOrTechnicalOverlay(name)) {
         return mce::Color(0.0f, 0.0f, 0.0f, 0.0f);
@@ -495,14 +548,18 @@ mce::Color GetVanillaBlockColor(std::string const& rawName, mce::Color grassCol,
     return rgb(112, 112, 112);
 }
 
-mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol) {
+mce::Color GetBlockColor(std::string_view rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol) {
+    if (rawName.empty()) {
+        return mce::Color(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
     if (MapRenderState::blockColorMode == 1) {
         return GetVanillaBlockColor(rawName, grassCol, foliageCol, waterCol, MapRenderState::biomeColorsInVanilla);
     }
 
     // 统一转为全小写，杜绝基岩版 camelCase 命名（如 invisibleBedrock, seaLantern, tripWire, concretePowder）匹配问题
-    std::string name = rawName;
-    for (char& c : name) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+    FastLowerString lower(rawName);
+    std::string_view name = lower.get();
 
     if (IsInvisibleOrTechnicalOverlay(name)) {
         return mce::Color(0.0f, 0.0f, 0.0f, 0.0f);
@@ -1755,11 +1812,11 @@ mce::Color GetBlockColor(std::string const& rawName, mce::Color grassCol, mce::C
     };
 
     // 去除命名空间前缀 "minecraft:" 与强化玻璃前缀 "hard_" 便于快速精确查找
-    std::string cleanName = name;
-    if (cleanName.rfind("minecraft:", 0) == 0) cleanName = cleanName.substr(10);
-    if (cleanName.rfind("hard_", 0) == 0) cleanName = cleanName.substr(5);
+    std::string_view cleanName = name;
+    if (cleanName.rfind("minecraft:", 0) == 0) cleanName.remove_prefix(10);
+    if (cleanName.rfind("hard_", 0) == 0) cleanName.remove_prefix(5);
 
-    auto exactIt = s_exactBlockColors.find(cleanName);
+    auto exactIt = s_exactBlockColors.find(std::string(cleanName));
     if (exactIt != s_exactBlockColors.end()) {
         return exactIt->second;
     }

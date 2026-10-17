@@ -1,6 +1,7 @@
 #include "DrawingManager.h"
 #include "LanguageManager.h"
 #include "MapRenderState.h"
+#include "hooks/InputIMEHelper.h"
 #include <windows.h>
 #include <algorithm>
 #include <cmath>
@@ -1182,10 +1183,10 @@ namespace DrawingManager {
 
                 // 新建图层输入栏
                 ImGui::PushItemWidth(layW - 90.0f * curScale);
-                ImGui::InputTextWithHint("##NewLayerName", LanguageManager::GetText("WP_FOLDER_NAME"), s_newLayerNameBuf, sizeof(s_newLayerNameBuf));
+                bool enterNewLayer = InputIMEHelper::InputTextWithIME("##NewLayerName", s_newLayerNameBuf, sizeof(s_newLayerNameBuf), LanguageManager::GetText("WP_FOLDER_NAME"), ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::PopItemWidth();
                 ImGui::SameLine();
-                if (ImGui::Button(LanguageManager::GetText("DRAWING_LAYER_NEW"))) {
+                if (ImGui::Button(LanguageManager::GetText("DRAWING_LAYER_NEW")) || enterNewLayer) {
                     AddLayer(s_newLayerNameBuf);
                     s_newLayerNameBuf[0] = '\0';
                 }
@@ -1301,7 +1302,7 @@ namespace DrawingManager {
             ImGui::Text("%s", LanguageManager::GetText("DRAWING_TEXT_PROMPT"));
 
             ImGui::PushItemWidth(260.0f * curScale);
-            bool enterPressed = ImGui::InputText("##TextAnnotationInput", g_textInputBuffer, sizeof(g_textInputBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
+            bool enterPressed = InputIMEHelper::InputTextWithIME("##TextAnnotationInput", g_textInputBuffer, sizeof(g_textInputBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::PopItemWidth();
 
             ImGui::SliderFloat(LanguageManager::GetText("DRAWING_TEXT_FONT_SIZE"), &g_textFontSize, 12.0f, 32.0f, "%.0f pt");
