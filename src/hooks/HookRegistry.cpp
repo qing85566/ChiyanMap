@@ -5,8 +5,7 @@
 #include "hooks/BeaconRenderHook.h"
 
 void registerAllHooks() {
-    // 只注册原生的游戏逻辑与 UI 钩子
-    ClientInstanceUpdateHook::hook();
+    // 注册除 ClientInstance::$update 之外的所有原生游戏逻辑与 UI 钩子
     LevelUpdateWeatherHook::hook();
     UIRenderContextFlushTextHook::hook();
     BeaconRenderHook::hook();
@@ -34,6 +33,15 @@ void registerAllHooks() {
     LocalPlayerIsImmobileHook::hook();
 }
 
+void hookClientInstanceUpdate() {
+    // [兼容性关键修复] 延迟在模组 enable() 阶段挂钩 ClientInstance::$update
+    // BetterRenderDragon 通过扫描 ClientInstance::update 原始机器码序言 (55 41 57 41 56 41...) 来定位并挂钩。
+    // 如果 ChiyanMap 在 load() 阶段抢先挂钩，函数开头会被覆盖为 JMP 指令，
+    // 导致 BetterRenderDragon 扫描失败而无法获取 ResourcePackManager，进而使其光影/材质替换完全失效。
+    // 将此处推迟至 enable() 执行，让 BetterRenderDragon 在启动期顺利完成挂钩，之后两者形成链式调用完美共存。
+    ClientInstanceUpdateHook::hook();
+}
+
 void unregisterAllHooks() {
     ClientInstanceUpdateHook::unhook();
     LevelUpdateWeatherHook::unhook();
@@ -44,7 +52,6 @@ void unregisterAllHooks() {
     GameModeStartDestroyBlockHook::unhook();
     GameModeUseItemHook::unhook();
     GameModeAttackHook::unhook();
-
 
     LocalPlayerSwingHook::unhook();
     LocalPlayerMissedSwingHook::unhook();
@@ -64,20 +71,14 @@ void unregisterAllHooks() {
     LocalPlayerIsImmobileHook::unhook();
 }
 
-// 非 inline 包装: ChiyanMap.cpp 无法包含 PlayerHook.h (hook 宏会多重定义),
-// 通过此包装函数桥接调用 inline 的 ShutdownCacheWriteThread()
 void shutdownCacheWriteThread() {
     ShutdownCacheWriteThread();
 }
 
-// 非 inline 包装: 供 ChiyanMap::enable() 提前初始化 DXGI 与输入底层钩子，
-// 避免将耗时初始化推迟到主菜单首次渲染帧导致卡顿
 bool initDX11Hook() {
     return DX11Hook::init();
 }
 
-// 非 inline 包装: ChiyanMap.cpp 无法包含 DX11Hook.h (会传递包含 PlayerHook.h 导致多重定义),
-// 通过此包装函数桥接调用 inline 的 DX11Hook::shutdown()
 void shutdownDX11Hook() {
     DX11Hook::shutdown();
 }

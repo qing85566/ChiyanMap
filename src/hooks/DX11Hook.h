@@ -23,6 +23,7 @@
 #include <backends/imgui_impl_dx11.h>
 #include <ll/api/memory/Hook.h>
 #include <MinHook.h>
+#include <safetyhook.hpp>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -218,10 +219,10 @@ namespace DX11Hook {
     typedef HRESULT(__stdcall* ResizeBuffers_t)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
     typedef void(__stdcall* ExecuteCommandLists_t)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 
-    inline Present_t oPresent = nullptr;
-    inline Present1_t oPresent1 = nullptr;
-    inline ResizeBuffers_t oResizeBuffers = nullptr;
-    inline ExecuteCommandLists_t oExecuteCommandLists = nullptr;
+    inline safetyhook::InlineHook g_hookPresent;
+    inline safetyhook::InlineHook g_hookPresent1;
+    inline safetyhook::InlineHook g_hookResizeBuffers;
+    inline safetyhook::InlineHook g_hookExecuteCommandLists;
 
     inline ID3D11Device* g_pd3dDevice = nullptr;
     inline ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -580,6 +581,14 @@ namespace DX11Hook {
     inline std::atomic<bool> g_bakingExit{false};
     inline std::thread* g_bakingThread = nullptr;
 
+    inline void SafeDestroyImGuiContext() {
+        __try {
+            ImGui_ImplDX11_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            ImGui::DestroyContext();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
     inline void ShutdownImGuiAndBuffers() {
         // [性能] 通知持久化烘焙线程退出并等待其结束
         if (g_bakingThread) {
@@ -642,12 +651,15 @@ namespace DX11Hook {
         }
 
         // 释放 D3D11/D3D12/ImGui 资源（包括停止持久化烘焙线程）
+        // [安全退出保障] 退出时不注销 MinHook (避免破坏 LeviLamina 及其他模组的全局钩子环境)
+        // 亦不主动析构 SafetyHook 跳板 (防止多线程 Present 并发或链式序言回写冲突)
+        // 所有钩子已有 g_isShuttingDown 原子拦截直接 pass-through 放行原函数
         ShutdownImGuiAndBuffers();
     }
 
     inline HRESULT __stdcall hkResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
         if (MapRenderState::g_isShuttingDown.load()) {
-            if (oResizeBuffers) return oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+            return g_hookResizeBuffers.call<HRESULT>(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
             return S_OK;
         }
         // [性能] ResizeBuffers 会使所有后备缓冲失效，必须释放缓存的包装资源 + RTV，
@@ -657,7 +669,7 @@ namespace DX11Hook {
             ImGui_ImplDX11_InvalidateDeviceObjects();
         }
 
-        HRESULT hr = oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+        HRESULT hr = g_hookResizeBuffers.call<HRESULT>(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
 
         if (SUCCEEDED(hr) && g_imguiInitialized) {
             ImGui_ImplDX11_CreateDeviceObjects();
@@ -667,7 +679,7 @@ namespace DX11Hook {
 
     inline void __stdcall hkExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists, ID3D12CommandList* const* ppCommandLists) {
         if (MapRenderState::g_isShuttingDown.load()) {
-            if (oExecuteCommandLists) oExecuteCommandLists(pQueue, NumCommandLists, ppCommandLists);
+            return g_hookExecuteCommandLists.call<void>(pQueue, NumCommandLists, ppCommandLists);
             return;
         }
         if (!g_pGameCommandQueue) {
@@ -677,7 +689,7 @@ namespace DX11Hook {
                 g_pGameCommandQueue->AddRef();
             }
         }
-        if (oExecuteCommandLists) oExecuteCommandLists(pQueue, NumCommandLists, ppCommandLists);
+        return g_hookExecuteCommandLists.call<void>(pQueue, NumCommandLists, ppCommandLists);
     }
 
     namespace NativeIME = InputIMEHelper;
@@ -1172,6 +1184,7 @@ namespace DX11Hook {
                         MapRenderState::TriggerMinimapToast(MapRenderState::bigMapHideUI ?
                             LanguageManager::GetText("TOAST_BIGMAP_HIDE_UI_ON") :
                             LanguageManager::GetText("TOAST_BIGMAP_HIDE_UI_OFF"));
+
                     }
                     if (MapRenderState::IsUIActive()) {
                         SafeReleaseClientMouse();
@@ -1235,6 +1248,8 @@ namespace DX11Hook {
                         MapRenderState::addWaypointFromBigMap = false;
                     } else if (MapRenderState::showDeathPointUI) {
                         MapRenderState::showDeathPointUI = false;
+                    } else if (BRDInterop::getInstance().isMenuOpen()) {
+                        BRDInterop::getInstance().toggleMenu();
                     } else if (MapRenderState::showBigMap) {
                         if (MapRenderState::hasExportSelection) {
                             MapRenderState::hasExportSelection = false;
@@ -14366,7 +14381,7 @@ namespace DX11Hook {
                                  MapRenderState::teleportState.load() == (int)MapRenderState::TeleportState::Validating ||
                                  MapRenderState::teleportState.load() == (int)MapRenderState::TeleportState::Failed);
             bool has3DWaypoints = MapRenderState::show3DWaypoints && (WaypointManager::GetWaypointCount() > 0 || (MapRenderState::show3DDeathpoints && DeathPointManager::GetDeathPointCount() > 0));
-            bool needsRender = MapRenderState::showMiniMap || MapRenderState::IsUIActive() || isTeleportUI || has3DWaypoints;
+                        bool needsRender = MapRenderState::showMiniMap || MapRenderState::IsUIActive() || isTeleportUI || has3DWaypoints ;
             if (!needsRender) { return; }
 
             auto renderImGuiFrame = [&](ID3D11RenderTargetView* rtv) {
@@ -14635,6 +14650,7 @@ namespace DX11Hook {
 
                 InputIMEHelper::OnFrame();
 
+
                 ImGui::Render();
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
@@ -14699,24 +14715,22 @@ namespace DX11Hook {
 
     inline HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
         if (MapRenderState::g_isShuttingDown.load()) {
-            if (oPresent) return oPresent(pSwapChain, SyncInterval, Flags);
-            return S_OK;
+            return g_hookPresent.call<HRESULT>(pSwapChain, SyncInterval, Flags);
         }
         try {
             RenderImGui(pSwapChain);
         } catch (...) {}
-        return oPresent(pSwapChain, SyncInterval, Flags);
+        return g_hookPresent.call<HRESULT>(pSwapChain, SyncInterval, Flags);
     }
 
     inline HRESULT __stdcall hkPresent1(IDXGISwapChain1* pSwapChain, UINT SyncInterval, UINT Flags, const DXGI_PRESENT_PARAMETERS* pParams) {
         if (MapRenderState::g_isShuttingDown.load()) {
-            if (oPresent1) return oPresent1(pSwapChain, SyncInterval, Flags, pParams);
-            return S_OK;
+            return g_hookPresent1.call<HRESULT>(pSwapChain, SyncInterval, Flags, pParams);
         }
         try {
             RenderImGui(pSwapChain);
         } catch (...) {}
-        return oPresent1(pSwapChain, SyncInterval, Flags, pParams);
+        return g_hookPresent1.call<HRESULT>(pSwapChain, SyncInterval, Flags, pParams);
     }
 
     inline bool init() {
@@ -14727,20 +14741,23 @@ namespace DX11Hook {
         std::lock_guard<std::mutex> lock(s_initMutex);
         if (s_initialized.load()) return true;
 
-        HWND hwnd = FindWindowW(L"Minecraft", NULL);
-        if (!hwnd) hwnd = GetForegroundWindow();
-        bool createdDummyHwnd = false;
-        if (!hwnd) {
-            hwnd = CreateWindowExW(0, L"STATIC", L"ChiyanDummy", WS_OVERLAPPED, 0, 0, 100, 100, NULL, NULL, GetModuleHandle(NULL), NULL);
-            createdDummyHwnd = (hwnd != NULL);
-        }
-        if (!hwnd) return false;
+        // [关键隔离修复] 必须使用完全独立的隐藏虚拟窗口创建虚拟交换链，
+        // 绝不可调用 FindWindow 或 GetForegroundWindow 占用游戏实际主窗口，
+        // 否则创建/销毁 D3D11 交换链会损坏游戏原有的 D3D12 DXGI 窗口关联导致白屏死锁。
+        WNDCLASSEXW wc = {sizeof(WNDCLASSEXW), CS_CLASSDC, DefWindowProcW, 0L, 0L, GetModuleHandleW(NULL), NULL, NULL, NULL, NULL, L"ChiyanDummyClass", NULL};
+        RegisterClassExW(&wc);
+        HWND dummyHwnd = CreateWindowExW(0, wc.lpszClassName, L"ChiyanDummy", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, wc.hInstance, NULL);
+        if (!dummyHwnd) return false;
         
         D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
         DXGI_SWAP_CHAIN_DESC sd = {};
-        sd.BufferCount = 1; sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.OutputWindow = hwnd;
-        sd.SampleDesc.Count = 1; sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        sd.BufferCount = 1;
+        sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.OutputWindow = dummyHwnd;
+        sd.SampleDesc.Count = 1;
+        sd.Windowed = TRUE;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
         ID3D11Device* dummyDevice = nullptr;
         IDXGISwapChain* dummySwapChain = nullptr;
@@ -14748,7 +14765,8 @@ namespace DX11Hook {
 
         MH_STATUS status = MH_Initialize();
         if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) {
-            if (createdDummyHwnd && hwnd) DestroyWindow(hwnd);
+            DestroyWindow(dummyHwnd);
+            UnregisterClassW(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
@@ -14756,22 +14774,19 @@ namespace DX11Hook {
         if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, &featureLevel, 1, D3D11_SDK_VERSION, &sd, &dummySwapChain, &dummyDevice, NULL, &dummyContext))) {
             void** pVTable = *reinterpret_cast<void***>(dummySwapChain);
             
-            if (MH_CreateHook(pVTable[8], (LPVOID)hkPresent, (void**)&oPresent) == MH_OK) {
-                MH_QueueEnableHook(pVTable[8]);
-            }
-            if (MH_CreateHook(pVTable[13], (LPVOID)hkResizeBuffers, (void**)&oResizeBuffers) == MH_OK) {
-                MH_QueueEnableHook(pVTable[13]);
-            }
+            // [安全协同修复] 使用 SafetyHook 挂钩 IDXGISwapChain 接口函数，
+            // 彻底解决与 BetterRenderDragon (同样使用 SafetyHook) 发生机器码序言覆盖冲突导致白屏崩溃的问题
+            g_hookPresent = safetyhook::create_inline(pVTable[8], (void*)&hkPresent);
+            g_hookResizeBuffers = safetyhook::create_inline(pVTable[13], (void*)&hkResizeBuffers);
 
             IDXGISwapChain1* dummySwapChain1 = nullptr;
             if (SUCCEEDED(dummySwapChain->QueryInterface(__uuidof(IDXGISwapChain1), (void**)&dummySwapChain1))) {
                 void** pVTable1 = *reinterpret_cast<void***>(dummySwapChain1);
-                if (MH_CreateHook(pVTable1[22], (LPVOID)hkPresent1, (void**)&oPresent1) == MH_OK) {
-                    MH_QueueEnableHook(pVTable1[22]);
-                }
+                g_hookPresent1 = safetyhook::create_inline(pVTable1[22], (void*)&hkPresent1);
                 dummySwapChain1->Release();
             }
 
+            // user32 键盘鼠标输入 API 仍由 MinHook 统一拦截
             HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
             if (hUser32) {
                 void* pGetRawInputData = (void*)GetProcAddress(hUser32, "GetRawInputData");
@@ -14815,9 +14830,10 @@ namespace DX11Hook {
             d3d11Success = true;
         }
 
-        if (createdDummyHwnd && hwnd) {
-            DestroyWindow(hwnd);
-            hwnd = nullptr;
+        if (dummyHwnd) {
+            DestroyWindow(dummyHwnd);
+            UnregisterClassW(wc.lpszClassName, wc.hInstance);
+            dummyHwnd = nullptr;
         }
 
         if (!d3d11Success) {
@@ -14831,16 +14847,14 @@ namespace DX11Hook {
             ID3D12CommandQueue* pDummyQueue = nullptr;
             if (SUCCEEDED(pDummyD12Device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&pDummyQueue))) {
                 void** pVTable12 = *reinterpret_cast<void***>(pDummyQueue);
-                if (MH_CreateHook(pVTable12[10], (LPVOID)hkExecuteCommandLists, (void**)&oExecuteCommandLists) == MH_OK) {
-                    MH_QueueEnableHook(pVTable12[10]);
-                }
+                // [安全协同修复] 使用 SafetyHook 挂钩 ExecuteCommandLists
+                g_hookExecuteCommandLists = safetyhook::create_inline(pVTable12[10], (void*)&hkExecuteCommandLists);
                 pDummyQueue->Release();
             }
             pDummyD12Device->Release();
         }
 
-        // [性能关键修复] 一次性批量激活所有钩子 (仅执行单次全进程线程挂起与恢复)
-        // 彻底杜绝原本逐个调用 MH_EnableHook 触发 10 次重复线程遍历/冻结所引起的 1~4 秒主菜单严重卡顿
+        // [性能关键修复] 一次性批量激活所有 MinHook 钩子 (仅执行单次全进程线程挂起与恢复)
         MH_ApplyQueued();
 
         s_initialized.store(true);

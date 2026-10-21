@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <windows.h>
 #include <ll/api/memory/Hook.h>
+#include <safetyhook.hpp>
+#include "hooks/BRDInterop.h"
 #include <mc/client/game/ClientInstance.h>
 #include <mc/client/player/LocalPlayer.h>
 #include <mc/world/actor/player/Player.h>
@@ -3014,6 +3016,10 @@ LL_TYPE_INSTANCE_HOOK(
 
     bool result = origin(a1);
 
+    // [BetterRenderDragon 深度协同与光影恢复]
+    // 确保 BRD 捕获 ResourcePackManager，并在就绪后触发 Shader 材质重载
+    BRDInterop::getInstance().update(this);
+
     // [关闭期安全] disable() 已启动资源释放流程（D3D/ImGui/缓存均可能已失效）。
     // 此时进入复杂玩家状态/区块/缓存逻辑会访问已释放对象导致 0xC0000005 退出崩溃。
     // 直接放行原函数结果，让 update 链路继续往下走（游戏自身的退出流程）。
@@ -4119,7 +4125,8 @@ LL_TYPE_INSTANCE_HOOK(
         static bool lastUIState = false;
         bool currentUIState = MapRenderState::IsUIActive();
         static bool s_wasForeground = true;
-        HWND currentHwnd = FindWindowW(L"Minecraft", NULL);
+        HWND currentHwnd = FindWindowW(L"Bedrock", L"Minecraft");
+        if (!currentHwnd) currentHwnd = FindWindowW(L"Bedrock", NULL);
         if (!currentHwnd) currentHwnd = GetForegroundWindow();
         bool isForeground = (currentHwnd && GetForegroundWindow() == currentHwnd);
         bool justRegainedFocus = (isForeground && !s_wasForeground);

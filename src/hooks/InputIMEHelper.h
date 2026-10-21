@@ -239,7 +239,8 @@ namespace InputIMEHelper {
     inline void AttachToItem(const char* label, char* buf, size_t bufSize, const ImVec2& pMin, const ImVec2& pMax, const char* hint = nullptr, ImGuiInputTextFlags flags = 0) {
         if (!buf || bufSize == 0) return;
         if (!g_gameHwnd || !IsWindow(g_gameHwnd)) {
-            g_gameHwnd = FindWindowW(L"Minecraft", NULL);
+            g_gameHwnd = FindWindowW(L"Bedrock", L"Minecraft");
+            if (!g_gameHwnd) g_gameHwnd = FindWindowW(L"Bedrock", NULL);
         }
         if (!g_gameHwnd) return;
 

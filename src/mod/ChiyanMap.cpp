@@ -125,6 +125,10 @@ bool ChiyanMap::enable() {
     // 避免将耗时初始化推迟到主菜单首次渲染帧导致 ~1s 卡顿 (Stutter)
     initDX11Hook();
 
+    // [兼容性关键] 延迟在 enable() 阶段挂钩 ClientInstance::$update
+    // 确保 BetterRenderDragon 启动扫描其原始机器码序言顺利完成
+    hookClientInstanceUpdate();
+
     g_mouseListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::input::MouseInputEvent>(
         [](ll::event::input::MouseInputEvent& ev) {
             if (MapRenderState::g_isShuttingDown.load()) return;
