@@ -1248,8 +1248,6 @@ namespace DX11Hook {
                         MapRenderState::addWaypointFromBigMap = false;
                     } else if (MapRenderState::showDeathPointUI) {
                         MapRenderState::showDeathPointUI = false;
-                    } else if (BRDInterop::getInstance().isMenuOpen()) {
-                        BRDInterop::getInstance().toggleMenu();
                     } else if (MapRenderState::showBigMap) {
                         if (MapRenderState::hasExportSelection) {
                             MapRenderState::hasExportSelection = false;

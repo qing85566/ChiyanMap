@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cmath>
 #include <mc/deps/core/math/Color.h>
-#include "hooks/BRDInterop.h"
 
 inline std::atomic<bool> g_mapDataUpdated{true};
 
@@ -519,7 +518,6 @@ namespace MapRenderState {
 
     // [统一拦截枢纽] 判断是否有任何全屏 UI 处于活动状态
     inline bool IsUIActive() {
-        if (BRDInterop::getInstance().isMenuOpen()) return true;
         int tp = teleportState.load();
         bool isTeleportUIActive = (tp == (int)TeleportState::Loading || 
                                    tp == (int)TeleportState::Validating || 

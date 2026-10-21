@@ -13,12 +13,6 @@ public:
         return instance;
     }
 
-    typedef void (*BRD_ToggleMenu_t)();
-    typedef bool (*BRD_IsMenuOpen_t)();
-
-    BRD_ToggleMenu_t            pfnBRD_ToggleMenu            = nullptr;
-    BRD_IsMenuOpen_t            pfnBRD_IsMenuOpen            = nullptr;
-
     void**                      pResourcePackManager         = nullptr;
     void**                      pResourcePackManager_load    = nullptr;
     std::atomic_bool*           pReloadShaders               = nullptr;
@@ -36,9 +30,6 @@ public:
         if (!hBRD) return;
         m_brdLoaded = true;
 
-        pfnBRD_ToggleMenu = reinterpret_cast<BRD_ToggleMenu_t>(GetProcAddress(hBRD, "BRD_ToggleMenu"));
-        pfnBRD_IsMenuOpen = reinterpret_cast<BRD_IsMenuOpen_t>(GetProcAddress(hBRD, "BRD_IsMenuOpen"));
-
         uintptr_t brdBase = reinterpret_cast<uintptr_t>(hBRD);
         auto* dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(brdBase);
         if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) return;
@@ -48,15 +39,8 @@ public:
         uint8_t* pImage = reinterpret_cast<uint8_t*>(brdBase);
         size_t imageSize = ntHeaders->OptionalHeader.SizeOfImage;
 
-        // 1. Locate resourcePackManager & ResourcePackManager_load via unique byte sequence:
-        // Pattern: 48 8B CB FF D0 48 89 05
-        // Disasm:
-        //   mov rcx, rbx
-        //   call rax
-        //   mov qword ptr [rip + disp1], rax  <-- resourcePackManager
-        //   mov rax, [rax]
-        //   mov r8, [rax + 0x18]
-        //   mov qword ptr [rip + disp2], r8   <-- ResourcePackManager_load
+        // 1. 定位 BetterRenderDragon 中的 resourcePackManager 与 ResourcePackManager_load:
+        // 特征码: 48 8B CB FF D0 48 89 05
         const uint8_t pat1[] = {0x48, 0x8B, 0xCB, 0xFF, 0xD0, 0x48, 0x89, 0x05};
         for (size_t i = 0; i + sizeof(pat1) + 20 <= imageSize; ++i) {
             if (std::memcmp(pImage + i, pat1, sizeof(pat1)) == 0) {
@@ -72,20 +56,14 @@ public:
             }
         }
 
-        // Fallback to known offsets for BRD v1.7.5 if pattern was modified
+        // 预设回退偏移 (适配 BRD v1.7.5)
         if (!pResourcePackManager) {
             pResourcePackManager = reinterpret_cast<void**>(brdBase + 0x1ab7a8);
             pResourcePackManager_load = reinterpret_cast<void**>(brdBase + 0x1ab7c0);
         }
 
-        // 2. Locate reloadShaders & reloadMaterial:
-        // Pattern: 84 C0 74 0E 33 C0 86 05
-        // Disasm:
-        //   test al, al
-        //   je +14
-        //   xor eax, eax
-        //   xchg [rip + disp3], al            <-- reloadShaders (std::atomic_bool)
-        //   call qword ptr [rip + disp4]      <-- reloadMaterial
+        // 2. 定位 reloadShaders 与 reloadMaterial:
+        // 特征码: 84 C0 74 0E 33 C0 86 05
         const uint8_t pat2[] = {0x84, 0xC0, 0x74, 0x0E, 0x33, 0xC0, 0x86, 0x05};
         for (size_t i = 0; i + sizeof(pat2) + 20 <= imageSize; ++i) {
             if (std::memcmp(pImage + i, pat2, sizeof(pat2)) == 0) {
@@ -134,24 +112,5 @@ public:
                 *pReloadShaders = true;
             }
         }
-    }
-
-    void toggleMenu() {
-        if (!m_initialized) init();
-        if (pfnBRD_ToggleMenu) {
-            try {
-                pfnBRD_ToggleMenu();
-            } catch (...) {}
-        }
-    }
-
-    bool isMenuOpen() {
-        if (!m_initialized) init();
-        if (pfnBRD_IsMenuOpen) {
-            try {
-                return pfnBRD_IsMenuOpen();
-            } catch (...) {}
-        }
-        return false;
     }
 };
