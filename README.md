@@ -69,7 +69,7 @@
 
 ## 📦 Installation
 
-1. **Download the Mod**: Go to [ChiyanMap Releases](https://github.com/qing85566/ChiyanMap/releases) and download the latest mod release (`.zip` or `.dll`).
+1. **Download the Mod**: Go to [ChiyanMap Releases](https://github.com/qing85566/ChiyanMap/releases) and download the latest mod release.
 2. **Install LeviLauncher**: Go to [LeviLauncher Releases](https://github.com/LiteLDev/LeviLauncher/releases) to download and install LeviLauncher.
 3. **Download Compatible Game Version**: Open LeviLauncher, click the **"Download"** button on the left sidebar, and install a Minecraft Bedrock version that supports LeviLamina and is compatible with this mod.
 4. **Select Instance**: Click the **"Launch"** button on the left sidebar to return to the dashboard, then locate and select your newly installed Minecraft instance from the list.
