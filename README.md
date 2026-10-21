@@ -69,10 +69,12 @@
 
 ## 📦 Installation
 
-1. Ensure [LeviLamina](https://github.com/LiteLDev/LeviLamina) is installed for your Minecraft Bedrock client version.
-2. Download the latest `ChiyanMap.zip` from [Releases](https://github.com/qing85566/ChiyanMap/releases).
-3. Extract the `ChiyanMap` folder into your client's `mods/` directory (e.g., `mods/ChiyanMap`).
-4. Launch the game.
+1. **Download the Mod**: Go to [ChiyanMap Releases](https://github.com/qing85566/ChiyanMap/releases) and download the latest mod release (`.zip` or `.dll`).
+2. **Install LeviLauncher**: Go to [LeviLauncher Releases](https://github.com/LiteLDev/LeviLauncher/releases) to download and install LeviLauncher.
+3. **Download Compatible Game Version**: Open LeviLauncher, click the **"Download"** button on the left sidebar, and install a Minecraft Bedrock version that supports LeviLamina and is compatible with this mod.
+4. **Select Instance**: Click the **"Launch"** button on the left sidebar to return to the dashboard, then locate and select your newly installed Minecraft instance from the list.
+5. **Import Mod**: Click **"Manage Mods"**, then click the **"Import .zip/dll"** button in the upper-right corner. Select the mod file downloaded in Step 1 and import it.
+6. **Launch Game**: Return to the dashboard and launch the game to enjoy!
 
 ---
 

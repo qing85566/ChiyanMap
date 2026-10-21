@@ -69,10 +69,12 @@
 
 ## 📦 安装方法
 
-1. 确保已安装 [LeviLamina](https://github.com/LiteLDev/LeviLamina) 对应版本的 Minecraft 基岩版客户端。
-2. 前往 [Releases](https://github.com/qing85566/ChiyanMap/releases) 下载最新版本的 `ChiyanMap.zip`。
-3. 将解压出的 `ChiyanMap` 文件夹放置于客户端 `mods/` 目录下（如 `mods/ChiyanMap`）。
-4. 启动游戏即可生效。
+1. **下载本模组**：前往 [ChiyanMap Releases](https://github.com/qing85566/ChiyanMap/releases) 下载最新版本的模组发布包（`.zip` 或 `.dll`）。
+2. **下载并安装启动器**：前往 [LeviLauncher Releases](https://github.com/LiteLDev/LeviLauncher/releases) 下载并安装 LeviLauncher 启动器。
+3. **下载适配游戏版本**：打开 LeviLauncher，点击左侧导航栏的 **“下载”** 按钮，选择并安装与本模组相适配且支持 LeviLamina 的 Minecraft 基岩版版本。
+4. **选择实例**：点击左侧导航栏的 **“启动”** 按钮返回主界面，在实例列表中找到并选中刚刚安装好的 Minecraft 版本。
+5. **导入模组**：点击 **“管理模组”**，随后点击界面右上角的 **“导入 .zip/dll”** 按钮，选择第一步中下载好的本模组文件并完成导入。
+6. **启动游戏**：返回启动界面，点击启动游戏即可畅玩。
 
 ---
 
