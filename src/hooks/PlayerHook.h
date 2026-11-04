@@ -16,6 +16,8 @@
 #include <fstream>
 #include <filesystem>
 #include <windows.h>
+#include <ll/api/base/StdInt.h>
+#include <mc/world/ContainerID.h>
 #include <ll/api/memory/Hook.h>
 #include <safetyhook.hpp>
 #include "hooks/BRDInterop.h"
@@ -42,6 +44,7 @@ using ChiyanMapMaterialType = ::SharedTypes::v1_26_20::MaterialType;
 #include "state/DrawingManager.h"
 #include "state/SpecialGridManager.h"
 #include "state/DatabaseManager.h"
+#include "render/BlockColorMap.h"
 #include <mc/deps/renderer/Camera.h>
 #include <mc/world/level/BlockPos.h>
 #include <mc/deps/core/math/Vec3.h>
@@ -941,9 +944,6 @@ inline void LogColorMiss(std::string const& tag, std::string const& name) {
 }
 
 inline void getBiomeTints(std::string const& biomeName, mce::Color& grass, mce::Color& foliage, mce::Color& water) {
-    // [性能] 生物群系染色查找缓存：直接 key 原始 biomeName（含 namespace），
-    // 避免每次查找 2~3 次 heap alloc（lower 转换 + 线性 find 子串）。
-    // 典型世界内生物群系数目 <= 60，缓存几乎 100% 命中。
     static std::unordered_map<uint64_t, BiomeTintTriple> s_tintCache;
     if (!biomeName.empty()) {
         uint64_t h = Fnv1aHash(biomeName);
@@ -956,258 +956,12 @@ inline void getBiomeTints(std::string const& biomeName, mce::Color& grass, mce::
         }
     }
 
-    // 默认基础色调（温带平原/森林）：草地匹配实际颜色 RGB(98,132,60)——基于截图采样，明亮翠绿
-    grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
-    foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
-    water   = mce::Color(0.18f, 0.38f, 0.85f, 1.0f);
+    BlockColorMap::GetBiomeTints(biomeName, grass, foliage, water);
 
-    if (biomeName.empty()) return;
-
-    std::string lower = biomeName;
-    for (char& c : lower) if (c >= 'A' && c <= 'Z') c += 32;
-
-    // [性能] 包装剩余查找，结果写回缓存
-    auto computeTints = [&]() {
-
-    // === 平原：草地匹配实际颜色 RGB(98,132,60)——基于截图采样，明亮翠绿 ===
-    if (lower.find("plains") != std::string::npos && lower.find("snow") == std::string::npos && lower.find("ice") == std::string::npos) {
-        grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
-        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
+    if (!biomeName.empty()) {
+        BiomeTintTriple tri{grass, foliage, water};
+        s_tintCache.emplace(Fnv1aHash(biomeName), tri);
     }
-    else if (lower.find("cherry") != std::string::npos) {
-        grass   = mce::Color(0.44f, 0.56f, 0.26f, 1.0f);
-        foliage = mce::Color(0.90f, 0.65f, 0.75f, 1.0f);
-    }
-    else if (lower.find("eroded_badlands") != std::string::npos) {
-        // eroded_badlands: grass tint -> dark taiga-green (user request)
-        grass   = mce::Color(0.26f, 0.38f, 0.30f, 1.0f);
-        foliage = mce::Color(0.15f, 0.28f, 0.25f, 1.0f);
-    }
-    else if (lower.find("desert") != std::string::npos || lower.find("mesa") != std::string::npos || lower.find("badlands") != std::string::npos) {
-        grass   = mce::Color(0.45f, 0.42f, 0.20f, 1.0f);
-        foliage = mce::Color(0.35f, 0.38f, 0.18f, 1.0f);
-        water   = mce::Color(0.15f, 0.45f, 0.45f, 1.0f);
-    } 
-    else if (lower.find("savanna") != std::string::npos) {
-        grass   = mce::Color(0.42f, 0.42f, 0.18f, 1.0f);
-        foliage = mce::Color(0.375f, 0.345f, 0.105f, 1.0f); // 热带草原/风袭热带草原/热带高原：温润金橄榄黄褐树叶（实机采样RGB(94,89,28)精准校准，彻底消除冷暗灰绿失真）
-    } 
-    // === 丛林与竹林：草地匹配实际颜色 RGB(53,124,37) 鲜活翡翠碧绿（红分量由 0.32 降至 0.21，消除偏黄偏暗失真） ===
-    else if (lower.find("jungle") != std::string::npos || lower.find("bamboo") != std::string::npos) {
-        grass   = mce::Color(0.210f, 0.488f, 0.144f, 1.0f);
-        foliage = mce::Color(0.22f, 0.45f, 0.15f, 1.0f);
-    } 
-    else if (lower.find("mangrove") != std::string::npos) {
-        grass   = mce::Color(0.28f, 0.38f, 0.18f, 1.0f);
-        foliage = mce::Color(0.32f, 0.40f, 0.09f, 1.0f); // 原版专属色表 mangrove_swamp_foliage (#8db127) 鲜润暖青绿
-        water   = mce::Color(0.15f, 0.25f, 0.22f, 1.0f);
-    }
-    else if (lower.find("swamp") != std::string::npos) {
-        grass   = mce::Color(0.28f, 0.30f, 0.13f, 1.0f); // 沼泽暖调橄榄草地色（实机采样调校）
-        foliage = mce::Color(0.24f, 0.26f, 0.11f, 1.0f); // 沼泽树叶深暗暖橄榄黄褐色（消除冷暗灰绿感）
-        water   = mce::Color(0.15f, 0.25f, 0.22f, 1.0f);
-    }
-    // === 蘑菇岛系列：极鲜亮翠绿草地 ===
-    else if (lower.find("mushroom") != std::string::npos) {
-        grass   = mce::Color(0.33f, 0.79f, 0.25f, 1.0f);
-        foliage = mce::Color(0.30f, 0.70f, 0.22f, 1.0f);
-    }
-    // === 海洋与河流细分：草地与植被色调，水色统一继承经典群青蓝 ===
-    // [温水海洋 / 深温水海洋] 必须在 warm_ocean 之前（因含 "warm_ocean" 子串）
-    else if (lower.find("lukewarm_ocean") != std::string::npos) {
-        grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
-        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
-    }
-    // [暖水海洋 (珊瑚海)]
-    else if (lower.find("warm_ocean") != std::string::npos) {
-        grass   = mce::Color(0.56f, 0.73f, 0.44f, 1.0f);
-        foliage = mce::Color(0.40f, 0.65f, 0.30f, 1.0f);
-    }
-    else if (lower.find("cold_ocean") != std::string::npos) {
-        grass   = mce::Color(0.35f, 0.48f, 0.33f, 1.0f);
-        foliage = mce::Color(0.20f, 0.32f, 0.18f, 1.0f);
-    }
-    else if (lower.find("frozen_river") != std::string::npos) {
-        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
-        foliage = mce::Color(0.176f, 0.261f, 0.175f, 1.0f);
-    }
-    else if (lower.find("frozen_ocean") != std::string::npos) {
-        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
-        foliage = mce::Color(0.176f, 0.261f, 0.175f, 1.0f);
-    }
-    else if (lower.find("ocean") != std::string::npos || lower.find("river") != std::string::npos) {
-        grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
-        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
-    }
-    // === 下界生物群系（必须在通用 forest 规则之前，避免 crimson/warped forest 误判为普通森林） ===
-    else if (lower.find("crimson_forest") != std::string::npos) {
-        grass   = mce::Color(0.70f, 0.06f, 0.06f, 1.0f);
-        foliage = mce::Color(0.75f, 0.08f, 0.08f, 1.0f);
-    }
-    else if (lower.find("warped_forest") != std::string::npos) {
-        grass   = mce::Color(0.08f, 0.61f, 0.52f, 1.0f);
-        foliage = mce::Color(0.08f, 0.61f, 0.52f, 1.0f);
-    }
-    else if (lower.find("soul_sand_valley") != std::string::npos || lower.find("soulsand_valley") != std::string::npos) {
-        grass   = mce::Color(0.35f, 0.40f, 0.40f, 1.0f);
-        foliage = mce::Color(0.30f, 0.38f, 0.38f, 1.0f);
-    }
-    else if (lower.find("basalt_deltas") != std::string::npos) {
-        grass   = mce::Color(0.28f, 0.26f, 0.28f, 1.0f);
-        foliage = mce::Color(0.24f, 0.22f, 0.24f, 1.0f);
-    }
-    else if (lower.find("nether") != std::string::npos || lower.find("hell") != std::string::npos) {
-        grass   = mce::Color(0.60f, 0.45f, 0.30f, 1.0f);
-        foliage = mce::Color(0.60f, 0.45f, 0.30f, 1.0f);
-    }
-    // === 末地群系 ===
-    else if (lower.find("end") != std::string::npos) {
-        grass   = mce::Color(0.50f, 0.50f, 0.50f, 1.0f);
-        foliage = mce::Color(0.50f, 0.50f, 0.50f, 1.0f);
-    }
-    // === 针叶林与寒带：草地与树叶匹配实际颜色（草地 RGB(86,116,84)，树叶 RGB(45,66,45)） ===
-    else if (lower.find("taiga") != std::string::npos || lower.find("snow") != std::string::npos || lower.find("ice") != std::string::npos || lower.find("frozen") != std::string::npos) {
-        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
-        foliage = mce::Color(0.176f, 0.261f, 0.175f, 1.0f);
-    } 
-    // === 风袭丘陵/山地系列：草地匹配实际颜色 RGB(78,102,76) ===
-    else if ((lower.find("extreme_hills") != std::string::npos || lower.find("windswept") != std::string::npos)
-             && lower.find("savanna") == std::string::npos) {
-        grass   = mce::Color(0.306f, 0.400f, 0.298f, 1.0f);
-        foliage = mce::Color(0.215f, 0.337f, 0.215f, 1.0f);
-    }
-    // === 山峰系列（1.18+ 山地峰顶与山坡） ===
-    else if (lower.find("stony_peaks") != std::string::npos) {
-        grass   = mce::Color(0.55f, 0.72f, 0.36f, 1.0f); // 暖性石峰，邻接温热带
-        foliage = mce::Color(0.38f, 0.62f, 0.28f, 1.0f);
-    }
-    else if (lower.find("peaks") != std::string::npos || lower.find("slopes") != std::string::npos) {
-        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f); // 寒冷雪峰与雪坡
-        foliage = mce::Color(0.176f, 0.261f, 0.175f, 1.0f);
-    }
-    // === 海岸与沙滩 ===
-    else if (lower.find("stony_shore") != std::string::npos || lower.find("stone_beach") != std::string::npos) {
-        grass   = mce::Color(0.39f, 0.48f, 0.35f, 1.0f);
-        foliage = mce::Color(0.25f, 0.38f, 0.25f, 1.0f);
-    }
-    else if (lower.find("beach") != std::string::npos || lower.find("shore") != std::string::npos) {
-        grass   = mce::Color(0.57f, 0.74f, 0.35f, 1.0f);
-        foliage = mce::Color(0.40f, 0.65f, 0.30f, 1.0f);
-    }
-    // === 白桦森林与原始桦木森林：草地匹配实际颜色 RGB(83,114,63) ===
-    else if (lower.find("birch") != std::string::npos) {
-        grass   = mce::Color(0.325f, 0.447f, 0.247f, 1.0f);
-        foliage = mce::Color(0.263f, 0.341f, 0.173f, 1.0f);
-    }
-    else if (lower.find("dark_forest") != std::string::npos || lower.find("roofed_forest") != std::string::npos || lower.find("dark_oak_forest") != std::string::npos) {
-        grass   = mce::Color(0.20f, 0.30f, 0.12f, 1.0f);
-        foliage = mce::Color(0.235f, 0.471f, 0.118f, 1.0f);
-    }
-    // === 斑驳森林：秋季特色暖橙草地与温润橙褐树叶 ===
-    else if (lower.find("dappled_forest") != std::string::npos || lower.find("dappled") != std::string::npos) {
-        grass   = mce::Color(0.875f, 0.408f, 0.153f, 1.0f); // #df6827 标志性暖橙草色
-        foliage = mce::Color(0.902f, 0.557f, 0.188f, 1.0f); // #e68e30 暖橙黄褐树叶
-        water   = mce::Color(0.216f, 0.318f, 0.329f, 1.0f); // #375154 专属暗青灰水色
-    }
-    // === 森林与繁花森林：草地匹配实际颜色 RGB(75,118,55) ===
-    else if (lower.find("forest") != std::string::npos) {
-        grass   = mce::Color(0.294f, 0.463f, 0.216f, 1.0f);
-        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
-    }
-    // === 樱花树林：必须在通用 grove 之前（cherry_grove 含 grove 需优先拦截） ===
-    else if (lower.find("cherry") != std::string::npos) {
-        grass   = mce::Color(0.56f, 0.81f, 0.29f, 1.0f); // 鲜亮春意浅翠绿
-        foliage = mce::Color(0.90f, 0.65f, 0.75f, 1.0f); // 标志性樱花粉红
-    }
-    else if (lower.find("meadow") != std::string::npos || lower.find("grove") != std::string::npos) {
-        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
-        foliage = mce::Color(0.18f, 0.32f, 0.20f, 1.0f);
-    }
-    else if (lower.find("lush_caves") != std::string::npos) {
-        grass   = mce::Color(0.28f, 0.45f, 0.20f, 1.0f);
-        foliage = mce::Color(0.20f, 0.40f, 0.15f, 1.0f);
-        water   = mce::Color(0.15f, 0.35f, 0.55f, 1.0f);
-    }
-    else if (lower.find("deep_dark") != std::string::npos) {
-        grass   = mce::Color(0.18f, 0.22f, 0.20f, 1.0f);
-        foliage = mce::Color(0.15f, 0.18f, 0.16f, 1.0f);
-        water   = mce::Color(0.10f, 0.15f, 0.20f, 1.0f);
-    }
-    else if (lower.find("dripstone_caves") != std::string::npos) {
-        grass   = mce::Color(0.48f, 0.64f, 0.38f, 1.0f);
-        foliage = mce::Color(0.38f, 0.57f, 0.27f, 1.0f);
-    }
-    // === 苍白之园：草地匹配实际颜色 RGB(86,97,79) ===
-    else if (lower.find("pale_garden") != std::string::npos) {
-        grass   = mce::Color(0.337f, 0.380f, 0.310f, 1.0f);
-        foliage = mce::Color(0.337f, 0.380f, 0.310f, 1.0f);
-    }
-    // === 硫黄洞穴：原版 client_biome 定义水色 #34BF89, 草色 #ABA64F ===
-    else if (lower.find("sulfur_caves") != std::string::npos || lower.find("sulfur") != std::string::npos) {
-        grass   = mce::Color(0.671f, 0.651f, 0.310f, 1.0f);
-        foliage = mce::Color(0.671f, 0.651f, 0.310f, 1.0f);
-    }
-    // === 原版 26.2 生物群系补充 ===
-    else if (lower.find("flower_forest") != std::string::npos) {
-        grass   = mce::Color(0.475f, 0.753f, 0.353f, 1.0f);
-        foliage = mce::Color(0.349f, 0.682f, 0.188f, 1.0f);
-    }
-    else if (lower.find("sunflower_plains") != std::string::npos) {
-        grass   = mce::Color(0.569f, 0.741f, 0.349f, 1.0f);
-        foliage = mce::Color(0.467f, 0.671f, 0.184f, 1.0f);
-    }
-    else if (lower.find("old_growth_birch") != std::string::npos) {
-        grass   = mce::Color(0.533f, 0.733f, 0.404f, 1.0f);
-        foliage = mce::Color(0.420f, 0.663f, 0.255f, 1.0f);
-    }
-    else if (lower.find("old_growth_pine") != std::string::npos) {
-        grass   = mce::Color(0.525f, 0.722f, 0.498f, 1.0f);
-        foliage = mce::Color(0.408f, 0.647f, 0.373f, 1.0f);
-    }
-    else if (lower.find("old_growth_spruce") != std::string::npos) {
-        grass   = mce::Color(0.525f, 0.718f, 0.514f, 1.0f);
-        foliage = mce::Color(0.408f, 0.643f, 0.392f, 1.0f);
-    }
-    else if (lower.find("wooded_badlands") != std::string::npos) {
-        grass   = mce::Color(0.565f, 0.506f, 0.302f, 1.0f);
-        foliage = mce::Color(0.620f, 0.506f, 0.302f, 1.0f);
-    }
-    else if (lower.find("sparse_jungle") != std::string::npos) {
-        grass   = mce::Color(0.392f, 0.780f, 0.247f, 1.0f);
-        foliage = mce::Color(0.243f, 0.722f, 0.059f, 1.0f);
-    }
-    else if (lower.find("snowy_beach") != std::string::npos) {
-        grass   = mce::Color(0.514f, 0.710f, 0.576f, 1.0f);
-        foliage = mce::Color(0.392f, 0.635f, 0.471f, 1.0f);
-    }
-    else if (lower.find("ice_spikes") != std::string::npos) {
-        grass   = mce::Color(0.502f, 0.706f, 0.592f, 1.0f);
-        foliage = mce::Color(0.376f, 0.631f, 0.482f, 1.0f);
-    }
-    else if (lower.find("the_void") != std::string::npos || lower.find("void") != std::string::npos) {
-        grass   = mce::Color(0.557f, 0.725f, 0.443f, 1.0f);
-        foliage = mce::Color(0.443f, 0.655f, 0.302f, 1.0f);
-    }
-    else if (lower.find("deep_lukewarm_ocean") != std::string::npos) {
-        grass   = mce::Color(0.557f, 0.725f, 0.443f, 1.0f);
-        foliage = mce::Color(0.443f, 0.655f, 0.302f, 1.0f);
-    }
-    else if (lower.find("deep_cold_ocean") != std::string::npos) {
-        grass   = mce::Color(0.557f, 0.725f, 0.443f, 1.0f);
-        foliage = mce::Color(0.443f, 0.655f, 0.302f, 1.0f);
-    }
-    else if (lower.find("deep_frozen_ocean") != std::string::npos) {
-        grass   = mce::Color(0.557f, 0.725f, 0.443f, 1.0f);
-        foliage = mce::Color(0.443f, 0.655f, 0.302f, 1.0f);
-    }
-    else {
-        LogColorMiss("BiomeMiss", biomeName);
-    }
-    }; // [性能] lambda 闭合
-    computeTints();
-    // 写回缓存（上层已对 biomeName 为空做 return）
-    BiomeTintTriple tri{grass, foliage, water};
-    s_tintCache.emplace(Fnv1aHash(biomeName), tri);
 }
 
 // =========================================================================
@@ -1641,7 +1395,7 @@ inline constexpr int kCaveLayerAirSearchDepth = 64;
 inline constexpr int kCaveLayerFloorSearchDepth = 64;
 
 inline ChiyanMapMaterialType GetCaveMaterialType(Block const& block) {
-    return block.getBlockType().mMaterial.mType;
+    return block.getMaterial().mType;
 }
 
 inline bool IsCaveWaterBlock(Block const& block) {
@@ -3008,13 +2762,14 @@ LL_TYPE_INSTANCE_HOOK(
     ClientInstance,
     &ClientInstance::$update,
     bool,
-    bool a1
+    bool isInitFinished,
+    bool allowGameUpdate
 ) {
     MapRenderState::lastFrameTotalCalls = MapRenderState::frameCallCount.load();
     if (MapRenderState::lastFrameTotalCalls < 1) MapRenderState::lastFrameTotalCalls = 1;
     MapRenderState::frameCallCount.store(0);
 
-    bool result = origin(a1);
+    bool result = origin(isInitFinished, allowGameUpdate);
 
     // [BetterRenderDragon 深度协同与光影恢复]
     // 确保 BRD 捕获 ResourcePackManager，并在就绪后触发 Shader 材质重载
@@ -4126,6 +3881,7 @@ LL_TYPE_INSTANCE_HOOK(
         bool currentUIState = MapRenderState::IsUIActive();
         static bool s_wasForeground = true;
         HWND currentHwnd = FindWindowW(L"Bedrock", L"Minecraft");
+
         if (!currentHwnd) currentHwnd = FindWindowW(L"Bedrock", NULL);
         if (!currentHwnd) currentHwnd = GetForegroundWindow();
         bool isForeground = (currentHwnd && GetForegroundWindow() == currentHwnd);
@@ -5392,7 +5148,7 @@ LL_TYPE_INSTANCE_HOOK(
     &PlayerInventory::selectSlot,
     bool,
     int slot,
-    ContainerID containerId
+    ::ContainerID containerId
 ) {
     if (MapRenderState::g_isShuttingDown.load()) return origin(slot, containerId);
     if (MapRenderState::IsUIActive()) return false;

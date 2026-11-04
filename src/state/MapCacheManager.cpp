@@ -357,7 +357,7 @@ namespace MapCacheManager {
         }
     }
 
-    static bool LoadRegionFromFile(const std::string& filePath, RegionData& reg, bool isCave) {
+    bool LoadRegionFromFile(const std::string& filePath, RegionData& reg, bool isCave) {
         std::ifstream in(filePath, std::ios::binary | std::ios::ate);
         if (!in) return false;
         auto fileSize = in.tellg();
@@ -396,6 +396,47 @@ namespace MapCacheManager {
         reg.textureDirty = true;
         return true;
     }
+
+    bool SaveRegionToFile(const std::string& filePath, const RegionData& reg) {
+        try {
+            std::filesystem::path p(filePath);
+            if (p.has_parent_path()) {
+                std::error_code ec;
+                std::filesystem::create_directories(p.parent_path(), ec);
+            }
+            std::ofstream out(filePath, std::ios::binary);
+            if (!out) return false;
+            out.write((const char*)reg.colors, sizeof(reg.colors));
+            out.write((const char*)reg.heights, sizeof(reg.heights));
+            WriteBiomeSection(out, reg);
+            out.write((const char*)reg.lightLevels, sizeof(reg.lightLevels));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    void RegisterExternalSavedRegion(uint64_t hash, int rx, int rz, bool isCave, const RegionData* updatedData) {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        s_existingRegionFiles.insert(hash);
+        auto it = g_loadedRegions.find(hash);
+        if (it != g_loadedRegions.end() && it->second != nullptr) {
+            if (updatedData) {
+                std::memcpy(it->second->colors, updatedData->colors, sizeof(it->second->colors));
+                std::memcpy(it->second->heights, updatedData->heights, sizeof(it->second->heights));
+                std::memcpy(it->second->lightLevels, updatedData->lightLevels, sizeof(it->second->lightLevels));
+                std::memcpy(it->second->biomeCells, updatedData->biomeCells, sizeof(it->second->biomeCells));
+                it->second->biomeTable = updatedData->biomeTable;
+            }
+            it->second->textureDirty = true;
+            it->second->dirty = false;
+            it->second->lastAccessTick = g_accessTickCounter.fetch_add(1, std::memory_order_relaxed);
+        }
+        s_dirtyTextureHashes.insert(hash);
+        MarkBranchPyramidDirtyForRegionUnlocked(rx, rz, isCave);
+        MapRenderState::g_spatialCacheGen.fetch_add(1, std::memory_order_relaxed);
+    }
+
 
     void IOWorkerThread() {
         auto lastSaveTime = std::chrono::steady_clock::now();

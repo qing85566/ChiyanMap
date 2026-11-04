@@ -48,6 +48,7 @@
 #include "state/MultiworldManager.h"
 #include "worldgen/BedrockBiomeValidator.h"
 #include "state/AnarchyManager.h"
+#include "worldsave/WorldSaveScanner.h"
 #include "state/DrawingManager.h"
 #include "state/SpecialGridManager.h"
 #include "state/DatabaseManager.h"
@@ -5273,10 +5274,11 @@ namespace DX11Hook {
             bool m_cPyramid = MatchSettingFilter(s_bigMapSearch, { LanguageManager::GetText("MULTI_LEVEL_PYRAMID"), LanguageManager::GetText("MULTI_LEVEL_PYRAMID_DESC"), "pyramid", "多级金字塔", "金字塔" });
             bool m_cMaxRegions = MatchSettingFilter(s_bigMapSearch, { LanguageManager::GetText("MAX_LOADED_REGIONS"), LanguageManager::GetText("MAX_LOADED_REGIONS_DESC"), "max", "region", "驻留", "缓存上限" });
             bool m_cReloadBtns = MatchSettingFilter(s_bigMapSearch, { LanguageManager::GetText("RELOAD_ALL_REGIONS"), LanguageManager::GetText("RELOAD_VIEWED_REGIONS"), LanguageManager::GetText("CONVERT_ALL_REGIONS"), "reload", "convert", "重载", "转换" });
+            bool m_syncSave = MatchSettingFilter(s_bigMapSearch, { LanguageManager::GetText("SYNC_WORLD_SAVE_REGIONS"), LanguageManager::GetText("SYNC_WORLD_SAVE_REGIONS_DESC"), "save", "sync", "leveldb", "world", "存档", "同步" });
             bool cat3Match = MatchSettingFilter(s_bigMapSearch, { LanguageManager::GetText("MAP_DATA_CACHE_SETTINGS"), "cache", "data", "数据", "缓存" });
 
             bool anyCat3 = cat3Match || m_cLoadChunks || m_cUpdateChunks || m_cWriteDist ||
-                           m_cHeightmaps || m_cPyramid || m_cMaxRegions || m_cReloadBtns;
+                           m_cHeightmaps || m_cPyramid || m_cMaxRegions || m_cReloadBtns || m_syncSave;
 
             if (anyCat3) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", LanguageManager::GetText("MAP_DATA_CACHE_SETTINGS"));
@@ -5399,7 +5401,7 @@ namespace DX11Hook {
                 }
 
                 ImGui::Spacing();
-                if (cat3Match || m_cReloadBtns) {
+                if (cat3Match || m_cReloadBtns || m_syncSave) {
                     matchCount++;
                     float availW = ImGui::GetContentRegionAvail().x;
                     float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -5448,6 +5450,37 @@ namespace DX11Hook {
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("%s", LanguageManager::GetText("CONVERT_ALL_REGIONS_DESC"));
+                    }
+
+                    // [新增] 从世界存档同步已探索区域 (LevelDB)
+                    auto syncProg = WorldSaveScanner::GetProgress();
+                    if (!syncProg.isScanning) {
+                        if (ImGui::Button(LanguageManager::GetText("SYNC_WORLD_SAVE_REGIONS"), ImVec2(availW, 0))) {
+                            WorldSaveScanner::StartScan();
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s", LanguageManager::GetText("SYNC_WORLD_SAVE_REGIONS_DESC"));
+                        }
+                    } else {
+                        float cancelW = 80.0f;
+                        float barW = availW - cancelW - spacing;
+                        char progBuf[128];
+                        snprintf(progBuf, sizeof(progBuf), "%d / %d (%.1f%%)", syncProg.processedChunks, syncProg.totalChunks, syncProg.progressFraction * 100.0f);
+                        ImGui::ProgressBar(syncProg.progressFraction, ImVec2(barW, 0), progBuf);
+                        ImGui::SameLine();
+                        if (ImGui::Button(LanguageManager::GetText("SYNC_WORLD_SAVE_CANCEL"), ImVec2(cancelW, 0))) {
+                            WorldSaveScanner::CancelScan();
+                        }
+                    }
+
+                    if (!syncProg.statusMessage.empty()) {
+                        if (syncProg.isScanning) {
+                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s (%.1fs)", syncProg.statusMessage.c_str(), syncProg.elapsedSeconds);
+                        } else if (syncProg.isCompleted) {
+                            ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "%s", syncProg.statusMessage.c_str());
+                        } else {
+                            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", syncProg.statusMessage.c_str());
+                        }
                     }
 
                     if (!MapRenderState::g_regionOpStatusText.empty()) {
@@ -13724,6 +13757,23 @@ namespace DX11Hook {
                     }
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("CONVERT_ALL_REGIONS_DESC"));
+
+                ImGui::SameLine();
+                auto syncProg2 = WorldSaveScanner::GetProgress();
+                if (!syncProg2.isScanning) {
+                    if (ImGui::Button(LanguageManager::GetText("SYNC_WORLD_SAVE_REGIONS"), ImVec2(0.0f, 24.0f * curScale))) {
+                        WorldSaveScanner::StartScan();
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", LanguageManager::GetText("SYNC_WORLD_SAVE_REGIONS_DESC"));
+                } else {
+                    char progBuf[64];
+                    snprintf(progBuf, sizeof(progBuf), "%d%%", (int)(syncProg2.progressFraction * 100.0f));
+                    ImGui::ProgressBar(syncProg2.progressFraction, ImVec2(100.0f * curScale, 24.0f * curScale), progBuf);
+                    ImGui::SameLine();
+                    if (ImGui::Button(LanguageManager::GetText("SYNC_WORLD_SAVE_CANCEL"), ImVec2(0.0f, 24.0f * curScale))) {
+                        WorldSaveScanner::CancelScan();
+                    }
+                }
 
                 if (!MapRenderState::g_regionOpStatusText.empty()) {
                     float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - MapRenderState::g_regionOpStatusTime).count();

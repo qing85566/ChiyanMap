@@ -56,7 +56,7 @@
   "WP_TAB_END": "L'End",
   "LANG_SELECT": "Lingua",
   "LOG_VERSION_MISMATCH": "[CRITICO] Conflitto di versione del gioco! Versione client attuale:",
-  "LOG_VERSION_STRICT": "[CRITICO] ChiyanMap supporta rigorosamente solo la versione 1.26.51.01!",
+  "LOG_VERSION_STRICT": "[CRITICO] ChiyanMap supporta rigorosamente solo la versione 1.26.60.05!",
   "LOG_VERSION_ABORT": "[CRITICO] Caricamento della mod interrotto per evitare crash da violazione di accesso.",
   "LOG_VERSION_PASS": "Verifica della versione del client di gioco superata",
   "LOG_VERSION_UNKNOWN": "Impossibile identificare la versione dell'eseguibile di gioco, tentativo di caricamento forzato...",
@@ -1121,5 +1121,10 @@
   "WP_COLOR_PRESETS": "Colori comuni",
   "WP_COLOR_RANDOM": "Colore casuale",
   "HOTKEY_SEARCH_HINT": "Cerca tasti o azioni...",
-  "HOTKEY_SEARCH_NO_RESULTS": "Nessun tasto corrispondente trovato"
+  "HOTKEY_SEARCH_NO_RESULTS": "Nessun tasto corrispondente trovato",
+  "SYNC_WORLD_SAVE_REGIONS": "Sync Explored Regions from Save",
+  "SYNC_WORLD_SAVE_REGIONS_DESC": "Directly read generated chunks from world save (LevelDB) and render to map without manual exploration.",
+  "SYNC_WORLD_SAVE_CANCEL": "Cancel Sync",
+  "SYNC_WORLD_SAVE_DETECTED": "Save: %s",
+  "SYNC_WORLD_SAVE_NOT_FOUND": "No local world save detected (Remote server has no local save)"
 }

@@ -56,7 +56,7 @@
   "WP_TAB_END": "디 엔드",
   "LANG_SELECT": "언어",
   "LOG_VERSION_MISMATCH": "[심각] 게임 버전이 일치하지 않습니다! 현재 클라이언트 버전:",
-  "LOG_VERSION_STRICT": "[심각] ChiyanMap은 엄격히 버전 1.26.51.01만 지원합니다!",
+  "LOG_VERSION_STRICT": "[심각] ChiyanMap은 엄격히 버전 1.26.60.05만 지원합니다!",
   "LOG_VERSION_ABORT": "[심각] Access Violation 충돌을 방지하기 위해 모드 로딩을 중단했습니다.",
   "LOG_VERSION_PASS": "게임 클라이언트 버전 확인을 통과했습니다",
   "LOG_VERSION_UNKNOWN": "게임 실행 파일 버전을 식별할 수 없어 강제 로드를 시도합니다...",
@@ -1121,5 +1121,10 @@
   "WP_COLOR_PRESETS": "자주 쓰는 색상",
   "WP_COLOR_RANDOM": "무작위 색상",
   "HOTKEY_SEARCH_HINT": "단축키 또는 동작 검색...",
-  "HOTKEY_SEARCH_NO_RESULTS": "일치하는 단축키를 찾을 수 없습니다"
+  "HOTKEY_SEARCH_NO_RESULTS": "일치하는 단축키를 찾을 수 없습니다",
+  "SYNC_WORLD_SAVE_REGIONS": "Sync Explored Regions from Save",
+  "SYNC_WORLD_SAVE_REGIONS_DESC": "Directly read generated chunks from world save (LevelDB) and render to map without manual exploration.",
+  "SYNC_WORLD_SAVE_CANCEL": "Cancel Sync",
+  "SYNC_WORLD_SAVE_DETECTED": "Save: %s",
+  "SYNC_WORLD_SAVE_NOT_FOUND": "No local world save detected (Remote server has no local save)"
 }

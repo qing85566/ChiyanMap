@@ -56,7 +56,7 @@
   "WP_TAB_END": "The End",
   "LANG_SELECT": "Bahasa",
   "LOG_VERSION_MISMATCH": "[KRITIS] Ketidakcocokan versi game! Versi klien saat ini:",
-  "LOG_VERSION_STRICT": "[KRITIS] ChiyanMap hanya mendukung versi 1.26.51.01!",
+  "LOG_VERSION_STRICT": "[KRITIS] ChiyanMap hanya mendukung versi 1.26.60.05!",
   "LOG_VERSION_ABORT": "[KRITIS] Pemuanan mod dibatalkan untuk mencegah crash Access Violation.",
   "LOG_VERSION_PASS": "Verifikasi versi klien game berhasil",
   "LOG_VERSION_UNKNOWN": "Tidak dapat mengidentifikasi versi executable game, mencoba memaksa muat...",
@@ -1121,5 +1121,10 @@
   "WP_COLOR_PRESETS": "Warna Umum",
   "WP_COLOR_RANDOM": "Warna Acak",
   "HOTKEY_SEARCH_HINT": "Cari tombol pintas atau tindakan...",
-  "HOTKEY_SEARCH_NO_RESULTS": "Tidak ada tombol pintas yang cocok ditemukan"
+  "HOTKEY_SEARCH_NO_RESULTS": "Tidak ada tombol pintas yang cocok ditemukan",
+  "SYNC_WORLD_SAVE_REGIONS": "Sync Explored Regions from Save",
+  "SYNC_WORLD_SAVE_REGIONS_DESC": "Directly read generated chunks from world save (LevelDB) and render to map without manual exploration.",
+  "SYNC_WORLD_SAVE_CANCEL": "Cancel Sync",
+  "SYNC_WORLD_SAVE_DETECTED": "Save: %s",
+  "SYNC_WORLD_SAVE_NOT_FOUND": "No local world save detected (Remote server has no local save)"
 }

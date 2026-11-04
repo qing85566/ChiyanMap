@@ -56,7 +56,7 @@
   "WP_TAB_END": "Thế giới End",
   "LANG_SELECT": "Ngôn ngữ",
   "LOG_VERSION_MISMATCH": "[QUAN TRỌNG] Phiên bản game không khớp! Phiên bản client hiện tại:",
-  "LOG_VERSION_STRICT": "[QUAN TRỌNG] ChiyanMap chỉ hỗ trợ phiên bản 1.26.51.01!",
+  "LOG_VERSION_STRICT": "[QUAN TRỌNG] ChiyanMap chỉ hỗ trợ phiên bản 1.26.60.05!",
   "LOG_VERSION_ABORT": "[QUAN TRỌNG] Đã hủy tải mod để ngăn chặn sự cố Access Violation.",
   "LOG_VERSION_PASS": "Xác minh phiên bản client game đã qua",
   "LOG_VERSION_UNKNOWN": "Không thể xác định phiên bản tệp thực thi game, đang thử tải bắt buộc...",
@@ -1121,5 +1121,10 @@
   "WP_COLOR_PRESETS": "Màu thông dụng",
   "WP_COLOR_RANDOM": "Màu ngẫu nhiên",
   "HOTKEY_SEARCH_HINT": "Tìm kiếm phím tắt hoặc hành động...",
-  "HOTKEY_SEARCH_NO_RESULTS": "Không tìm thấy phím tắt phù hợp"
+  "HOTKEY_SEARCH_NO_RESULTS": "Không tìm thấy phím tắt phù hợp",
+  "SYNC_WORLD_SAVE_REGIONS": "Sync Explored Regions from Save",
+  "SYNC_WORLD_SAVE_REGIONS_DESC": "Directly read generated chunks from world save (LevelDB) and render to map without manual exploration.",
+  "SYNC_WORLD_SAVE_CANCEL": "Cancel Sync",
+  "SYNC_WORLD_SAVE_DETECTED": "Save: %s",
+  "SYNC_WORLD_SAVE_NOT_FOUND": "No local world save detected (Remote server has no local save)"
 }

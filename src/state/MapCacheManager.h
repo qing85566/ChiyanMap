@@ -163,6 +163,11 @@ namespace MapCacheManager {
     // 转换/另存所有区域为独立地图副本 (Convert All Regions -> cm_converted)
     bool ConvertAllRegionsToMap(std::string& outNewMapId, std::string& outNewMapName, int& outCopiedFiles);
 
+    // [文件存储与合并接口] 供外部模块(如世界存档扫描器)读取和持久化独立 RegionData
+    bool LoadRegionFromFile(const std::string& filePath, RegionData& reg, bool isCave);
+    bool SaveRegionToFile(const std::string& filePath, const RegionData& reg);
+    void RegisterExternalSavedRegion(uint64_t hash, int rx, int rz, bool isCave, const RegionData* updatedData = nullptr);
+
     // [多级缓存架构统计与跨进程文件锁状态]
     size_t GetLoadedRegionCount();
     bool IsCacheLockedByAnotherProcess();

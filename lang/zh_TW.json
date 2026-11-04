@@ -56,7 +56,7 @@
   "WP_TAB_END": "末地",
   "LANG_SELECT": "語言",
   "LOG_VERSION_MISMATCH": "【嚴重警告】遊戲版本不符合！當前客戶端版本為",
-  "LOG_VERSION_STRICT": "【嚴重警告】赤焰地圖底層攔截器當前嚴格限定僅相容 1.26.51.01 版本！",
+  "LOG_VERSION_STRICT": "【嚴重警告】赤焰地圖底層攔截器當前嚴格限定僅相容 1.26.60.05 版本！",
   "LOG_VERSION_ABORT": "【嚴重警告】為防止載入進入世界時發生 Access Violation 崩潰，模組已主動終止載入。",
   "LOG_VERSION_PASS": "遊戲客戶端版本驗證通過",
   "LOG_VERSION_UNKNOWN": "無法識別當前遊戲執行檔的版本資訊，已中止載入以防崩潰！",
@@ -1121,5 +1121,10 @@
   "WP_COLOR_PRESETS": "常用顏色",
   "WP_COLOR_RANDOM": "隨機顏色",
   "HOTKEY_SEARCH_HINT": "搜尋快捷鍵或操作...",
-  "HOTKEY_SEARCH_NO_RESULTS": "未找到相符的快捷鍵"
+  "HOTKEY_SEARCH_NO_RESULTS": "未找到相符的快捷鍵",
+  "SYNC_WORLD_SAVE_REGIONS": "從世界存檔同步已探索區域",
+  "SYNC_WORLD_SAVE_REGIONS_DESC": "直接讀取遊戲世界存檔 (LevelDB) 中已生成和保存的區塊資料並快速渲染成地圖，無需玩家親自跑圖。",
+  "SYNC_WORLD_SAVE_CANCEL": "取消同步",
+  "SYNC_WORLD_SAVE_DETECTED": "存檔路徑: %s",
+  "SYNC_WORLD_SAVE_NOT_FOUND": "未檢測到當前世界的本地存檔（多人伺服器無本地存檔）"
 }

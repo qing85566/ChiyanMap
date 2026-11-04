@@ -2570,4 +2570,223 @@ mce::Color GetBlockColor(std::string_view rawName, mce::Color grassCol, mce::Col
     return mce::Color(0.55f, 0.55f, 0.55f, 1.0f);
 }
 
+void GetBiomeTints(const std::string& biomeName, mce::Color& grass, mce::Color& foliage, mce::Color& water) {
+    grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
+    foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
+    water   = mce::Color(0.18f, 0.38f, 0.85f, 1.0f);
+
+    if (biomeName.empty()) return;
+
+    std::string lower = biomeName;
+    for (char& c : lower) if (c >= 'A' && c <= 'Z') c += 32;
+
+    if (lower.find("plains") != std::string::npos && lower.find("snow") == std::string::npos && lower.find("ice") == std::string::npos) {
+        grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
+        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
+    }
+    else if (lower.find("cherry") != std::string::npos) {
+        grass   = mce::Color(0.44f, 0.56f, 0.26f, 1.0f);
+        foliage = mce::Color(0.90f, 0.65f, 0.75f, 1.0f);
+    }
+    else if (lower.find("eroded_badlands") != std::string::npos) {
+        grass   = mce::Color(0.26f, 0.38f, 0.30f, 1.0f);
+        foliage = mce::Color(0.15f, 0.28f, 0.25f, 1.0f);
+    }
+    else if (lower.find("desert") != std::string::npos || lower.find("mesa") != std::string::npos || lower.find("badlands") != std::string::npos) {
+        grass   = mce::Color(0.45f, 0.42f, 0.20f, 1.0f);
+        foliage = mce::Color(0.35f, 0.38f, 0.18f, 1.0f);
+        water   = mce::Color(0.15f, 0.45f, 0.45f, 1.0f);
+    } 
+    else if (lower.find("savanna") != std::string::npos) {
+        grass   = mce::Color(0.42f, 0.42f, 0.18f, 1.0f);
+        foliage = mce::Color(0.375f, 0.345f, 0.105f, 1.0f);
+    } 
+    else if (lower.find("jungle") != std::string::npos || lower.find("bamboo") != std::string::npos) {
+        grass   = mce::Color(0.210f, 0.488f, 0.144f, 1.0f);
+        foliage = mce::Color(0.22f, 0.45f, 0.15f, 1.0f);
+    } 
+    else if (lower.find("mangrove") != std::string::npos) {
+        grass   = mce::Color(0.28f, 0.38f, 0.18f, 1.0f);
+        foliage = mce::Color(0.32f, 0.40f, 0.09f, 1.0f);
+        water   = mce::Color(0.15f, 0.25f, 0.22f, 1.0f);
+    }
+    else if (lower.find("swamp") != std::string::npos) {
+        grass   = mce::Color(0.28f, 0.30f, 0.13f, 1.0f);
+        foliage = mce::Color(0.24f, 0.26f, 0.11f, 1.0f);
+        water   = mce::Color(0.15f, 0.25f, 0.22f, 1.0f);
+    }
+    else if (lower.find("mushroom") != std::string::npos) {
+        grass   = mce::Color(0.33f, 0.79f, 0.25f, 1.0f);
+        foliage = mce::Color(0.30f, 0.70f, 0.22f, 1.0f);
+    }
+    else if (lower.find("lukewarm_ocean") != std::string::npos) {
+        grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
+        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
+    }
+    else if (lower.find("warm_ocean") != std::string::npos) {
+        grass   = mce::Color(0.56f, 0.73f, 0.44f, 1.0f);
+        foliage = mce::Color(0.40f, 0.65f, 0.30f, 1.0f);
+    }
+    else if (lower.find("cold_ocean") != std::string::npos) {
+        grass   = mce::Color(0.35f, 0.48f, 0.33f, 1.0f);
+        foliage = mce::Color(0.20f, 0.32f, 0.18f, 1.0f);
+    }
+    else if (lower.find("frozen_river") != std::string::npos || lower.find("frozen_ocean") != std::string::npos) {
+        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
+        foliage = mce::Color(0.176f, 0.261f, 0.175f, 1.0f);
+    }
+    else if (lower.find("ocean") != std::string::npos || lower.find("river") != std::string::npos) {
+        grass   = mce::Color(0.385f, 0.518f, 0.235f, 1.0f);
+        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
+    }
+    else if (lower.find("crimson_forest") != std::string::npos) {
+        grass   = mce::Color(0.70f, 0.06f, 0.06f, 1.0f);
+        foliage = mce::Color(0.75f, 0.08f, 0.08f, 1.0f);
+    }
+    else if (lower.find("warped_forest") != std::string::npos) {
+        grass   = mce::Color(0.08f, 0.61f, 0.52f, 1.0f);
+        foliage = mce::Color(0.08f, 0.61f, 0.52f, 1.0f);
+    }
+    else if (lower.find("soul_sand_valley") != std::string::npos || lower.find("soulsand_valley") != std::string::npos) {
+        grass   = mce::Color(0.35f, 0.40f, 0.40f, 1.0f);
+        foliage = mce::Color(0.30f, 0.38f, 0.38f, 1.0f);
+    }
+    else if (lower.find("basalt_deltas") != std::string::npos) {
+        grass   = mce::Color(0.28f, 0.26f, 0.28f, 1.0f);
+        foliage = mce::Color(0.24f, 0.22f, 0.24f, 1.0f);
+    }
+    else if (lower.find("nether") != std::string::npos || lower.find("hell") != std::string::npos) {
+        grass   = mce::Color(0.60f, 0.45f, 0.30f, 1.0f);
+        foliage = mce::Color(0.60f, 0.45f, 0.30f, 1.0f);
+    }
+    else if (lower.find("end") != std::string::npos) {
+        grass   = mce::Color(0.50f, 0.50f, 0.50f, 1.0f);
+        foliage = mce::Color(0.50f, 0.50f, 0.50f, 1.0f);
+    }
+    else if (lower.find("taiga") != std::string::npos || lower.find("snow") != std::string::npos || lower.find("ice") != std::string::npos || lower.find("frozen") != std::string::npos) {
+        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
+        foliage = mce::Color(0.176f, 0.261f, 0.175f, 1.0f);
+    } 
+    else if ((lower.find("extreme_hills") != std::string::npos || lower.find("windswept") != std::string::npos) && lower.find("savanna") == std::string::npos) {
+        grass   = mce::Color(0.306f, 0.400f, 0.298f, 1.0f);
+        foliage = mce::Color(0.215f, 0.337f, 0.215f, 1.0f);
+    }
+    else if (lower.find("stony_peaks") != std::string::npos) {
+        grass   = mce::Color(0.55f, 0.72f, 0.36f, 1.0f);
+        foliage = mce::Color(0.38f, 0.62f, 0.28f, 1.0f);
+    }
+    else if (lower.find("peaks") != std::string::npos || lower.find("slopes") != std::string::npos) {
+        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
+        foliage = mce::Color(0.176f, 0.261f, 0.175f, 1.0f);
+    }
+    else if (lower.find("stony_shore") != std::string::npos || lower.find("stone_beach") != std::string::npos) {
+        grass   = mce::Color(0.39f, 0.48f, 0.35f, 1.0f);
+        foliage = mce::Color(0.25f, 0.38f, 0.25f, 1.0f);
+    }
+    else if (lower.find("beach") != std::string::npos || lower.find("shore") != std::string::npos) {
+        grass   = mce::Color(0.57f, 0.74f, 0.35f, 1.0f);
+        foliage = mce::Color(0.40f, 0.65f, 0.30f, 1.0f);
+    }
+    else if (lower.find("birch") != std::string::npos) {
+        grass   = mce::Color(0.325f, 0.447f, 0.247f, 1.0f);
+        foliage = mce::Color(0.263f, 0.341f, 0.173f, 1.0f);
+    }
+    else if (lower.find("dark_forest") != std::string::npos || lower.find("roofed_forest") != std::string::npos || lower.find("dark_oak_forest") != std::string::npos) {
+        grass   = mce::Color(0.20f, 0.30f, 0.12f, 1.0f);
+        foliage = mce::Color(0.235f, 0.471f, 0.118f, 1.0f);
+    }
+    else if (lower.find("dappled_forest") != std::string::npos || lower.find("dappled") != std::string::npos) {
+        grass   = mce::Color(0.875f, 0.408f, 0.153f, 1.0f);
+        foliage = mce::Color(0.902f, 0.557f, 0.188f, 1.0f);
+        water   = mce::Color(0.216f, 0.318f, 0.329f, 1.0f);
+    }
+    else if (lower.find("flower_forest") != std::string::npos) {
+        grass   = mce::Color(0.475f, 0.753f, 0.353f, 1.0f);
+        foliage = mce::Color(0.349f, 0.682f, 0.188f, 1.0f);
+    }
+    else if (lower.find("forest") != std::string::npos) {
+        grass   = mce::Color(0.294f, 0.463f, 0.216f, 1.0f);
+        foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
+    }
+    else if (lower.find("cherry") != std::string::npos) {
+        grass   = mce::Color(0.56f, 0.81f, 0.29f, 1.0f);
+        foliage = mce::Color(0.90f, 0.65f, 0.75f, 1.0f);
+    }
+    else if (lower.find("meadow") != std::string::npos || lower.find("grove") != std::string::npos) {
+        grass   = mce::Color(0.337f, 0.455f, 0.329f, 1.0f);
+        foliage = mce::Color(0.18f, 0.32f, 0.20f, 1.0f);
+    }
+    else if (lower.find("lush_caves") != std::string::npos) {
+        grass   = mce::Color(0.28f, 0.45f, 0.20f, 1.0f);
+        foliage = mce::Color(0.20f, 0.40f, 0.15f, 1.0f);
+        water   = mce::Color(0.15f, 0.35f, 0.55f, 1.0f);
+    }
+    else if (lower.find("deep_dark") != std::string::npos) {
+        grass   = mce::Color(0.18f, 0.22f, 0.20f, 1.0f);
+        foliage = mce::Color(0.15f, 0.18f, 0.16f, 1.0f);
+        water   = mce::Color(0.10f, 0.15f, 0.20f, 1.0f);
+    }
+    else if (lower.find("dripstone_caves") != std::string::npos) {
+        grass   = mce::Color(0.48f, 0.64f, 0.38f, 1.0f);
+        foliage = mce::Color(0.38f, 0.57f, 0.27f, 1.0f);
+    }
+    else if (lower.find("pale_garden") != std::string::npos) {
+        grass   = mce::Color(0.337f, 0.380f, 0.310f, 1.0f);
+        foliage = mce::Color(0.337f, 0.380f, 0.310f, 1.0f);
+    }
+    else if (lower.find("sunflower_plains") != std::string::npos) {
+        grass   = mce::Color(0.569f, 0.741f, 0.349f, 1.0f);
+        foliage = mce::Color(0.467f, 0.671f, 0.184f, 1.0f);
+    }
+    else if (lower.find("old_growth_birch") != std::string::npos) {
+        grass   = mce::Color(0.533f, 0.733f, 0.404f, 1.0f);
+        foliage = mce::Color(0.420f, 0.663f, 0.255f, 1.0f);
+    }
+    else if (lower.find("old_growth_pine") != std::string::npos) {
+        grass   = mce::Color(0.525f, 0.722f, 0.498f, 1.0f);
+        foliage = mce::Color(0.408f, 0.647f, 0.373f, 1.0f);
+    }
+    else if (lower.find("old_growth_spruce") != std::string::npos) {
+        grass   = mce::Color(0.525f, 0.718f, 0.514f, 1.0f);
+        foliage = mce::Color(0.408f, 0.643f, 0.392f, 1.0f);
+    }
+    else if (lower.find("wooded_badlands") != std::string::npos) {
+        grass   = mce::Color(0.565f, 0.506f, 0.302f, 1.0f);
+        foliage = mce::Color(0.620f, 0.506f, 0.302f, 1.0f);
+    }
+    else if (lower.find("sparse_jungle") != std::string::npos) {
+        grass   = mce::Color(0.392f, 0.780f, 0.247f, 1.0f);
+        foliage = mce::Color(0.243f, 0.722f, 0.059f, 1.0f);
+    }
+    else if (lower.find("snowy_beach") != std::string::npos) {
+        grass   = mce::Color(0.514f, 0.710f, 0.576f, 1.0f);
+        foliage = mce::Color(0.392f, 0.635f, 0.471f, 1.0f);
+    }
+    else if (lower.find("ice_spikes") != std::string::npos) {
+        grass   = mce::Color(0.502f, 0.706f, 0.592f, 1.0f);
+        foliage = mce::Color(0.376f, 0.631f, 0.482f, 1.0f);
+    }
+}
+
+bool IsBiomeTintedBlock(std::string_view name) noexcept {
+    if (name.find("grass") != std::string_view::npos ||
+        name.find("fern") != std::string_view::npos ||
+        name.find("double_plant") != std::string_view::npos ||
+        name.find("bush") != std::string_view::npos ||
+        name.find("vine") != std::string_view::npos ||
+        name.find("leaf") != std::string_view::npos ||
+        name.find("leaves") != std::string_view::npos) {
+        if (name.find("dry_grass") != std::string_view::npos) return false;
+        if (name.find("deadbush") != std::string_view::npos || name.find("dead_bush") != std::string_view::npos) return false;
+        if (name.find("cherry_leaves") != std::string_view::npos ||
+            name.find("mangrove_leaves") != std::string_view::npos ||
+            name.find("pale_oak_leaves") != std::string_view::npos ||
+            name.find("pale_leaves") != std::string_view::npos ||
+            name.find("poplar") != std::string_view::npos) return false;
+        return true;
+    }
+    return false;
+}
+
+
 } // namespace BlockColorMap

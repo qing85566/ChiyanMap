@@ -15,5 +15,7 @@ bool GetTranslucentOverlayColor(std::string_view rawName, mce::Color& outColor, 
 uint8_t GetIntrinsicBlockLight(std::string_view rawName) noexcept;
 mce::Color GetVanillaBlockColor(std::string_view rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol, bool useBiomeColors);
 mce::Color GetBlockColor(std::string_view rawName, mce::Color grassCol, mce::Color foliageCol, mce::Color waterCol);
+void GetBiomeTints(const std::string& biomeName, mce::Color& grass, mce::Color& foliage, mce::Color& water);
+bool IsBiomeTintedBlock(std::string_view name) noexcept;
 
 } // namespace BlockColorMap
