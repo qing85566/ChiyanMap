@@ -2700,10 +2700,7 @@ void GetBiomeTints(const std::string& biomeName, mce::Color& grass, mce::Color& 
         foliage = mce::Color(0.902f, 0.557f, 0.188f, 1.0f);
         water   = mce::Color(0.216f, 0.318f, 0.329f, 1.0f);
     }
-    else if (lower.find("flower_forest") != std::string::npos) {
-        grass   = mce::Color(0.475f, 0.753f, 0.353f, 1.0f);
-        foliage = mce::Color(0.349f, 0.682f, 0.188f, 1.0f);
-    }
+    // === 森林与繁花森林：草地匹配实际颜色 RGB(75,118,55) ===
     else if (lower.find("forest") != std::string::npos) {
         grass   = mce::Color(0.294f, 0.463f, 0.216f, 1.0f);
         foliage = mce::Color(0.22f, 0.38f, 0.15f, 1.0f);
@@ -2733,6 +2730,11 @@ void GetBiomeTints(const std::string& biomeName, mce::Color& grass, mce::Color& 
     else if (lower.find("pale_garden") != std::string::npos) {
         grass   = mce::Color(0.337f, 0.380f, 0.310f, 1.0f);
         foliage = mce::Color(0.337f, 0.380f, 0.310f, 1.0f);
+    }
+    // === 硫黄洞穴：原版 client_biome 定义水色 #34BF89, 草色 #ABA64F ===
+    else if (lower.find("sulfur_caves") != std::string::npos || lower.find("sulfur") != std::string::npos) {
+        grass   = mce::Color(0.671f, 0.651f, 0.310f, 1.0f);
+        foliage = mce::Color(0.671f, 0.651f, 0.310f, 1.0f);
     }
     else if (lower.find("sunflower_plains") != std::string::npos) {
         grass   = mce::Color(0.569f, 0.741f, 0.349f, 1.0f);
@@ -2765,6 +2767,10 @@ void GetBiomeTints(const std::string& biomeName, mce::Color& grass, mce::Color& 
     else if (lower.find("ice_spikes") != std::string::npos) {
         grass   = mce::Color(0.502f, 0.706f, 0.592f, 1.0f);
         foliage = mce::Color(0.376f, 0.631f, 0.482f, 1.0f);
+    }
+    else if (lower.find("the_void") != std::string::npos || lower.find("void") != std::string::npos) {
+        grass   = mce::Color(0.557f, 0.725f, 0.443f, 1.0f);
+        foliage = mce::Color(0.443f, 0.655f, 0.302f, 1.0f);
     }
 }
 
