@@ -480,6 +480,7 @@ inline void CacheWriteWorkerFunc() {
 
 // 提交缓存写入请求 (非阻塞双缓冲流水线，绝不丢弃任何扫描产物)
 inline void SubmitCacheWrite(int x, int z, int dim, bool isCave, std::vector<MapCacheManager::BiomeEntry>& biomes) {
+    if (MapRenderState::g_isShuttingDown.load()) return; // 退出阶段禁止再启动 / 投递缓存写流水线
     if (MapRenderState::currentDimensionId != dim) return; // 提交时校验物理维度
     if (MapCacheManager::GetLoadedDimensionId() != dim) return; // 提交时校验加载维度
 
@@ -537,18 +538,13 @@ inline void ShutdownCacheWriteThread() {
         g_cacheWriteExit.store(true);
         g_cacheWriteCV.notify_one();
         if (g_cacheWriteThread->joinable()) g_cacheWriteThread->join();
-        delete g_cacheWriteThread;
-        g_cacheWriteThread = nullptr;
+        // [退出崩溃修复] 故意不 delete 线程对象与下方 6 个双缓冲（约 11MB）：
+        // 在 LdrShutdownProcess 阶段批量释放跨 DLL allocator 内存会破坏堆块链表，
+        // 进程终止时由 OS 统一回收。保留非空句柄也可阻止流水线在退出期被重新懒启动。
         g_cacheWriteExit.store(false);
         g_cacheWritePending.store(false);
         g_cacheStagePending = false;
     }
-    if (g_cacheWriteColors) { delete[] g_cacheWriteColors; g_cacheWriteColors = nullptr; }
-    if (g_cacheWriteHeights) { delete[] g_cacheWriteHeights; g_cacheWriteHeights = nullptr; }
-    if (g_cacheWriteLights) { delete[] g_cacheWriteLights; g_cacheWriteLights = nullptr; }
-    if (g_cacheStageColors) { delete[] g_cacheStageColors; g_cacheStageColors = nullptr; }
-    if (g_cacheStageHeights) { delete[] g_cacheStageHeights; g_cacheStageHeights = nullptr; }
-    if (g_cacheStageLights) { delete[] g_cacheStageLights; g_cacheStageLights = nullptr; }
 }
 
 // ==========================================

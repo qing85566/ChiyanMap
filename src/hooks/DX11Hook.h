@@ -574,13 +574,16 @@ namespace DX11Hook {
         return FALSE;
     }
 
-    // [性能] 持久化烘焙线程变量声明 (必须在 ShutdownImGuiAndBuffers 之前声明)
+    // [性能] 持久化烘焙线程变量声明 (必须在 StopBackgroundThreads 之前声明)
     inline std::atomic<bool> g_textureBaking{false};
     inline std::mutex g_bakingMutex;
     inline std::condition_variable g_bakingCV;
     inline std::atomic<bool> g_bakingRequest{false};
     inline std::atomic<bool> g_bakingExit{false};
     inline std::thread* g_bakingThread = nullptr;
+
+    // [退出崩溃修复] 记录是否有一帧正在 RenderImGui 中，供 shutdown() 精确等待在飞回调
+    inline std::atomic<bool> g_renderingFrame{false};
 
     inline void SafeDestroyImGuiContext() {
         __try {
@@ -590,72 +593,46 @@ namespace DX11Hook {
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    inline void ShutdownImGuiAndBuffers() {
-        // [性能] 通知持久化烘焙线程退出并等待其结束
+    // [退出崩溃修复] 只负责停止并 join 持久化烘焙线程。
+    // 退出阶段刻意不释放 D3D11/D3D12/ImGui 资源、纹理贴图与全局容器：
+    // 这些对象混合由 LeviLamina allocator 与 CRT 堆分配，在 LdrShutdownProcess /
+    // CRT 静态析构阶段集中 delete / Release / DestroyContext，会破坏堆块链表，
+    // 使随后游戏全局对象析构时 _free_base -> RtlFreeHeap 读到失效的 LIST_ENTRY
+    // （崩溃现场：0xC0000005，mov rax,[r15]，r15 = 0xFFCC0000FFCC0000）。
+    // 进程终止时由操作系统统一回收，属于刻意的退出期「有意泄漏」。
+    inline void StopBackgroundThreads() {
         if (g_bakingThread) {
             g_bakingExit.store(true);
             g_bakingCV.notify_one();
             if (g_bakingThread->joinable()) g_bakingThread->join();
-            delete g_bakingThread;
+            // 故意不 delete：避免在拆卸阶段调用跨 DLL allocator 的 operator delete
             g_bakingThread = nullptr;
-            g_bakingExit.store(false);
-            g_bakingRequest.store(false);
-            g_textureBaking.store(false);
         }
-        InvalidateCachedWrappedResources();
-        for(auto& p : g_regionSRVs) if(p.second) p.second->Release();
-        g_regionSRVs.clear();
-        for(auto& p : g_regionTextures) if(p.second) p.second->Release();
-        g_regionTextures.clear();
-        for(auto& p : g_branchSRVs) if(p.second) p.second->Release();
-        g_branchSRVs.clear();
-        for(auto& p : g_branchTextures) if(p.second) p.second->Release();
-        g_branchTextures.clear();
-        EntityIconManager::ReleaseAll();
-        SpecialGridManager::Shutdown();
-        DatabaseManager::Shutdown();
-        if (g_imguiInitialized) {
-            if (g_mapTextureView) { g_mapTextureView->Release(); g_mapTextureView = nullptr; }
-            if (g_mapTexture) { g_mapTexture->Release(); g_mapTexture = nullptr; }
-            ImGui_ImplDX11_Shutdown();
-            ImGui_ImplWin32_Shutdown();
-            ImGui::DestroyContext();
-            g_imguiInitialized = false;
-        }
-        if (g_pd3dDeviceContext) {
-            ID3D11RenderTargetView* nullRTV = nullptr;
-            g_pd3dDeviceContext->OMSetRenderTargets(1, &nullRTV, NULL);
-            g_pd3dDeviceContext->ClearState();
-            g_pd3dDeviceContext->Flush();
-        }
-        if (g_d3d11On12Device) { g_d3d11On12Device->Release(); g_d3d11On12Device = nullptr; }
-        if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
-        if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
-        if (g_pGameCommandQueue) { g_pGameCommandQueue->Release(); g_pGameCommandQueue = nullptr; }
+        g_bakingExit.store(false);
+        g_bakingRequest.store(false);
+        g_textureBaking.store(false);
     }
 
-    // 【关闭期清理】由 ChiyanMap::disable() 在 unregisterAllHooks() 之后调用。
-    // 职责：(1) 等待在飞钩子回调观察到 g_isShuttingDown 并退出；(2) 卸载 DX11Hook::init() 安装的
-    // MinHook 钩子（Present/Present1/ResizeBuffers/ExecuteCommandLists + user32 输入 API）；
-    // (3) 恢复游戏原始 WndProc；(4) 释放所有 D3D11/D3D12/ImGui 资源。
-    // 此前这些资源在游戏退出时从未被显式释放，是 0xC0000005 退出崩溃的根因。
+    // 【关闭期冻结】由 ChiyanMap::disable() 在其它后台线程全部停止之后调用。
+    // 职责：(1) 精确等待仍在 RenderImGui 中的最后一帧退出；(2) 恢复游戏原始 WndProc；
+    // (3) 停止并 join 烘焙线程。
+    // MinHook / SafetyHook 跳板保持不卸载（主动回写机器码会破坏 LeviLamina 与
+    // BetterRenderDragon 的链式 hook）；ChiyanMap::enable() 已把本 DLL 钉在进程内，
+    // 保证跳板在整个退出流程中始终有效，配合 g_isShuttingDown 直接 pass-through。
     inline void shutdown() {
-        // g_isShuttingDown 已由 ChiyanMap::disable() 入口处置位；此处等待在飞回调退出。
-        // 钩子入口处的 g_isShuttingDown 检查会让新一帧的 Present/Update 直接 pass-through，
-        // 等待 30ms 足以让上一帧的 RenderImGui（约 5-15ms）走完。
-        Sleep(30);
-
-        // 恢复游戏原始窗口过程，防止窗口销毁期间 WndProcHook 访问已释放的 ImGui 上下文
-        if (oWndProc && g_hWnd) {
-            SetWindowLongPtr(g_hWnd, GWLP_WNDPROC, (LONG_PTR)oWndProc);
-            oWndProc = nullptr;
+        // 等待在飞帧自然退出（最多 200ms），取代原先固定 Sleep(30) 的猜测式等待。
+        for (int i = 0; i < 200 && g_renderingFrame.load(); ++i) {
+            Sleep(1);
         }
 
-        // 释放 D3D11/D3D12/ImGui 资源（包括停止持久化烘焙线程）
-        // [安全退出保障] 退出时不注销 MinHook (避免破坏 LeviLamina 及其他模组的全局钩子环境)
-        // 亦不主动析构 SafetyHook 跳板 (防止多线程 Present 并发或链式序言回写冲突)
-        // 所有钩子已有 g_isShuttingDown 原子拦截直接 pass-through 放行原函数
-        ShutdownImGuiAndBuffers();
+        // 恢复游戏原始窗口过程；oWndProc 刻意不清空，
+        // 这样窗口销毁期间万一仍有残留的 WndProcHook 被调用，也能正确转发消息，
+        // 不会退化到 DefWindowProc 或访问已销毁的 ImGui 上下文。
+        if (oWndProc && g_hWnd && IsWindow(g_hWnd)) {
+            SetWindowLongPtr(g_hWnd, GWLP_WNDPROC, (LONG_PTR)oWndProc);
+        }
+
+        StopBackgroundThreads();
     }
 
     inline HRESULT __stdcall hkResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
@@ -14344,7 +14321,6 @@ namespace DX11Hook {
     }
 
     inline void RenderImGui(IDXGISwapChain* pSwapChain) {
-        static std::atomic<bool> isRendering{false};
         struct RenderingGuard {
             std::atomic<bool>& flag;
             bool active;
@@ -14355,12 +14331,11 @@ namespace DX11Hook {
             explicit operator bool() const { return active; }
         };
 
-        RenderingGuard guard(isRendering);
+        // 使用命名空间级标志，shutdown() 可据此精确等待在飞帧结束
+        RenderingGuard guard(g_renderingFrame);
         if (!guard) return;
 
-        // [关闭期安全] 进程退出阶段已开始时，所有 D3D/ImGui 资源可能在 ShutdownImGuiAndBuffers
-        // 中被释放；此时进入渲染路径会访问悬空指针，导致 0xC0000005 退出崩溃。
-        // 直接放行 Present 到原函数，由 MH_DisableHook 完成后此回调自然不再被调用。
+        // [关闭期安全] 退出阶段不再进入渲染路径，Present 直接 pass-through 原函数。
         if (MapRenderState::g_isShuttingDown.load()) {
             ClipCursor(NULL);
             return;

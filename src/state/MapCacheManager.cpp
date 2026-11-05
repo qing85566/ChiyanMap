@@ -23,8 +23,15 @@ namespace MapCacheManager {
     std::mutex g_cacheMutex;
     std::atomic<bool> g_running{false};
     std::atomic<uint64_t> g_accessTickCounter{1};
-    // 协程退出同步信号：Init 时为 0（被占用），协程结束时 release；Shutdown 时 acquire 等待退出
+    // 协程退出同步信号：IOWorkerThread 结束时 release（保留兼容，退出同步已改用 join）
     std::binary_semaphore g_ioDone{0};
+
+    // [退出崩溃修复] 后台线程句柄：绝不 detach，退出时统一 join。
+    // 线程入口与窗口/渲染回调都位于本 DLL，detach 后无法保证 DLL 卸载前线程已结束。
+    std::thread* g_ioThread = nullptr;
+    static std::thread* s_exportThread = nullptr;
+    static std::mutex s_exportThreadMutex;
+    static std::atomic<bool> s_exportAbort{false};
     
     // 初始化为空，等待进入世界时分配
     std::string g_cacheDir = "";
@@ -988,15 +995,36 @@ namespace MapCacheManager {
     }
 
     void Init() {
+        if (g_ioThread || MapRenderState::g_isShuttingDown.load()) return; // 防止退出期 / 重复启动
         g_running = true;
-        // 启动 IO 工作线程; 线程退出时释放信号量
-        std::thread(IOWorkerThread).detach();
+        g_ioThread = new std::thread(IOWorkerThread);
     }
 
     void Shutdown() {
+        static std::atomic<bool> s_shutdownOnce{false};
+        if (s_shutdownOnce.exchange(true)) return;
+
+        s_exportAbort.store(true);
         g_running = false;
-        // 等待 IO 线程退出（最多 20ms 一次循环 + 一次 IO 处理时间）
-        g_ioDone.acquire();
+
+        // [退出崩溃修复] 等待线程真正结束，而不是只等函数体末尾的 g_ioDone.release()：
+        // 旧实现 detach 后仅靠信号量，线程仍需经过 CRT 收尾，且无句柄可等待，
+        // DLL 卸载 / 静态析构阶段线程入口代码可能已失效。
+        if (g_ioThread) {
+            if (g_ioThread->joinable()) g_ioThread->join();
+            // 故意不 delete：退出阶段不再调用跨 DLL allocator 的 operator delete
+            g_ioThread = nullptr;
+        }
+
+        std::thread* exportThread = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(s_exportThreadMutex);
+            exportThread = s_exportThread;
+            s_exportThread = nullptr;
+        }
+        if (exportThread && WaitForSingleObject(exportThread->native_handle(), 3000) == WAIT_OBJECT_0) {
+            if (exportThread->joinable()) exportThread->join();
+        }
 
         // [持久化] 游戏关闭时保存所有脏区域 (含下界/末地), 避免退出时数据丢失
         if (!g_cacheDir.empty() && !s_cacheLockedByAnotherProcess.load()) {
@@ -1029,10 +1057,10 @@ namespace MapCacheManager {
             }
         }
 
-        for (auto& pair : g_loadedRegions) if(pair.second) delete pair.second;
-        g_loadedRegions.clear();
-        g_loadQueue.clear();
-        s_branchDirtyMap.clear();
+        // [退出崩溃修复] 不再集中 delete RegionData / clear 全局容器：
+        // 这些对象由 LeviLamina allocator 分配，在 LdrShutdownProcess 阶段批量释放
+        // 会与 MallocRedirect 半拆卸的堆交互，破坏后续 RtlFreeHeap 所需的堆块链表。
+        // 进程终止时由操作系统统一回收。
         ReleaseCacheLock();
     }
 
@@ -2823,7 +2851,7 @@ namespace MapCacheManager {
                 }
                 MapRenderState::exportResultType.store(0); // SUCCESS
                 MapRenderState::exportStage.store(2);
-                if (openFolder) {
+                if (openFolder && !s_exportAbort.load()) {
                     ShellExecuteW(nullptr, L"open", absFolder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 }
             } else {
@@ -2851,8 +2879,8 @@ namespace MapCacheManager {
                 std::vector<ActiveTileTask> activeTasks;
 
                 // 1. 预扫描分片：筛选出所有实际包含已探索像素的分片任务
-                for (int tz = 0; tz < tilesZ; ++tz) {
-                    for (int tx = 0; tx < tilesX; ++tx) {
+                for (int tz = 0; tz < tilesZ && !s_exportAbort.load(); ++tz) {
+                    for (int tx = 0; tx < tilesX && !s_exportAbort.load(); ++tx) {
                         int tileMinX = minBlockX + tx * tileSpan;
                         int tileMinZ = minBlockZ + tz * tileSpan;
                         int tileW = (int)std::min<long long>(tileSpan, (long long)maxBlockX - tileMinX + 1);
@@ -2897,7 +2925,7 @@ namespace MapCacheManager {
                 std::atomic<int> exportedCount{0};
 
                 auto workerFunc = [&]() {
-                    while (!MapRenderState::exportCancelRequested.load()) {
+                    while (!MapRenderState::exportCancelRequested.load() && !s_exportAbort.load()) {
                         size_t taskIdx = nextTaskIdx.fetch_add(1);
                         if (taskIdx >= activeTasks.size()) break;
                         const auto& task = activeTasks[taskIdx];
@@ -2965,6 +2993,12 @@ namespace MapCacheManager {
                     if (th.joinable()) th.join();
                 }
 
+                // [退出崩溃修复] 退出阶段直接收尾，不删除已导出的图片目录
+                if (s_exportAbort.load()) {
+                    MapRenderState::exportStage.store(2);
+                    return;
+                }
+
                 // 4. 若导出过程中玩家点击了“终止并清空”，立即清空刚刚导出的图片并删除文件夹
                 if (MapRenderState::exportCancelRequested.load()) {
                     std::error_code ec;
@@ -2989,7 +3023,7 @@ namespace MapCacheManager {
                 }
                 MapRenderState::exportResultType.store(0); // SUCCESS
                 MapRenderState::exportStage.store(2);
-                if (openFolder) {
+                if (openFolder && !s_exportAbort.load()) {
                     ShellExecuteW(nullptr, L"open", absFolder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 }
             }
@@ -3003,6 +3037,7 @@ namespace MapCacheManager {
     }
 
     void TriggerExportMapToPNG() {
+        if (s_exportAbort.load() || MapRenderState::g_isShuttingDown.load()) return;
         int stage = MapRenderState::exportStage.load();
         if (stage == 1) return; // 已经在导出中
         MapRenderState::exportCancelRequested.store(false);
@@ -3010,6 +3045,13 @@ namespace MapCacheManager {
         MapRenderState::exportCompletedTiles.store(0);
         MapRenderState::exportStage.store(1);
         MapRenderState::exportResultType.store(-1);
-        std::thread(ExecuteExportPNG).detach();
+
+        // [退出崩溃修复] 保留线程句柄供 Shutdown() join，不再 detach。
+        std::lock_guard<std::mutex> lk(s_exportThreadMutex);
+        if (s_exportThread) {
+            if (s_exportThread->joinable()) s_exportThread->join();
+            s_exportThread = nullptr;
+        }
+        s_exportThread = new std::thread(ExecuteExportPNG);
     }
 }

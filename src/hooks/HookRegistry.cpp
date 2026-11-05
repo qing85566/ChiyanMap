@@ -3,6 +3,7 @@
 #include "hooks/UIRenderHook.h"
 #include "hooks/DX11Hook.h"
 #include "hooks/BeaconRenderHook.h"
+#include "hooks/InputIMEHelper.h"
 
 void registerAllHooks() {
     // 注册除 ClientInstance::$update 之外的所有原生游戏逻辑与 UI 钩子
@@ -81,4 +82,8 @@ bool initDX11Hook() {
 
 void shutdownDX11Hook() {
     DX11Hook::shutdown();
+}
+
+void shutdownInputIME() {
+    InputIMEHelper::Shutdown();
 }

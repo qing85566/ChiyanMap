@@ -121,6 +121,19 @@ bool ChiyanMap::load() {
 }
 
 bool ChiyanMap::enable() {
+    // [退出崩溃修复] 将本 DLL 钉在进程中，直到进程终止才卸载。
+    // 退出阶段我们刻意保留 user32/DXGI 的 inline hook 跳板与 WndProc 链
+    // （主动回写原始机器码会破坏 BetterRenderDragon 等模组的链式 hook），
+    // 若 LeviLamina 在 disable() 之后提前 FreeLibrary(ChiyanMap.dll)，
+    // 这些跳板就会指向已释放的代码页，游戏 CRT 收尾时必然 0xC0000005。
+    static int s_moduleAnchor = 0;
+    HMODULE hSelf = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&s_moduleAnchor),
+        &hSelf
+    );
+
     // [性能优化] 提前在模组启用阶段完成 DXGI 和输入底层挂钩，
     // 避免将耗时初始化推迟到主菜单首次渲染帧导致 ~1s 卡顿 (Stutter)
     initDX11Hook();
@@ -141,9 +154,13 @@ bool ChiyanMap::enable() {
 }
 
 bool ChiyanMap::disable() {
-    // [修复] 置位关闭标志并清空全局指针，使所有钩子入口直接 pass-through 放行，
-    // 防止进程退出阶段访问已释放的 D3D/ImGui/Player 资源；
-    // 退出时不主动卸载跳板内存，确保 Minecraft 全局析构函数通过跳板时依然安全执行原函数
+    // [退出崩溃修复] 整个退出流程必须严格幂等：LeviLamina 在进程退出时可能多次触发，
+    // 重复 join / 重复释放正是堆损坏与死锁的来源之一。
+    static std::atomic<bool> s_disableStarted{false};
+    if (s_disableStarted.exchange(true)) return true;
+
+    // (1) 立即冻结所有钩子入口：置位后每个 hook 都直接 pass-through 原函数，
+    //     不再触碰 ImGui 上下文、D3D 资源与玩家数据。
     MapRenderState::g_isShuttingDown.store(true);
     ClipCursor(NULL);
     if (g_mouseListener) {
@@ -154,17 +171,33 @@ bool ChiyanMap::disable() {
     g_localPlayer = nullptr;
     g_clientInstance = nullptr;
 
+    // (2) 先拆掉 IME 窗口过程并终止其常驻线程，防止窗口销毁期间回调进入本 DLL。
+    shutdownInputIME();
+
+    // (3) 落盘用户数据。此阶段只做文件 IO / JSON 序列化，不释放任何堆资源。
     AnarchyManager::SaveHighlights();
     WaypointManager::SaveWaypoints();
     DeathPointManager::SaveDeathPoints();
     DrawingManager::SaveDrawings();
     MultiworldManager::SaveConfig();
     SpecialGridManager::Shutdown();
-    DatabaseManager::Shutdown();
+
+    // (4) 停止并 join 全部后台线程（种子 worker / 缓存写 worker / 磁盘 IO / PNG 导出）。
+    //     线程入口代码位于本 DLL，绝不能在 DLL 卸载或 CRT 静态析构后继续运行。
     SeedMapManager::Shutdown();
     shutdownCacheWriteThread();
     MapCacheManager::Shutdown();
+
+    // (5) 关闭数据库，并冻结 DX11 渲染（等待在飞帧、恢复 WndProc、停止烘焙线程）。
+    DatabaseManager::Shutdown();
     shutdownDX11Hook();
+
+    // [退出崩溃修复·关键] 进程即将终止，此处刻意不再主动 delete / Release /
+    // DestroyContext / clear 大容器。此前在 LdrShutdownProcess 与 CRT 静态析构阶段
+    // 集中释放 ImGui 上下文、D3D COM 对象、数百个 RegionData 和 11MB 双缓冲，
+    // 会与 LeviLamina allocator、MallocRedirect 已半拆卸的堆交互，
+    // 使后续 _free_base -> RtlFreeHeap 读到损坏的堆块头而 0xC0000005。
+    // 这些内存由操作系统在进程终止时统一回收，代价仅为退出瞬间的“有意泄漏”。
     return true;
 }
 

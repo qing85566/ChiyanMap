@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <mutex>
+#include <vector>
 #include <algorithm>
 #include <cmath>
 #include <imgui.h>
@@ -36,6 +37,13 @@ namespace InputIMEHelper {
     inline std::atomic<uint64_t> s_lastActiveFrame{0};
     inline std::atomic<uint64_t> s_currentFrame{0};
     inline std::once_flag s_classRegisteredOnce;
+
+    // [退出崩溃修复] IME 常驻线程、窗口类与窗口过程的生命周期管理
+    inline std::atomic<bool> s_shuttingDown{false};
+    inline std::vector<std::thread*> s_imeThreads;
+    inline std::mutex s_imeThreadsMutex;
+    inline std::atomic<bool> s_classRegistered{false};
+    inline HINSTANCE s_classHInst = nullptr;
 
     // 静态常驻 GDI 画刷缓存，彻底消除每帧与每次绘制消息的 GDI 句柄频繁创建/销毁开销
     inline HBRUSH GetBgBrush() {
@@ -114,6 +122,55 @@ namespace InputIMEHelper {
         }
     }
 
+    // [退出崩溃修复] 由 ChiyanMap::disable() 在置位 g_isShuttingDown 之后调用。
+    // 旧实现每次点击输入框都 detach 一个线程，窗口过程 EditProc 与窗口类都位于本 DLL，
+    // 却从不恢复、不注销、不 join；DLL 卸载或窗口销毁期间回调即跳进已释放代码。
+    inline void Shutdown() {
+        s_shuttingDown.store(true);
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(s_stateMutex);
+            HWND edit = hEdit;
+            if (oEditProc && edit && IsWindow(edit)) {
+                SetWindowLongPtrW(edit, GWLP_WNDPROC, (LONG_PTR)oEditProc);
+            }
+            oEditProc = nullptr;
+            isTyping.store(false);
+            targetBuffer = nullptr;
+            targetBufferSize = 0;
+
+            HWND window = hImeWnd;
+            hImeWnd = nullptr;
+            if (window && IsWindow(window)) {
+                PostMessageW(window, WM_CLOSE, 0, 0);
+            }
+        }
+
+        std::vector<std::thread*> threads;
+        {
+            std::lock_guard<std::mutex> lk(s_imeThreadsMutex);
+            threads = s_imeThreads;
+        }
+        for (std::thread* worker : threads) {
+            if (!worker) continue;
+            DWORD tid = GetThreadId(worker->native_handle());
+            if (tid) PostThreadMessageW(tid, WM_QUIT, 0, 0);
+        }
+        for (std::thread* worker : threads) {
+            if (!worker || !worker->joinable()) continue;
+            // 带超时等待，避免窗口消息循环意外卡住时把退出流程挂死；
+            // 超时后保留线程对象（本 DLL 已被 pin，进程结束时由 OS 回收）。
+            if (WaitForSingleObject(worker->native_handle(), 1000) == WAIT_OBJECT_0) {
+                worker->join();
+            }
+        }
+
+        if (s_classRegistered.exchange(false)) {
+            UnregisterClassW(L"ChiyanInPlaceIME", s_classHInst);
+        }
+        hEdit = nullptr;
+    }
+
     inline void Open(char*, size_t, const char*) {}
 
     inline void OnFrame() {
@@ -187,7 +244,8 @@ namespace InputIMEHelper {
             SetCursor(LoadCursor(NULL, IDC_IBEAM));
             return TRUE;
         }
-        return CallWindowProcW(oEditProc, hwnd, msg, wParam, lParam);
+        if (oEditProc) return CallWindowProcW(oEditProc, hwnd, msg, wParam, lParam);
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
     inline void UpdateItemPos(const ImVec2& pMin, const ImVec2& pMax) {
@@ -237,9 +295,11 @@ namespace InputIMEHelper {
     }
 
     inline void AttachToItem(const char* label, char* buf, size_t bufSize, const ImVec2& pMin, const ImVec2& pMax, const char* hint = nullptr, ImGuiInputTextFlags flags = 0) {
+        if (s_shuttingDown.load()) return;
         if (!buf || bufSize == 0) return;
         if (!g_gameHwnd || !IsWindow(g_gameHwnd)) {
             g_gameHwnd = FindWindowW(L"Bedrock", L"Minecraft");
+
             if (!g_gameHwnd) g_gameHwnd = FindWindowW(L"Bedrock", NULL);
         }
         if (!g_gameHwnd) return;
@@ -287,7 +347,7 @@ namespace InputIMEHelper {
             ImGui::ClearActiveID();
         }
 
-        std::thread([]() {
+        auto* imeWorker = new std::thread([]() {
             HINSTANCE hInst = GetModuleHandle(NULL);
             std::call_once(s_classRegisteredOnce, [hInst]() {
                 WNDCLASSW wc = {0};
@@ -430,6 +490,12 @@ namespace InputIMEHelper {
                         SetCursor(LoadCursor(NULL, IDC_IBEAM));
                         return TRUE;
                     } else if (msg == WM_CLOSE) {
+                        // [退出崩溃修复] 销毁窗口前先摘掉 EDIT 子类化，
+                        // 避免窗口销毁期间回调进入正在卸载的 DLL。
+                        if (oEditProc && hEdit && IsWindow(hEdit)) {
+                            SetWindowLongPtrW(hEdit, GWLP_WNDPROC, (LONG_PTR)oEditProc);
+                            oEditProc = nullptr;
+                        }
                         Close();
                         HFONT font = (HFONT)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
                         if (font) {
@@ -448,6 +514,8 @@ namespace InputIMEHelper {
                 wc.hCursor = LoadCursor(NULL, IDC_IBEAM);
                 wc.hbrBackground = NULL;
                 RegisterClassW(&wc);
+                s_classRegistered.store(true);
+                s_classHInst = hInst;
             });
 
             // 使用 WS_POPUP | WS_CLIPCHILDREN：
@@ -476,7 +544,13 @@ namespace InputIMEHelper {
                 hImeWnd = nullptr;
                 hEdit = nullptr;
             }
-        }).detach();
+        });
+
+        // [退出崩溃修复] 保留线程句柄供 Shutdown() 统一 join，绝不能 detach。
+        {
+            std::lock_guard<std::mutex> lk(s_imeThreadsMutex);
+            s_imeThreads.push_back(imeWorker);
+        }
     }
 
     inline bool InputTextWithIME(const char* label, char* buf, size_t bufSize, const char* hint = nullptr, ImGuiInputTextFlags flags = 0) {
