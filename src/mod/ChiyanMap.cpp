@@ -24,6 +24,11 @@
 #include <string>
 #include <algorithm>
 
+// 定义于 MemoryOperators.cpp：置位后本 DLL 的所有 operator delete 变为 no-op
+namespace ChiyanMapMem {
+extern std::atomic<bool> g_skipDeleteOnShutdown;
+}
+
 ll::event::ListenerPtr g_mouseListener = nullptr;
 
 float g_playerX       = 0.0f;
@@ -156,6 +161,11 @@ bool ChiyanMap::enable() {
 bool ChiyanMap::disable() {
     // [退出崩溃修复] 整个退出流程必须严格幂等：LeviLamina 在进程退出时可能多次触发，
     // 重复 join / 重复释放正是堆损坏与死锁的来源之一。
+    // [退出崩溃修复·第二轮] 必须最先置位：此后本 DLL 所有堆释放（含 CRT 在
+    // DLL_PROCESS_DETACH 阶段自动执行的全局对象析构）都不再经过已半拆卸的
+    // LeviLamina allocator / MallocRedirect，避免 free-list 链表被破坏。
+    ChiyanMapMem::g_skipDeleteOnShutdown.store(true, std::memory_order_relaxed);
+
     static std::atomic<bool> s_disableStarted{false};
     if (s_disableStarted.exchange(true)) return true;
 
