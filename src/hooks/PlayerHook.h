@@ -288,7 +288,6 @@ namespace CursorHelper {
     }
 
     inline bool IsMinecraftNativeScreenOpen(ClientInstance* ci = nullptr) {
-        if (MapRenderState::IsUIActive()) return false;
         if (!ci) ci = g_clientInstance;
         if (!ci) return false;
         __try {
@@ -3760,6 +3759,12 @@ LL_TYPE_INSTANCE_HOOK(
 
                     if (MapRenderState::currentWorldId != finalWorldId) {
                         MapRenderState::ResetDimCameraStates();
+                        MapRenderState::bigMapOffsetX = 0.0f;
+                        MapRenderState::bigMapOffsetZ = 0.0f;
+                        MapRenderState::cameraHopActive = false;
+                        MapRenderState::bigMapViewDimensionId = -999;
+                        MapRenderState::bigMapOverworldCave = false;
+                        MapRenderState::lastViewedDimensionId = 0;
                     }
                     MapRenderState::currentWorldId = finalWorldId;
                     MapRenderState::currentDimensionId = dimId;
@@ -3891,16 +3896,22 @@ LL_TYPE_INSTANCE_HOOK(
                 ClipCursor(NULL);
                 CursorHelper::SafeShowHardwareCursor();
             } else {
-                // 模组自身界面关闭：无条件重新捕获鼠标并隐藏硬件光标，彻底打破死锁
-                this->grabMouse();
-                CursorHelper::SafeHideHardwareCursor();
+                // 模组自身界面关闭：若游戏原生菜单处于开启状态，必须保持鼠标释放与光标可见
+                if (CursorHelper::IsMinecraftNativeScreenOpen(this)) {
+                    this->releaseMouse();
+                    ClipCursor(NULL);
+                    CursorHelper::SafeShowHardwareCursor();
+                } else {
+                    this->grabMouse();
+                    CursorHelper::SafeHideHardwareCursor();
+                }
             }
         } else if (justRegainedFocus) {
-            if (currentUIState) {
+            if (currentUIState || CursorHelper::IsMinecraftNativeScreenOpen(this)) {
                 this->releaseMouse();
                 ClipCursor(NULL);
                 CursorHelper::SafeShowHardwareCursor();
-            } else if (!CursorHelper::IsMinecraftNativeScreenOpen(this)) {
+            } else {
                 this->grabMouse();
                 CursorHelper::SafeHideHardwareCursor();
             }
@@ -5070,6 +5081,13 @@ LL_TYPE_INSTANCE_HOOK(
         AbortActiveScanAndPendingWrites();
         MapRenderState::currentDimensionId = -999;
         MapRenderState::currentWorldId.clear();
+        MapRenderState::ResetDimCameraStates();
+        MapRenderState::bigMapOffsetX = 0.0f;
+        MapRenderState::bigMapOffsetZ = 0.0f;
+        MapRenderState::cameraHopActive = false;
+        MapRenderState::bigMapViewDimensionId = -999;
+        MapRenderState::bigMapOverworldCave = false;
+        MapRenderState::lastViewedDimensionId = 0;
         g_prevPhysicsPos = {0.0f, 0.0f, 0.0f};
         g_currPhysicsPos = {0.0f, 0.0f, 0.0f};
     }

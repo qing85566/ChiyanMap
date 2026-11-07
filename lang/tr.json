@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "Harita Arayuzu: Gizlendi · Geri yuklemek icin F1",
     "TOAST_BIGMAP_HIDE_UI_OFF": "Harita Arayuzu: Geri Yuklendi",
     "BIGMAP_FOLLOW_PLAYER": "Dunya Haritasinda Oyuncu Takip Modu",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "Harita kamerasi oyuncuyu gercek zamanli takip eder. Haritayi suruklemek kilidi kaldirir.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "Harita kamerasi oyuncuyu gercek zamanli takip eder. Kilidi kaldirmak icin dugmeye tekrar tiklayin.",
     "TOAST_BIGMAP_FOLLOW_ON": "Oyuncu Takip Modu: Etkin",
     "TOAST_BIGMAP_FOLLOW_OFF": "Oyuncu Takip Modu: Devre Disi",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Oyuncu Takibi: Aktif · Serbest gezinti icin tiklayin",

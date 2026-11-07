@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "Interfaccia mappa: nascosta · F1 per ripristinare",
     "TOAST_BIGMAP_HIDE_UI_OFF": "Interfaccia mappa: ripristinata",
     "BIGMAP_FOLLOW_PLAYER": "Modalità inseguimento giocatore nella mappa",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "La visuale segue il giocatore in tempo reale. Trascinare la mappa disattiva il blocco automaticamente.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "La visuale segue il giocatore in tempo reale. Fai nuovamente clic sul pulsante per disattivare il blocco.",
     "TOAST_BIGMAP_FOLLOW_ON": "Modalità inseguimento: attivata",
     "TOAST_BIGMAP_FOLLOW_OFF": "Modalità inseguimento: disattivata",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Inseguimento attivo · Clicca per esplorazione libera",

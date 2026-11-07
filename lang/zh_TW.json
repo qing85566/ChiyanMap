@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "大地圖全套介面：已隱藏 · 按 F1 恢復",
     "TOAST_BIGMAP_HIDE_UI_OFF": "大地圖全套介面：已恢復顯示",
     "BIGMAP_FOLLOW_PLAYER": "世界地圖鎖定跟隨玩家",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "開啟後大地圖視野中心即時跟隨玩家移動，手動拖曳地圖時自動解除鎖定",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "開啟後大地圖視野中心即時跟隨玩家移動，再次點擊該按鈕可解除鎖定",
     "TOAST_BIGMAP_FOLLOW_ON": "大地圖玩家跟隨模式：已開啟",
     "TOAST_BIGMAP_FOLLOW_OFF": "大地圖玩家跟隨模式：已解除",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "鎖定跟隨玩家：已啟動 · 點擊切換為自由瀏覽",

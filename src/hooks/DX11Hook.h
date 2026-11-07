@@ -457,6 +457,10 @@ namespace DX11Hook {
     inline PSETCURSOR_HOOK oSetCursor = nullptr;
     inline std::atomic<bool> g_allowInternalSetCursor{false};
 
+    inline bool IsMinecraftNativeScreenOpen() {
+        return CursorHelper::IsMinecraftNativeScreenOpen(g_clientInstance);
+    }
+
     inline HCURSOR SafeSetCursorInternal(HCURSOR hCursor) {
         g_allowInternalSetCursor.store(true);
         HCURSOR old = nullptr;
@@ -483,7 +487,7 @@ namespace DX11Hook {
         // 这会导致游戏主线程与 Windows 消息循环高频交替修改光标可见性，
         // 在屏幕上表现为光标在消失与出现之间迅速跳变。
         // 处于纯游玩视角时正常放行 SetCursor 置空，确保游戏进入第一人称时系统光标能被顺利隐藏。
-        if (MapRenderState::IsUIActive()) {
+        if (MapRenderState::IsUIActive() || IsMinecraftNativeScreenOpen()) {
             if (hCursor == NULL) {
                 static HCURSOR s_defaultArrow = LoadCursor(NULL, IDC_ARROW);
                 return s_defaultArrow;
@@ -522,15 +526,11 @@ namespace DX11Hook {
         // 绝不能返回非负数，否则外部判定隐藏完成的循环代码会陷入永久死循环导致游戏彻底卡死。
         // 此处直接返回 -1 告知调用方光标已隐藏，使其立即正常退出循环；
         // 同时绝不实际调用底层的原始隐藏逻辑，确保系统的硬件光标真实显示计数不被扣减，光标保持完全可见。
-        if (MapRenderState::IsUIActive() && !bShow) {
+        if ((MapRenderState::IsUIActive() || IsMinecraftNativeScreenOpen()) && !bShow) {
             return -1;
         }
         if (oShowCursor) return oShowCursor(bShow);
         return 0;
-    }
-
-    inline bool IsMinecraftNativeScreenOpen() {
-        return CursorHelper::IsMinecraftNativeScreenOpen(g_clientInstance);
     }
 
     typedef BOOL(WINAPI* PCLIPCURSOR_HOOK)(const RECT*);
@@ -735,7 +735,7 @@ namespace DX11Hook {
     }
 
     inline void SyncMouseCaptureForHotkey() {
-        if (MapRenderState::IsUIActive()) {
+        if (MapRenderState::IsUIActive() || IsMinecraftNativeScreenOpen()) {
             SafeReleaseClientMouse();
             SafeClipCursorInternal(NULL);
             SafeShowHardwareCursor();
@@ -1025,7 +1025,7 @@ namespace DX11Hook {
             SafeClipCursorInternal(NULL);
             g_tabHeld = false;
         } else if (uMsg == WM_SETFOCUS || (uMsg == WM_ACTIVATE && LOWORD(wParam) != WA_INACTIVE) || (uMsg == WM_ACTIVATEAPP && wParam != FALSE)) {
-            if (MapRenderState::IsUIActive()) {
+            if (MapRenderState::IsUIActive() || IsMinecraftNativeScreenOpen()) {
                 SafeClipCursorInternal(NULL);
                 SafeReleaseClientMouse();
                 CURSORINFO curInfo = { sizeof(CURSORINFO) };
@@ -1035,21 +1035,21 @@ namespace DX11Hook {
                 }
                 ImGuiMouseCursor cursor = ImGui::GetCurrentContext() ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
                 LPCTSTR win32Cursor = IDC_ARROW;
-                switch (cursor) {
-                    case ImGuiMouseCursor_Arrow:        win32Cursor = IDC_ARROW; break;
-                    case ImGuiMouseCursor_TextInput:    win32Cursor = IDC_IBEAM; break;
-                    case ImGuiMouseCursor_ResizeAll:    win32Cursor = IDC_SIZEALL; break;
-                    case ImGuiMouseCursor_ResizeEW:     win32Cursor = IDC_SIZEWE; break;
-                    case ImGuiMouseCursor_ResizeNS:     win32Cursor = IDC_SIZENS; break;
-                    case ImGuiMouseCursor_ResizeNESW:   win32Cursor = IDC_SIZENESW; break;
-                    case ImGuiMouseCursor_ResizeNWSE:   win32Cursor = IDC_SIZENWSE; break;
-                    case ImGuiMouseCursor_Hand:         win32Cursor = IDC_HAND; break;
-                    case ImGuiMouseCursor_NotAllowed:   win32Cursor = IDC_NO; break;
-                    default:                            win32Cursor = IDC_ARROW; break;
+                if (MapRenderState::IsUIActive()) {
+                    switch (cursor) {
+                        case ImGuiMouseCursor_Arrow:        win32Cursor = IDC_ARROW; break;
+                        case ImGuiMouseCursor_TextInput:    win32Cursor = IDC_IBEAM; break;
+                        case ImGuiMouseCursor_ResizeAll:    win32Cursor = IDC_SIZEALL; break;
+                        case ImGuiMouseCursor_ResizeEW:     win32Cursor = IDC_SIZEWE; break;
+                        case ImGuiMouseCursor_ResizeNS:     win32Cursor = IDC_SIZENS; break;
+                        case ImGuiMouseCursor_ResizeNESW:   win32Cursor = IDC_SIZENESW; break;
+                        case ImGuiMouseCursor_ResizeNWSE:   win32Cursor = IDC_SIZENWSE; break;
+                        case ImGuiMouseCursor_Hand:         win32Cursor = IDC_HAND; break;
+                        case ImGuiMouseCursor_NotAllowed:   win32Cursor = IDC_NO; break;
+                        default:                            win32Cursor = IDC_ARROW; break;
+                    }
                 }
                 SetCursor(LoadCursor(NULL, win32Cursor));
-            } else if (IsMinecraftNativeScreenOpen()) {
-                SafeClipCursorInternal(NULL);
             } else {
                 SafeGrabClientMouse();
                 SafeHideHardwareCursor();
@@ -1382,8 +1382,14 @@ namespace DX11Hook {
                         }
                     }
                     if (!MapRenderState::IsUIActive()) {
-                        SafeGrabClientMouse();
-                        SafeHideHardwareCursor();
+                        if (IsMinecraftNativeScreenOpen()) {
+                            SafeReleaseClientMouse();
+                            SafeClipCursorInternal(NULL);
+                            SafeShowHardwareCursor();
+                        } else {
+                            SafeGrabClientMouse();
+                            SafeHideHardwareCursor();
+                        }
                     }
                     return 1;
                 }
@@ -7517,8 +7523,21 @@ namespace DX11Hook {
 
     inline void RenderImGuiBigMap() {
         static bool s_wasBigMapActiveLocal = false;
+        static std::string s_lastRenderBigMapWorldId = "";
+        bool worldChangedForBigMap = (s_lastRenderBigMapWorldId != MapRenderState::currentWorldId);
+        if (worldChangedForBigMap) {
+            s_lastRenderBigMapWorldId = MapRenderState::currentWorldId;
+            MapRenderState::bigMapViewDimensionId = -999;
+            MapRenderState::bigMapOffsetX = 0.0f;
+            MapRenderState::bigMapOffsetZ = 0.0f;
+            MapRenderState::cameraHopActive = false;
+            MapRenderState::bigMapOverworldCave = false;
+            s_gotoTargetActive = false;
+            s_gotoTargetTimer = 0.0f;
+        }
+
         if (!s_wasBigMapActiveLocal && MapRenderState::showBigMap) {
-            if (MapRenderState::persistBigMapDimension && MapRenderState::lastViewedDimensionId >= 0 && MapRenderState::lastViewedDimensionId <= 2) {
+            if (!worldChangedForBigMap && MapRenderState::persistBigMapDimension && MapRenderState::lastViewedDimensionId >= 0 && MapRenderState::lastViewedDimensionId <= 2) {
                 MapRenderState::bigMapViewDimensionId = MapRenderState::lastViewedDimensionId;
             }
             if (MapRenderState::bigMapFollowPlayer) {
@@ -7658,41 +7677,42 @@ namespace DX11Hook {
         static float s_prevBigMapPlayerX = g_smoothPX;
         static float s_prevBigMapPlayerZ = g_smoothPZ;
         static int   s_prevBigMapPlayerDim = currentDim;
+        static std::string s_prevBigMapPlayerWorldId = "";
         static bool  s_prevBigMapPlayerValid = false;
 
-        if (!s_prevBigMapPlayerValid || s_prevBigMapPlayerDim != currentDim) {
+        bool isWorldSwitch = (!s_prevBigMapPlayerValid || s_prevBigMapPlayerWorldId != MapRenderState::currentWorldId);
+        if (isWorldSwitch || s_prevBigMapPlayerDim != currentDim) {
             s_prevBigMapPlayerX = g_smoothPX;
             s_prevBigMapPlayerZ = g_smoothPZ;
             s_prevBigMapPlayerDim = currentDim;
+            s_prevBigMapPlayerWorldId = MapRenderState::currentWorldId;
             s_prevBigMapPlayerValid = true;
+            if (isWorldSwitch) {
+                MapRenderState::bigMapOffsetX = 0.0f;
+                MapRenderState::bigMapOffsetZ = 0.0f;
+                MapRenderState::cameraHopActive = false;
+                s_isDraggingMap = false;
+            }
         }
 
         if (MapRenderState::bigMapFollowPlayer) {
-            // 跟随模式激活：镜头实时跟随玩家在游戏内的位移，使玩家箭头始终稳定保持在视野中央（或对应跨维度折算坐标）
+            // 跟随模式激活：镜头实时跟随玩家在游戏内的位移，允许用户手动拖拽平移大地图，平移后镜头仍相对玩家保持锁定跟随
             if (!MapRenderState::cameraHopActive) {
-                if (viewDim == currentDim) {
-                    MapRenderState::bigMapOffsetX = 0.0f;
-                    MapRenderState::bigMapOffsetZ = 0.0f;
-                } else {
-                    float targetWx = g_smoothPX;
-                    float targetWz = g_smoothPZ;
-                    if (currentDim == 0 && viewDim == 1) {
-                        targetWx = g_smoothPX / 8.0f;
-                        targetWz = g_smoothPZ / 8.0f;
-                    } else if (currentDim == 1 && viewDim == 0) {
-                        targetWx = g_smoothPX * 8.0f;
-                        targetWz = g_smoothPZ * 8.0f;
-                    } else if (viewDim == 0) {
-                        int spX = 0, spZ = 0;
-                        MapRenderState::GetWorldSpawnCoords(spX, spZ);
-                        targetWx = (float)spX;
-                        targetWz = (float)spZ;
-                    } else {
-                        targetWx = 0.0f;
-                        targetWz = 0.0f;
+                if (viewDim != currentDim) {
+                    float deltaPX = g_smoothPX - s_prevBigMapPlayerX;
+                    float deltaPZ = g_smoothPZ - s_prevBigMapPlayerZ;
+                    if (deltaPX != 0.0f || deltaPZ != 0.0f) {
+                        if (currentDim == 0 && viewDim == 1) {
+                            MapRenderState::bigMapOffsetX += deltaPX * (7.0f / 8.0f) * MapRenderState::bigMapZoom;
+                            MapRenderState::bigMapOffsetZ += deltaPZ * (7.0f / 8.0f) * MapRenderState::bigMapZoom;
+                        } else if (currentDim == 1 && viewDim == 0) {
+                            MapRenderState::bigMapOffsetX -= deltaPX * 7.0f * MapRenderState::bigMapZoom;
+                            MapRenderState::bigMapOffsetZ -= deltaPZ * 7.0f * MapRenderState::bigMapZoom;
+                        } else {
+                            MapRenderState::bigMapOffsetX += deltaPX * MapRenderState::bigMapZoom;
+                            MapRenderState::bigMapOffsetZ += deltaPZ * MapRenderState::bigMapZoom;
+                        }
                     }
-                    MapRenderState::bigMapOffsetX = -(targetWx - g_smoothPX) * MapRenderState::bigMapZoom;
-                    MapRenderState::bigMapOffsetZ = -(targetWz - g_smoothPZ) * MapRenderState::bigMapZoom;
                 }
             }
         } else {
@@ -7809,14 +7829,6 @@ namespace DX11Hook {
         }
         if (s_isMidDraggingMap) {
             if (ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
-                if (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f) {
-                    if (MapRenderState::bigMapFollowPlayer) {
-                        MapRenderState::bigMapFollowPlayer = false;
-                        MapRenderState::cameraHopActive = false;
-                        LanguageManager::SaveConfig();
-                        MapRenderState::TriggerMinimapToast(LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_OFF"));
-                    }
-                }
                 MapRenderState::bigMapOffsetX += io.MouseDelta.x;
                 MapRenderState::bigMapOffsetZ += io.MouseDelta.y;
             } else {
@@ -7887,14 +7899,6 @@ namespace DX11Hook {
             MapRenderState::exportSelMaxZ = std::max(startZ, curZ);
             MapRenderState::hasExportSelection = true;
         } else if (s_isDraggingMap && (!DrawingManager::s_drawingMode || isSpaceHeld)) {
-            if (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f) {
-                if (MapRenderState::bigMapFollowPlayer) {
-                    MapRenderState::bigMapFollowPlayer = false;
-                    MapRenderState::cameraHopActive = false;
-                    LanguageManager::SaveConfig();
-                    MapRenderState::TriggerMinimapToast(LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_OFF"));
-                }
-            }
             MapRenderState::bigMapOffsetX += io.MouseDelta.x;
             MapRenderState::bigMapOffsetZ += io.MouseDelta.y;
         }
@@ -7932,15 +7936,13 @@ namespace DX11Hook {
             if (newZoom != oldZoom) {
                 float k = newZoom / oldZoom;
                 MapRenderState::bigMapZoom = newZoom;
-                if (!MapRenderState::bigMapFollowPlayer) {
-                    float cx = io.DisplaySize.x * 0.5f + MapRenderState::bigMapOffsetX;
-                    float cy = io.DisplaySize.y * 0.5f + MapRenderState::bigMapOffsetZ;
-                    float dx = io.MousePos.x - cx;
-                    float dy = io.MousePos.y - cy;
-                    
-                    MapRenderState::bigMapOffsetX -= dx * (k - 1.0f);
-                    MapRenderState::bigMapOffsetZ -= dy * (k - 1.0f);
-                }
+                float cx = io.DisplaySize.x * 0.5f + MapRenderState::bigMapOffsetX;
+                float cy = io.DisplaySize.y * 0.5f + MapRenderState::bigMapOffsetZ;
+                float dx = io.MousePos.x - cx;
+                float dy = io.MousePos.y - cy;
+                
+                MapRenderState::bigMapOffsetX -= dx * (k - 1.0f);
+                MapRenderState::bigMapOffsetZ -= dy * (k - 1.0f);
             }
         }
 
@@ -9634,22 +9636,7 @@ namespace DX11Hook {
         }
 
         if (ImGui::Button("\xe2\x9b\xb6##ToggleFollowBtn", ImVec2(btnWidth, btnWidth))) { // U+26F6 (Square with crosshairs)
-            float targetOffX = 0.0f;
-            float targetOffZ = 0.0f;
-            if (viewDim != currentDim) {
-                float twx = g_smoothPX, twz = g_smoothPZ;
-                if (currentDim == 0 && viewDim == 1) { twx /= 8.0f; twz /= 8.0f; }
-                else if (currentDim == 1 && viewDim == 0) { twx *= 8.0f; twz *= 8.0f; }
-                else if (viewDim == 0) { int sx = 0, sz = 0; MapRenderState::GetWorldSpawnCoords(sx, sz); twx = (float)sx; twz = (float)sz; }
-                else { twx = 0.0f; twz = 0.0f; }
-                targetOffX = -(twx - g_smoothPX) * MapRenderState::bigMapZoom;
-                targetOffZ = -(twz - g_smoothPZ) * MapRenderState::bigMapZoom;
-            }
-            bool isCenteredOnPlayer = std::abs(MapRenderState::bigMapOffsetX - targetOffX) < 1.5f &&
-                                      std::abs(MapRenderState::bigMapOffsetZ - targetOffZ) < 1.5f &&
-                                      !MapRenderState::cameraHopActive;
-
-            if (MapRenderState::bigMapFollowPlayer && isCenteredOnPlayer) {
+            if (MapRenderState::bigMapFollowPlayer) {
                 MapRenderState::bigMapFollowPlayer = false;
                 LanguageManager::SaveConfig();
                 MapRenderState::TriggerMinimapToast(LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_OFF"));
@@ -14304,8 +14291,14 @@ namespace DX11Hook {
         // 无论用户是通过按键、点击按钮、弹窗关闭还是传送等任何途径关闭了模组界面，
         // 都在状态跳变的下一帧立即完成控制权交接，从根源上杜绝任何时序脱节
         if (s_lastUIActive && !uiActiveNow) {
-            SafeGrabClientMouse();
-            SafeHideHardwareCursor();
+            if (isNativeScreen) {
+                SafeReleaseClientMouse();
+                SafeClipCursorInternal(NULL);
+                SafeShowHardwareCursor();
+            } else {
+                SafeGrabClientMouse();
+                SafeHideHardwareCursor();
+            }
         } else if (!s_lastUIActive && uiActiveNow) {
             SafeReleaseClientMouse();
             SafeClipCursorInternal(NULL);
@@ -14384,27 +14377,32 @@ namespace DX11Hook {
                 }
             }
 
-            if (uiActiveNow) {
+            if (uiActiveNow || isNativeScreen) {
                 CURSORINFO curInfo = { sizeof(CURSORINFO) };
                 if (GetCursorInfo(&curInfo)) {
                     if (!(curInfo.flags & CURSOR_SHOWING)) {
                         SafeShowHardwareCursor();
+                        SafeReleaseClientMouse();
                     }
-                    ImGuiMouseCursor cursor = ImGui::GetCurrentContext() ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
-                    LPCTSTR win32Cursor = IDC_ARROW;
-                    switch (cursor) {
-                        case ImGuiMouseCursor_Arrow:        win32Cursor = IDC_ARROW; break;
-                        case ImGuiMouseCursor_TextInput:    win32Cursor = IDC_IBEAM; break;
-                        case ImGuiMouseCursor_ResizeAll:    win32Cursor = IDC_SIZEALL; break;
-                        case ImGuiMouseCursor_ResizeEW:     win32Cursor = IDC_SIZEWE; break;
-                        case ImGuiMouseCursor_ResizeNS:     win32Cursor = IDC_SIZENS; break;
-                        case ImGuiMouseCursor_ResizeNESW:   win32Cursor = IDC_SIZENESW; break;
-                        case ImGuiMouseCursor_ResizeNWSE:   win32Cursor = IDC_SIZENWSE; break;
-                        case ImGuiMouseCursor_Hand:         win32Cursor = IDC_HAND; break;
-                        case ImGuiMouseCursor_NotAllowed:   win32Cursor = IDC_NO; break;
-                        default:                            win32Cursor = IDC_ARROW; break;
+                    if (uiActiveNow) {
+                        ImGuiMouseCursor cursor = ImGui::GetCurrentContext() ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
+                        LPCTSTR win32Cursor = IDC_ARROW;
+                        switch (cursor) {
+                            case ImGuiMouseCursor_Arrow:        win32Cursor = IDC_ARROW; break;
+                            case ImGuiMouseCursor_TextInput:    win32Cursor = IDC_IBEAM; break;
+                            case ImGuiMouseCursor_ResizeAll:    win32Cursor = IDC_SIZEALL; break;
+                            case ImGuiMouseCursor_ResizeEW:     win32Cursor = IDC_SIZEWE; break;
+                            case ImGuiMouseCursor_ResizeNS:     win32Cursor = IDC_SIZENS; break;
+                            case ImGuiMouseCursor_ResizeNESW:   win32Cursor = IDC_SIZENESW; break;
+                            case ImGuiMouseCursor_ResizeNWSE:   win32Cursor = IDC_SIZENWSE; break;
+                            case ImGuiMouseCursor_Hand:         win32Cursor = IDC_HAND; break;
+                            case ImGuiMouseCursor_NotAllowed:   win32Cursor = IDC_NO; break;
+                            default:                            win32Cursor = IDC_ARROW; break;
+                        }
+                        SafeSetCursorInternal(LoadCursor(NULL, win32Cursor));
+                    } else if (isNativeScreen) {
+                        SafeSetCursorInternal(LoadCursor(NULL, IDC_ARROW));
                     }
-                    SafeSetCursorInternal(LoadCursor(NULL, win32Cursor));
                 }
             }
             s_lastAnyScreenActive = anyScreenActive;

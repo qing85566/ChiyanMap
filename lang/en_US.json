@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "World Map UI: Hidden · Press F1 to restore",
     "TOAST_BIGMAP_HIDE_UI_OFF": "World Map UI: Restored",
     "BIGMAP_FOLLOW_PLAYER": "World Map Player Follow Mode",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "When enabled, the world map camera follows the player in real-time. Dragging the map automatically disengages lock.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "When enabled, the world map camera follows the player in real-time. Click the button again to disengage lock.",
     "TOAST_BIGMAP_FOLLOW_ON": "World Map Player Follow Mode: Enabled",
     "TOAST_BIGMAP_FOLLOW_OFF": "World Map Player Follow Mode: Disengaged",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Player Follow Mode: Active · Click to switch to free browse",

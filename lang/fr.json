@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "Interface de la carte: masquee · F1 pour restaurer",
     "TOAST_BIGMAP_HIDE_UI_OFF": "Interface de la carte: restauree",
     "BIGMAP_FOLLOW_PLAYER": "Mode suivi du joueur sur la carte",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "La caméra suit le joueur en temps réel. Faire glisser la carte désactive automatiquement le verrouillage.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "La caméra suit le joueur en temps réel. Cliquez à nouveau sur le bouton pour désactiver le verrouillage.",
     "TOAST_BIGMAP_FOLLOW_ON": "Mode de suivi : active",
     "TOAST_BIGMAP_FOLLOW_OFF": "Mode de suivi : desactive",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Suivi actif · Cliquer pour navigation libre",

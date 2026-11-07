@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "Giao dien ban do: Da an · Nhan F1 de khoi phuc",
     "TOAST_BIGMAP_HIDE_UI_OFF": "Giao dien ban do: Da khoi phuc",
     "BIGMAP_FOLLOW_PLAYER": "Che do theo doi nguoi choi tren ban do",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "Camera ban do theo doi nguoi choi theo thoi gian thuc. Keo ban do se tu dong huy khoa.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "Camera ban do theo doi nguoi choi theo thoi gian thuc. Nhan lai nut de huy khoa.",
     "TOAST_BIGMAP_FOLLOW_ON": "Che do theo doi nguoi choi: Da bat",
     "TOAST_BIGMAP_FOLLOW_OFF": "Che do theo doi nguoi choi: Da tat",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Theo doi nguoi choi: Dang bat · Nhan de xem tu do",

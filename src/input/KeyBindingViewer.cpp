@@ -7,6 +7,8 @@
 #include "ll/api/i18n/I18n.h"
 #include "ll/api/command/CommandHandle.h"
 #include "ll/api/command/CommandRegistrar.h"
+#include "ll/api/event/EventBus.h"
+#include "ll/api/event/command/ClientCommandRegisterEvent.h"
 #include "ll/api/form/SimpleForm.h"
 #include "ll/api/service/TargetedBedrock.h"
 #include "mc/client/game/ClientInstance.h"
@@ -89,8 +91,10 @@ void ShowKeybindingForm(Player& player) {
     form.sendTo(player);
 }
 
-void RegisterKeybindingViewerCommand() {
-    auto& registrar = ll::command::CommandRegistrar::getInstance(true);
+static ll::event::ListenerPtr s_clientCommandListener = nullptr;
+
+static void DoRegisterCommand() {
+    auto& registrar = ll::command::CommandRegistrar::getClientInstance();
     auto& cmd = registrar.getOrCreateCommand(
         "chiyanmap",
         "赤岩地图：查看模组自定义快捷键列表",
@@ -109,6 +113,23 @@ void RegisterKeybindingViewerCommand() {
         }
         ShowKeybindingForm(*lp);
     });
+}
+
+void RegisterKeybindingViewerCommand() {
+    if (!s_clientCommandListener) {
+        s_clientCommandListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::command::ClientCommandRegisterEvent>(
+            [](ll::event::command::ClientCommandRegisterEvent&) {
+                DoRegisterCommand();
+            }
+        );
+    }
+}
+
+void UnregisterKeybindingViewerCommand() {
+    if (s_clientCommandListener) {
+        ll::event::EventBus::getInstance().removeListener(s_clientCommandListener);
+        s_clientCommandListener = nullptr;
+    }
 }
 
 } // namespace ChiyanMap::Input

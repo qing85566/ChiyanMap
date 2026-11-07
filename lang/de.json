@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "Weltkarten-UI: Ausgeblendet · F1 zum Wiederherstellen",
     "TOAST_BIGMAP_HIDE_UI_OFF": "Weltkarten-UI: Wiederhergestellt",
     "BIGMAP_FOLLOW_PLAYER": "Weltkarte Spieler-Verfolgungsmodus",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "Die Weltkartenansicht folgt dem Spieler in Echtzeit. Durch Ziehen der Karte wird die Sperre aufgehoben.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "Die Weltkartenansicht folgt dem Spieler in Echtzeit. Erneutes Klicken auf die Schaltfläche hebt die Sperre auf.",
     "TOAST_BIGMAP_FOLLOW_ON": "Spieler-Verfolgungsmodus: Aktiviert",
     "TOAST_BIGMAP_FOLLOW_OFF": "Spieler-Verfolgungsmodus: Deaktiviert",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Spieler-Verfolgung: Aktiv · Klicken für freie Ansicht",

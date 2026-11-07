@@ -120,6 +120,9 @@ namespace MapRenderState {
         for (int i = 0; i < 3; ++i) {
             dimCameraStates[i] = DimCameraState{};
         }
+        bigMapOffsetX = 0.0f;
+        bigMapOffsetZ = 0.0f;
+        cameraHopActive = false;
     }
 
     inline void SaveDimCamera(int dim, float smoothPX, float smoothPZ) {

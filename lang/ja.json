@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "ワールドマップUI: 非表示 · F1で復元",
     "TOAST_BIGMAP_HIDE_UI_OFF": "ワールドマップUI: 表示復元",
     "BIGMAP_FOLLOW_PLAYER": "ワールドマップ プレイヤー追従モード",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "有効にするとマップがプレイヤーを追従します。マップをドラッグすると自動で解除されます。",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "有効にするとマップがプレイヤーを追従します。ボタンをもう一度クリックすると解除されます。",
     "TOAST_BIGMAP_FOLLOW_ON": "プレイヤー追従モード: 有効",
     "TOAST_BIGMAP_FOLLOW_OFF": "プレイヤー追従モード: 解除",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "プレイヤー追従中 · クリックで自由閲覧に切替",

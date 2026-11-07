@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "월드 맵 UI: 숨김 · F1으로 복원",
     "TOAST_BIGMAP_HIDE_UI_OFF": "월드 맵 UI: 복원됨",
     "BIGMAP_FOLLOW_PLAYER": "월드 맵 플레이어 추적 모드",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "활성화 시 지도가 실시간으로 플레이어를 추적합니다. 지도를 드래그하면 잠금이 해제됩니다.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "활성화 시 지도가 실시간으로 플레이어를 추적합니다. 버튼을 다시 클릭하면 잠금이 해제됩니다.",
     "TOAST_BIGMAP_FOLLOW_ON": "플레이어 추적 모드: 활성화",
     "TOAST_BIGMAP_FOLLOW_OFF": "플레이어 추적 모드: 해제됨",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "플레이어 추적 중 · 클릭하여 자유 탐색 전환",

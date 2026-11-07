@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "Antarmuka Peta: Tersembunyi · Tekan F1 untuk memulihkan",
     "TOAST_BIGMAP_HIDE_UI_OFF": "Antarmuka Peta: Dipulihkan",
     "BIGMAP_FOLLOW_PLAYER": "Mode Ikuti Pemain di Peta Dunia",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "Kamera peta mengikuti pemain secara real-time. Menggeser peta akan melepas kunci secara otomatis.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "Kamera peta mengikuti pemain secara real-time. Klik tombol lagi untuk melepas kunci.",
     "TOAST_BIGMAP_FOLLOW_ON": "Mode Ikuti Pemain: Diaktifkan",
     "TOAST_BIGMAP_FOLLOW_OFF": "Mode Ikuti Pemain: Dinonaktifkan",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Ikuti Pemain: Aktif · Klik untuk jelajah bebas",

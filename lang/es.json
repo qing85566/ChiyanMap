@@ -1097,7 +1097,7 @@
     "TOAST_BIGMAP_HIDE_UI_ON": "Interfaz del mapa: oculta · F1 para restaurar",
     "TOAST_BIGMAP_HIDE_UI_OFF": "Interfaz del mapa: restaurada",
     "BIGMAP_FOLLOW_PLAYER": "Modo de seguimiento del jugador en el mapa",
-    "BIGMAP_FOLLOW_PLAYER_DESC": "La cámara sigue al jugador en tiempo real. Arrastrar el mapa desactiva el bloqueo automáticamente.",
+    "BIGMAP_FOLLOW_PLAYER_DESC": "La cámara sigue al jugador en tiempo real. Haga clic en el botón de nuevo para desactivar el bloqueo.",
     "TOAST_BIGMAP_FOLLOW_ON": "Modo de seguimiento: activado",
     "TOAST_BIGMAP_FOLLOW_OFF": "Modo de seguimiento: desactivado",
     "BIGMAP_FOLLOW_PLAYER_ACTIVE_TIP": "Seguimiento activo · Clic para navegación libre",
