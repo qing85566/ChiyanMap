@@ -442,7 +442,7 @@ namespace MapRenderState {
     inline bool  keepEnlargedMinimapRotation = false;            // 临时放大小地图时保持视角旋转 (默认关)
 
     // [P1] 史莱姆区块覆盖层与 HUD 推挤避让系统
-    inline bool showSlimeChunks = true;        // 小地图史莱姆区块覆盖层 (默认开)
+    inline bool showSlimeChunks = false;       // 小地图史莱姆区块覆盖层 (默认关)
     inline int  pushboxBossHealth = 1;         // Boss 血条避让推挤框 (0=关闭, 1=常规避让, 2=整屏推挤)
     inline int  pushboxPotionEffects = 1;      // 药水状态避让推挤框 (0=关闭, 1=常规避让, 2=整屏推挤)
     inline float g_currentPushOffsetY = 0.0f;  // 运行时小地图平滑推挤 Y 偏移量
@@ -798,7 +798,7 @@ namespace MapRenderState {
     inline bool anarchySaveLoadToDisk = true;
 
     // ==================== 探索足迹与个性化 ====================
-    inline bool showFootsteps = true;
+    inline bool showFootsteps = false;
     inline int playerArrowColor = 0; // 0=Red, 1=White, 2=Green, 3=Blue, 4=Yellow, 5=Purple, 6=Black, 7=Cyan
     inline float playerArrowScale = 1.0f; // 玩家箭头大小缩放 (0.50x ~ 2.00x)
     inline bool timeFormat24h = true;     // 24小时制时间格式 (true=24h, false=12h AM/PM)
@@ -1013,7 +1013,7 @@ namespace MapRenderState {
         showWaypointDistance = false;
         renderWaypointBackgrounds = true;
         declutterWaypointLabels = true;
-        showSlimeChunks = true;
+        showSlimeChunks = false;
         pushboxBossHealth = 1;
         pushboxPotionEffects = 1;
         g_currentPushOffsetY = 0.0f;
@@ -1062,7 +1062,7 @@ namespace MapRenderState {
         declutterWaypointLabels = true;
         autoHideLabelsOnFarZoom = true;
         showChunkGrid = false;
-        showFootsteps = true;
+        showFootsteps = false;
         showZoomButtons = true;
         playerArrowColor = 0;
         playerArrowScale = 1.0f;

@@ -1496,7 +1496,7 @@ namespace LanguageManager {
                 MapRenderState::g_ignoreHeightmaps = j.value("ignoreHeightmaps", false);
                 MapRenderState::g_multiLevelPyramid = j.value("multiLevelPyramid", true);
                 MapRenderState::g_maxLoadedRegions = std::clamp(j.value("maxLoadedRegions", 512), 64, 4096);
-                MapRenderState::showFootsteps = j.value("showFootsteps", true);
+                MapRenderState::showFootsteps = j.value("showFootsteps", false);
                 MapRenderState::playerArrowColor = j.value("playerArrowColor", 0);
                 MapRenderState::showZoomButtons = j.value("showZoomButtons", true);
                 MapRenderState::radarShowPlayers = j.value("radarShowPlayers", true);
@@ -1522,7 +1522,7 @@ namespace LanguageManager {
                 MapRenderState::playerArrowScale = std::clamp(j.value("playerArrowScale", 1.0f), 0.5f, 2.0f);
                 MapRenderState::timeFormat24h = j.value("timeFormat24h", true);
                 MapRenderState::showWaypointDistance = j.value("showWaypointDistance", false);
-                MapRenderState::showSlimeChunks = j.value("showSlimeChunks", true);
+                MapRenderState::showSlimeChunks = j.value("showSlimeChunks", false);
                 MapRenderState::pushboxBossHealth = std::clamp(j.value("pushboxBossHealth", 1), 0, 2);
                 MapRenderState::pushboxPotionEffects = std::clamp(j.value("pushboxPotionEffects", 1), 0, 2);
                 MapRenderState::miniMapFrameStyle = std::clamp(j.value("miniMapFrameStyle", 0), 0, 3);
