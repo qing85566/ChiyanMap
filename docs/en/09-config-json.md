@@ -305,6 +305,7 @@ This document provides a **complete parameter structure, an annotated JSONC samp
     // 15. Hotkey Bindings Map
     // Each binding stores virtual key code, modifier bitmask, and boolean helper flags
     // ==========================================
+    "useNativeKeyRegistry": true,       // Register keys with LeviLamina's KeyRegistry (recommended). Rebind in vanilla Settings > Controls > Keyboard & Mouse together with other mods. Set false to fully revert to the built-in hotkey system; requires a restart.
     "hotkeys": {
         "openBigMap": { "key": 77, "modifiers": 0 },                 // M key: Toggle World Map
         "openWaypointMgr": { "key": 85, "modifiers": 0 },            // U key: Open Waypoint Manager

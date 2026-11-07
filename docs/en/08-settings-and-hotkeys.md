@@ -24,6 +24,18 @@ The system supports single keys (e.g., `M`, `U`, `N`) as well as multi-key modif
 ### 1.3 Rebind Undo (Ctrl+Z)
 If you make a mistake while rebinding hotkeys, press **`Ctrl + Z`** inside the Hotkeys tab to revert to your previous configuration.
 
+### 1.4 Vanilla Key Bindings (Recommended)
+ChiyanMap registers every hotkey with LeviLamina's `ll::input::KeyRegistry`, which means:
+
+- Open the game's **Settings > Controls / Keyboard & Mouse** to rebind ChiyanMap keys in the same list as other mods, and to see and resolve key conflicts. Editing `config.json` is no longer necessary.
+- The single-key bindings in `config.json` become the **default keys** for these entries on first launch; later changes are stored by the game itself in its own options.
+- `Ctrl / Shift / Alt` chords cannot be expressed by the vanilla controls screen, so they keep using ChiyanMap's own hotkey system. Actions sharing the same configured key are also kept on the built-in system to avoid misdispatch.
+- Actions that were unbound appear with a placeholder key that no physical key can trigger; simply rebind it in the vanilla controls screen.
+- Editing a row in ChiyanMap's Hotkeys tab switches that action back to the built-in hotkey system to avoid double triggering. Use **"Use vanilla bindings for all"** in the panel to hand every action back to the game.
+- To fully revert to the legacy behaviour, set `"useNativeKeyRegistry": false` in `config.json` and restart the game.
+
+> Entries in the vanilla controls screen are named `key.ChiyanMap.openBigMap` etc., matching the keys under `hotkeys` in `config.json`.
+
 ---
 
 ## 2. Search Filter & Factory Reset

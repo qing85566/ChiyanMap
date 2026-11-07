@@ -373,6 +373,9 @@ namespace MapRenderState {
         }
     };
     inline HotkeyBindings g_hotkeys;
+    // 是否接入 LeviLamina 原生键位注册 (ll::input::KeyRegistry)，false 时完全回退到自带热键系统。
+    // 仅影响启动阶段的注册，修改后需重启游戏生效。
+    inline bool useNativeKeyRegistry = true;
     // 正在监听按键的重绑目标 (nullptr=未在监听)
     inline Hotkey* g_listeningHotkey = nullptr;
     // 监听状态下实时记录的修饰键组合 (Ctrl / Shift / Alt)

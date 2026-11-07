@@ -53,6 +53,7 @@
 #include "state/SpecialGridManager.h"
 #include "state/DatabaseManager.h"
 #include "hooks/InputIMEHelper.h"
+#include "input/NativeHotkeys.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -233,6 +234,9 @@ namespace DX11Hook {
     inline HWND g_hWnd = nullptr;
     inline WNDPROC oWndProc = nullptr;
     inline bool g_imguiInitialized = false;
+
+    // 原生键位注册接管「框选导出」长按时，由 KeyHandle 的 down/up 回调维护这个状态。
+    inline std::atomic<bool> g_nativeSelectExportHeld{false};
 
     // [性能·核心优化] D3D11On12 包装资源缓存
     // 原实现每帧调用 CreateWrappedResource + CreateRenderTargetView，这两个是极其昂贵的
@@ -722,6 +726,248 @@ namespace DX11Hook {
         SafeSetCursorInternal(LoadCursor(NULL, IDC_ARROW));
     }
 
+    using ::ChiyanMap::Input::HotkeyAction;
+    using ::ChiyanMap::Input::HotkeyDispatchResult;
+
+    // 原生键位注册接管该动作时，旧版 WndProc / 帧轮询路径必须全部让路，避免双重触发。
+    inline bool ShouldUseLegacyHotkey(HotkeyAction action) {
+        return !::ChiyanMap::Input::IsNativeHotkeyManaged(action);
+    }
+
+    inline void SyncMouseCaptureForHotkey() {
+        if (MapRenderState::IsUIActive()) {
+            SafeReleaseClientMouse();
+            SafeClipCursorInternal(NULL);
+            SafeShowHardwareCursor();
+        } else {
+            SafeGrabClientMouse();
+            SafeHideHardwareCursor();
+        }
+    }
+
+    // ==========================================
+    // 热键动作统一执行器
+    // WndProcHook 与 LeviLamina KeyHandle 回调共用同一份逻辑，杜绝两套实现漂移。
+    // ==========================================
+    inline HotkeyDispatchResult DispatchHotkeyAction(HotkeyAction action, bool isDown) {
+        if (MapRenderState::g_isShuttingDown.load()) return HotkeyDispatchResult::NotHandled;
+        // 抬起事件必须始终放行，否则退出世界时长按状态会卡住；动作触发则必须有玩家在场。
+        if (isDown && !g_hasPlayer) return HotkeyDispatchResult::NotHandled;
+
+        bool const isTyping = NativeIME::isTyping.load()
+            || (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput);
+        if (isDown && isTyping) return HotkeyDispatchResult::NotHandled;
+        if (isDown && IsMinecraftNativeScreenOpen() && !MapRenderState::IsUIActive()) {
+            return HotkeyDispatchResult::NotHandled;
+        }
+
+        // 长按类动作：按下/抬起都要维护状态
+        if (action == HotkeyAction::HoldEntities) {
+            if (isDown) {
+                if (ImGui::GetCurrentContext() && MapRenderState::showBigMap &&
+                    !MapRenderState::showWaypointUI && !MapRenderState::showDeathPointUI &&
+                    !MapRenderState::showBigMapSettings && !MapRenderState::showMiniMapSettings &&
+                    !MapRenderState::showHotkeySettings && !MapRenderState::showCaveSettings &&
+                    !MapRenderState::showExportPNGScreen && !MapRenderState::showSeedMap &&
+                    !MapRenderState::showAnarchySettings) {
+                    ImGui::ClearActiveID();
+                }
+                bool const wasHeld = g_tabHeld.exchange(true);
+                if (!wasHeld && MapRenderState::showBigMap) {
+                    MapRenderState::bigMapShowEntities = !MapRenderState::bigMapShowEntities;
+                    LanguageManager::SaveConfig();
+                }
+            } else {
+                g_tabHeld = false;
+            }
+            return HotkeyDispatchResult::Handled;
+        }
+        if (action == HotkeyAction::EnlargeMinimap) {
+            if (MapRenderState::enlargeMinimapToggle) {
+                if (isDown) MapRenderState::g_enlargeToggled = !MapRenderState::g_enlargeToggled;
+            } else {
+                MapRenderState::g_enlargeHeld.store(isDown);
+            }
+            return HotkeyDispatchResult::Handled;
+        }
+        if (action == HotkeyAction::SelectExportArea) {
+            g_nativeSelectExportHeld.store(isDown);
+            return HotkeyDispatchResult::Handled;
+        }
+
+        // 其余动作只在按下时触发
+        if (!isDown) return HotkeyDispatchResult::NotHandled;
+
+        switch (action) {
+            case HotkeyAction::OpenBigMap: { // 大地图
+                NativeIME::Close();
+                MapRenderState::showBigMap = !MapRenderState::showBigMap;
+                MapRenderState::bigMapHideUI = false;
+                if (MapRenderState::showBigMap) {
+                    MapRenderState::bigMapViewDimensionId = -999;
+                    if (MapRenderState::bigMapFollowPlayer) {
+                        MapRenderState::bigMapOffsetX = 0;
+                        MapRenderState::bigMapOffsetZ = 0;
+                    }
+                }
+                break;
+            }
+            case HotkeyAction::OpenWaypointMgr: // 路径点
+                NativeIME::Close();
+                MapRenderState::showWaypointUI = !MapRenderState::showWaypointUI;
+                break;
+            case HotkeyAction::QuickCreateWaypoint: // 快捷新建路径点
+                NativeIME::Close();
+                MapRenderState::addWaypointFromBigMap = false;
+                MapRenderState::triggerAddWaypoint = true;
+                MapRenderState::showWaypointUI = true;
+                break;
+            case HotkeyAction::OpenDeathPointMgr: // 死亡记录
+                NativeIME::Close();
+                MapRenderState::showDeathPointUI = !MapRenderState::showDeathPointUI;
+                break;
+            case HotkeyAction::ToggleMinimap: // 小地图开关
+                MapRenderState::showMiniMap = !MapRenderState::showMiniMap;
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleMinimapShape: // 小地图形状
+                if (!MapRenderState::showMiniMap) return HotkeyDispatchResult::PassThrough;
+                MapRenderState::isSquareMap = !MapRenderState::isSquareMap;
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleMinimapRot: // 旋转
+                if (!MapRenderState::showMiniMap) return HotkeyDispatchResult::PassThrough;
+                MapRenderState::rotateMiniMap = !MapRenderState::rotateMiniMap;
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::TogglePreferOwWaypoints: // 切换优先主世界路径点
+                MapRenderState::preferOverworldWaypoints = !MapRenderState::preferOverworldWaypoints;
+                MapRenderState::TriggerMinimapToast(MapRenderState::preferOverworldWaypoints ?
+                    LanguageManager::GetText("TOAST_PREFER_OW_WP_ON") :
+                    LanguageManager::GetText("TOAST_PREFER_OW_WP_OFF"));
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleDoubleMinZoom: // 切换小地图最小变焦翻倍
+                MapRenderState::minimapDoubleMinZoom = !MapRenderState::minimapDoubleMinZoom;
+                MapRenderState::TriggerMinimapToast(MapRenderState::minimapDoubleMinZoom ?
+                    LanguageManager::GetText("TOAST_DOUBLE_MIN_ZOOM_ON") :
+                    LanguageManager::GetText("TOAST_DOUBLE_MIN_ZOOM_OFF"));
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleTransBg: // 切换未加载区块透明化
+                MapRenderState::transparentMinimapBackground = !MapRenderState::transparentMinimapBackground;
+                MapRenderState::TriggerMinimapToast(MapRenderState::transparentMinimapBackground ?
+                    LanguageManager::GetText("TOAST_TRANS_BG_ON") :
+                    LanguageManager::GetText("TOAST_TRANS_BG_OFF"));
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleViewDistance: // 切换视距覆盖层
+                SpecialGridManager::showViewDistance = !SpecialGridManager::showViewDistance;
+                MapRenderState::TriggerMinimapToast(SpecialGridManager::showViewDistance ?
+                    LanguageManager::GetText("TOAST_VIEW_DIST_ON") :
+                    LanguageManager::GetText("TOAST_VIEW_DIST_OFF"));
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleSimulationDistance: // 切换模拟距离覆盖层
+                SpecialGridManager::showSimulationDistance = !SpecialGridManager::showSimulationDistance;
+                MapRenderState::TriggerMinimapToast(SpecialGridManager::showSimulationDistance ?
+                    LanguageManager::GetText("TOAST_SIM_DIST_ON") :
+                    LanguageManager::GetText("TOAST_SIM_DIST_OFF"));
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::MinimapZoomIn: // 小地图视野放大
+                MapRenderState::miniMapZoomRadius = std::max(10.0f, MapRenderState::miniMapZoomRadius - 10.0f);
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::MinimapZoomOut: // 小地图视野缩小
+                {
+                    float maxR = MapRenderState::minimapDoubleMinZoom ? 400.0f : 200.0f;
+                    MapRenderState::miniMapZoomRadius = std::min(maxR, MapRenderState::miniMapZoomRadius + 10.0f);
+                }
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleSlimeChunks: // 切换史莱姆区块
+                MapRenderState::showSlimeChunks = !MapRenderState::showSlimeChunks;
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::SwitchWaypointSet: // 循环切换路径点集合
+                WaypointManager::CycleNextWaypointSet();
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleSeedMap: // 种子地图
+                NativeIME::Close();
+                if (!MapRenderState::showBigMap) {
+                    MapRenderState::showBigMap = true;
+                    MapRenderState::bigMapViewDimensionId = -999;
+                    MapRenderState::bigMapOffsetX = 0;
+                    MapRenderState::bigMapOffsetZ = 0;
+                    MapRenderState::showSeedMap = true;
+                } else {
+                    MapRenderState::showSeedMap = !MapRenderState::showSeedMap;
+                }
+                break;
+            case HotkeyAction::ToggleHighways: // 主干道开关
+                MapRenderState::anarchyHighways = !MapRenderState::anarchyHighways;
+                LanguageManager::SaveConfig();
+                break;
+            case HotkeyAction::ToggleAnarchySettings: // 无规则探测设置
+                NativeIME::Close();
+                MapRenderState::showAnarchySettings = !MapRenderState::showAnarchySettings;
+                break;
+            case HotkeyAction::ToggleDrawingMode: // 涂鸦标注模式
+                if (!MapRenderState::showBigMap) {
+                    NativeIME::Close();
+                    MapRenderState::showBigMap = true;
+                    MapRenderState::bigMapViewDimensionId = -999;
+                    MapRenderState::bigMapOffsetX = 0;
+                    MapRenderState::bigMapOffsetZ = 0;
+                    DrawingManager::s_drawingMode = true;
+                } else {
+                    DrawingManager::ToggleDrawingMode();
+                }
+                break;
+            case HotkeyAction::EnlargeMinimap: // 放大小地图 (切换模式)
+                MapRenderState::g_enlargeToggled = !MapRenderState::g_enlargeToggled;
+                break;
+            case HotkeyAction::CenterCamera: // 回到玩家位置并锁定跟随
+                if (!MapRenderState::showBigMap) return HotkeyDispatchResult::NotHandled;
+                MapRenderState::bigMapFollowPlayer = true;
+                MapRenderState::CenterCameraOnViewDimension(g_smoothPX, g_smoothPZ);
+                LanguageManager::SaveConfig();
+                MapRenderState::TriggerMinimapToast(LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_ON"));
+                break;
+            case HotkeyAction::ToggleFollowPlayer: // 切换锁定跟随
+                if (!MapRenderState::showBigMap) return HotkeyDispatchResult::NotHandled;
+                MapRenderState::bigMapFollowPlayer = !MapRenderState::bigMapFollowPlayer;
+                if (MapRenderState::bigMapFollowPlayer) {
+                    MapRenderState::CenterCameraOnViewDimension(g_smoothPX, g_smoothPZ);
+                }
+                LanguageManager::SaveConfig();
+                MapRenderState::TriggerMinimapToast(MapRenderState::bigMapFollowPlayer ?
+                    LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_ON") :
+                    LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_OFF"));
+                break;
+            case HotkeyAction::ToggleBigMapUI: // 隐藏/恢复大地图全套界面
+                if (!MapRenderState::showBigMap) return HotkeyDispatchResult::NotHandled;
+                MapRenderState::bigMapHideUI = !MapRenderState::bigMapHideUI;
+                MapRenderState::TriggerMinimapToast(MapRenderState::bigMapHideUI ?
+                    LanguageManager::GetText("TOAST_BIGMAP_HIDE_UI_ON") :
+                    LanguageManager::GetText("TOAST_BIGMAP_HIDE_UI_OFF"));
+                break;
+            default:
+                return HotkeyDispatchResult::NotHandled;
+        }
+
+        SyncMouseCaptureForHotkey();
+        return HotkeyDispatchResult::Handled;
+    }
+
+    // 静态初始化阶段把执行器交给原生键位模块（只在一个 TU 中包含本头文件，无重复注册风险）。
+    inline bool const g_hotkeyHandlerRegistered = [] {
+        ::ChiyanMap::Input::SetHotkeyActionHandler(&DispatchHotkeyAction);
+        return true;
+    }();
+
     inline LRESULT __stdcall WndProcHook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         if (MapRenderState::g_isShuttingDown.load()) {
             if (oWndProc) return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
@@ -843,7 +1089,9 @@ namespace DX11Hook {
             
             bool isTextInputActive = wasTextInputActive;
             bool isTyping = isTextInputActive;
-            if (!holdHk.IsEmpty()) {
+            if (::ChiyanMap::Input::IsNativeHotkeyManaged(HotkeyAction::HoldEntities)) {
+                // 原生键位注册负责 g_tabHeld 的按下/松开，WndProc 不再干预，避免双重切换。
+            } else if (!holdHk.IsEmpty()) {
                 if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && wParam == (WPARAM)holdHk.key) {
                     if (!isTextInputActive && MapRenderState::g_listeningHotkey == nullptr) {
                         uint8_t currentMods = 0;
@@ -1016,163 +1264,59 @@ namespace DX11Hook {
                     if (ImGui::GetIO().KeyAlt)   currentMods |= MapRenderState::Hotkey::HK_MOD_ALT;
                 }
 
-                auto matches = [&](const MapRenderState::Hotkey& hk) {
-                    if (hk.IsEmpty()) return false;
-                    return hk.key == (int)wParam && hk.modifiers == currentMods;
+                auto matches = [&](HotkeyAction candidate) {
+                    // 原生注册的动作：界面未激活时由 KeyRegistry 回调处理（此处跳过避免双重触发）；
+                    // 但界面激活时按键会被 WndProc 吞噬、原生回调收不到，因此改由 WndProc 补发，
+                    // 否则“再次按下关闭界面”会失效（原版键位只在界面外生效）。
+                    if (!ShouldUseLegacyHotkey(candidate) && !MapRenderState::IsUIActive()) return false;
+                    const auto& hk = ::ChiyanMap::Input::GetHotkey(candidate);
+                    return !hk.IsEmpty() && hk.key == (int)wParam && hk.modifiers == currentMods;
                 };
 
-                if (matches(MapRenderState::g_hotkeys.openBigMap) ||
-                    matches(MapRenderState::g_hotkeys.openWaypointMgr) ||
-                    matches(MapRenderState::g_hotkeys.openDeathPointMgr) ||
-                    matches(MapRenderState::g_hotkeys.toggleMinimap) ||
-                    matches(MapRenderState::g_hotkeys.toggleMinimapShape) ||
-                    matches(MapRenderState::g_hotkeys.toggleMinimapRot) ||
-                    matches(MapRenderState::g_hotkeys.toggleSlimeChunks) ||
-                    matches(MapRenderState::g_hotkeys.switchWaypointSet) ||
-                    matches(MapRenderState::g_hotkeys.toggleSeedMap) ||
-                    matches(MapRenderState::g_hotkeys.toggleHighways) ||
-                    matches(MapRenderState::g_hotkeys.toggleAnarchySettings) ||
-                    matches(MapRenderState::g_hotkeys.toggleDrawingMode) ||
-                    matches(MapRenderState::g_hotkeys.togglePreferOwWaypoints) ||
-                    matches(MapRenderState::g_hotkeys.quickCreateWaypoint) ||
-                    (MapRenderState::enlargeMinimapToggle && matches(MapRenderState::g_hotkeys.enlargeMinimap)) ||
-                    (MapRenderState::showBigMap && (matches(MapRenderState::g_hotkeys.centerCamera) || ((int)wParam == VK_HOME && currentMods == 0))) ||
-                    (MapRenderState::showBigMap && (matches(MapRenderState::g_hotkeys.toggleBigMapUI) || ((int)wParam == VK_F1 && currentMods == 0))) ||
-                    (MapRenderState::showBigMap && matches(MapRenderState::g_hotkeys.toggleFollowPlayer))) {
-                    if (matches(MapRenderState::g_hotkeys.openBigMap)) { // 大地图
-                        NativeIME::Close();
-                        MapRenderState::showBigMap = !MapRenderState::showBigMap;
-                        MapRenderState::bigMapHideUI = false;
-                        if (MapRenderState::showBigMap) {
-                            MapRenderState::bigMapViewDimensionId = -999;
-                            if (MapRenderState::bigMapFollowPlayer) {
-                                MapRenderState::bigMapOffsetX = 0;
-                                MapRenderState::bigMapOffsetZ = 0;
-                            }
-                        }
-                    } else if (matches(MapRenderState::g_hotkeys.openWaypointMgr)) { // 路径点
-                        NativeIME::Close();
-                        MapRenderState::showWaypointUI = !MapRenderState::showWaypointUI;
-                    } else if (matches(MapRenderState::g_hotkeys.quickCreateWaypoint)) { // 快捷新建路径点
-                        NativeIME::Close();
-                        MapRenderState::addWaypointFromBigMap = false;
-                        MapRenderState::triggerAddWaypoint = true;
-                        MapRenderState::showWaypointUI = true;
-                    } else if (matches(MapRenderState::g_hotkeys.openDeathPointMgr)) { // 死亡记录
-                        NativeIME::Close();
-                        MapRenderState::showDeathPointUI = !MapRenderState::showDeathPointUI;
-                    } else if (matches(MapRenderState::g_hotkeys.toggleMinimap)) { // 小地图开关
-                        MapRenderState::showMiniMap = !MapRenderState::showMiniMap;
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleMinimapShape)) { // 小地图形状
-                        if (MapRenderState::showMiniMap) { MapRenderState::isSquareMap = !MapRenderState::isSquareMap; LanguageManager::SaveConfig(); }
-                        else return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
-                    } else if (matches(MapRenderState::g_hotkeys.toggleMinimapRot)) { // 旋转
-                        if (MapRenderState::showMiniMap) { MapRenderState::rotateMiniMap = !MapRenderState::rotateMiniMap; LanguageManager::SaveConfig(); }
-                        else return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
-                    } else if (matches(MapRenderState::g_hotkeys.togglePreferOwWaypoints)) { // 切换优先主世界路径点
-                        MapRenderState::preferOverworldWaypoints = !MapRenderState::preferOverworldWaypoints;
-                        MapRenderState::TriggerMinimapToast(MapRenderState::preferOverworldWaypoints ?
-                            LanguageManager::GetText("TOAST_PREFER_OW_WP_ON") :
-                            LanguageManager::GetText("TOAST_PREFER_OW_WP_OFF"));
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleDoubleMinZoom)) { // 切换小地图最小变焦翻倍
-                        MapRenderState::minimapDoubleMinZoom = !MapRenderState::minimapDoubleMinZoom;
-                        MapRenderState::TriggerMinimapToast(MapRenderState::minimapDoubleMinZoom ? 
-                            LanguageManager::GetText("TOAST_DOUBLE_MIN_ZOOM_ON") : 
-                            LanguageManager::GetText("TOAST_DOUBLE_MIN_ZOOM_OFF"));
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleTransBg)) { // 切换未加载区块透明化
-                        MapRenderState::transparentMinimapBackground = !MapRenderState::transparentMinimapBackground;
-                        MapRenderState::TriggerMinimapToast(MapRenderState::transparentMinimapBackground ? 
-                            LanguageManager::GetText("TOAST_TRANS_BG_ON") : 
-                            LanguageManager::GetText("TOAST_TRANS_BG_OFF"));
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleViewDistance)) { // 切换视距覆盖层
-                        SpecialGridManager::showViewDistance = !SpecialGridManager::showViewDistance;
-                        MapRenderState::TriggerMinimapToast(SpecialGridManager::showViewDistance ? 
-                            LanguageManager::GetText("TOAST_VIEW_DIST_ON") : 
-                            LanguageManager::GetText("TOAST_VIEW_DIST_OFF"));
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleSimulationDistance)) { // 切换模拟距离覆盖层
-                        SpecialGridManager::showSimulationDistance = !SpecialGridManager::showSimulationDistance;
-                        MapRenderState::TriggerMinimapToast(SpecialGridManager::showSimulationDistance ? 
-                            LanguageManager::GetText("TOAST_SIM_DIST_ON") : 
-                            LanguageManager::GetText("TOAST_SIM_DIST_OFF"));
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.minimapZoomIn)) { // 小地图视野放大
-                        MapRenderState::miniMapZoomRadius = std::max(10.0f, MapRenderState::miniMapZoomRadius - 10.0f);
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.minimapZoomOut)) { // 小地图视野缩小
-                        float maxR = MapRenderState::minimapDoubleMinZoom ? 400.0f : 200.0f;
-                        MapRenderState::miniMapZoomRadius = std::min(maxR, MapRenderState::miniMapZoomRadius + 10.0f);
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleSlimeChunks)) { // 切换史莱姆区块
-                        MapRenderState::showSlimeChunks = !MapRenderState::showSlimeChunks;
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.switchWaypointSet)) { // 循环切换路径点集合
-                        WaypointManager::CycleNextWaypointSet();
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleSeedMap)) { // 种子地图
-                        NativeIME::Close();
-                        if (!MapRenderState::showBigMap) {
-                            MapRenderState::showBigMap = true;
-                            MapRenderState::bigMapViewDimensionId = -999;
-                            MapRenderState::bigMapOffsetX = 0;
-                            MapRenderState::bigMapOffsetZ = 0;
-                            MapRenderState::showSeedMap = true;
-                        } else {
-                            MapRenderState::showSeedMap = !MapRenderState::showSeedMap;
-                        }
-                    } else if (matches(MapRenderState::g_hotkeys.toggleHighways)) { // 主干道开关
-                        MapRenderState::anarchyHighways = !MapRenderState::anarchyHighways;
-                        LanguageManager::SaveConfig();
-                    } else if (matches(MapRenderState::g_hotkeys.toggleAnarchySettings)) { // 无规则探测设置
-                        NativeIME::Close();
-                        MapRenderState::showAnarchySettings = !MapRenderState::showAnarchySettings;
-                    } else if (matches(MapRenderState::g_hotkeys.toggleDrawingMode)) { // 涂鸦标注模式
-                        if (!MapRenderState::showBigMap) {
-                            NativeIME::Close();
-                            MapRenderState::showBigMap = true;
-                            MapRenderState::bigMapViewDimensionId = -999;
-                            MapRenderState::bigMapOffsetX = 0;
-                            MapRenderState::bigMapOffsetZ = 0;
-                            DrawingManager::s_drawingMode = true;
-                        } else {
-                            DrawingManager::ToggleDrawingMode();
-                        }
-                    } else if (matches(MapRenderState::g_hotkeys.enlargeMinimap)) { // 放大小地图 (切换模式)
-                        MapRenderState::g_enlargeToggled = !MapRenderState::g_enlargeToggled;
-                    } else if (MapRenderState::showBigMap && (matches(MapRenderState::g_hotkeys.centerCamera) || (int)wParam == VK_HOME)) { // 回到玩家位置并锁定跟随
-                        MapRenderState::bigMapFollowPlayer = true;
-                        MapRenderState::CenterCameraOnViewDimension(g_smoothPX, g_smoothPZ);
-                        LanguageManager::SaveConfig();
-                        MapRenderState::TriggerMinimapToast(LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_ON"));
-                    } else if (MapRenderState::showBigMap && matches(MapRenderState::g_hotkeys.toggleFollowPlayer)) { // 切换锁定跟随
-                        MapRenderState::bigMapFollowPlayer = !MapRenderState::bigMapFollowPlayer;
-                        if (MapRenderState::bigMapFollowPlayer) {
-                            MapRenderState::CenterCameraOnViewDimension(g_smoothPX, g_smoothPZ);
-                        }
-                        LanguageManager::SaveConfig();
-                        MapRenderState::TriggerMinimapToast(MapRenderState::bigMapFollowPlayer ?
-                            LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_ON") :
-                            LanguageManager::GetText("TOAST_BIGMAP_FOLLOW_OFF"));
-                    } else if (MapRenderState::showBigMap && (matches(MapRenderState::g_hotkeys.toggleBigMapUI) || ((int)wParam == VK_F1 && currentMods == 0))) { // 隐藏/恢复大地图全套界面
-                        MapRenderState::bigMapHideUI = !MapRenderState::bigMapHideUI;
-                        MapRenderState::TriggerMinimapToast(MapRenderState::bigMapHideUI ?
-                            LanguageManager::GetText("TOAST_BIGMAP_HIDE_UI_ON") :
-                            LanguageManager::GetText("TOAST_BIGMAP_HIDE_UI_OFF"));
+                HotkeyAction action = HotkeyAction::Count;
+                auto tryMatch = [&](HotkeyAction candidate) {
+                    if (action == HotkeyAction::Count && matches(candidate)) action = candidate;
+                };
 
+                // 与旧版 if/else 链保持一致的优先级；被原生键位注册接管的动作在 matches() 中跳过。
+                tryMatch(HotkeyAction::OpenBigMap);
+                tryMatch(HotkeyAction::OpenWaypointMgr);
+                tryMatch(HotkeyAction::QuickCreateWaypoint);
+                tryMatch(HotkeyAction::OpenDeathPointMgr);
+                tryMatch(HotkeyAction::ToggleMinimap);
+                tryMatch(HotkeyAction::ToggleMinimapShape);
+                tryMatch(HotkeyAction::ToggleMinimapRot);
+                tryMatch(HotkeyAction::TogglePreferOwWaypoints);
+                tryMatch(HotkeyAction::ToggleDoubleMinZoom);
+                tryMatch(HotkeyAction::ToggleTransBg);
+                tryMatch(HotkeyAction::ToggleViewDistance);
+                tryMatch(HotkeyAction::ToggleSimulationDistance);
+                tryMatch(HotkeyAction::MinimapZoomIn);
+                tryMatch(HotkeyAction::MinimapZoomOut);
+                tryMatch(HotkeyAction::ToggleSlimeChunks);
+                tryMatch(HotkeyAction::SwitchWaypointSet);
+                tryMatch(HotkeyAction::ToggleSeedMap);
+                tryMatch(HotkeyAction::ToggleHighways);
+                tryMatch(HotkeyAction::ToggleAnarchySettings);
+                tryMatch(HotkeyAction::ToggleDrawingMode);
+                if (MapRenderState::enlargeMinimapToggle) tryMatch(HotkeyAction::EnlargeMinimap);
+                if (MapRenderState::showBigMap) {
+                    // CenterCamera / ToggleFollowPlayer 在绘制循环里用 ImGui::IsKeyPressed 处理，
+                    // 这里不再重复匹配，避免原生键位下与绘制循环双重触发。
+                    tryMatch(HotkeyAction::ToggleBigMapUI);
+                    // 兼容旧版硬编码的 Home / F1 兜底（无修饰键时）
+                    if (action == HotkeyAction::Count && currentMods == 0) {
+                        if ((int)wParam == VK_HOME) action = HotkeyAction::CenterCamera;
+                        else if ((int)wParam == VK_F1) action = HotkeyAction::ToggleBigMapUI;
                     }
-                    if (MapRenderState::IsUIActive()) {
-                        SafeReleaseClientMouse();
-                        SafeClipCursorInternal(NULL);
-                        SafeShowHardwareCursor();
-                    } else {
-                        SafeGrabClientMouse();
-                        SafeHideHardwareCursor();
+                }
+
+                if (action != HotkeyAction::Count) {
+                    auto res = DispatchHotkeyAction(action, true);
+                    if (res == HotkeyDispatchResult::PassThrough) {
+                        return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
                     }
-                    return 1;
+                    if (res == HotkeyDispatchResult::Handled) return 1;
                 }
             }
 
@@ -1251,12 +1395,14 @@ namespace DX11Hook {
                 if (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) return 1;
                 if (uMsg >= 0x0240 && uMsg <= 0x0253) return 1; // WM_POINTERFIRST ~ WM_POINTERLAST (WM_POINTERDOWN 等)
 
-                // 吞噬多余键盘按键，防止游戏内人物移动
-                if (uMsg >= WM_KEYFIRST && uMsg <= WM_KEYLAST && wParam != VK_F11) {
+                // 键盘“按下”仍吞噬，防止游戏内人物移动/触发动作；
+                // 但“抬起”必须放行给游戏——否则游戏的 Keymapping 会卡在“按下”状态，
+                // 下一次物理按下被当成自动重复而不触发回调，表现为需要连按两次才能开关界面。
+                if (uMsg >= WM_KEYFIRST && uMsg <= WM_KEYLAST && uMsg != WM_KEYUP && uMsg != WM_SYSKEYUP && wParam != VK_F11) {
                     if (isTyping) {
                         return DefWindowProcW(hWnd, uMsg, wParam, lParam);
                     }
-                    return 1; 
+                    return 1;
                 }
                 
                 if (uMsg == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) {
@@ -7596,6 +7742,11 @@ namespace DX11Hook {
             bool isTyping = NativeIME::isTyping.load() || (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput);
             if (isTyping || MapRenderState::g_listeningHotkey != nullptr) return false;
 
+            // 原生键位注册接管后，长按状态由 KeyHandle 的 down/up 回调维护。
+            if (::ChiyanMap::Input::IsNativeHotkeyManaged(HotkeyAction::SelectExportArea)) {
+                return g_nativeSelectExportHeld.load(std::memory_order_relaxed);
+            }
+
             const auto& hk = MapRenderState::g_hotkeys.selectExportArea;
             if (hk.IsEmpty()) return false;
 
@@ -9928,26 +10079,32 @@ namespace DX11Hook {
         bool triggerCenter = false;
         bool triggerToggleFollow = false;
         if (!io.WantTextInput) {
-            const auto& hk = MapRenderState::g_hotkeys.centerCamera;
-            if (!hk.IsEmpty()) {
-                bool ctrlMatch = ((hk.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == io.KeyCtrl;
-                bool shiftMatch = ((hk.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == io.KeyShift;
-                bool altMatch = ((hk.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == io.KeyAlt;
-                if (ctrlMatch && shiftMatch && altMatch) {
-                    ImGuiKey igk = VirtualKeyToImGuiKey(hk.key);
-                    if (igk != ImGuiKey_None && ImGui::IsKeyPressed(igk)) triggerCenter = true;
+            // 原生键位注册接管时，界面外由 KeyHandle 回调触发；界面激活时按键被吞噬、原生回调收不到，
+            // 因此这里在界面激活时也接管，保证大地图内的居中/跟随仍可响应。
+            if (ShouldUseLegacyHotkey(HotkeyAction::CenterCamera) || MapRenderState::IsUIActive()) {
+                const auto& hk = MapRenderState::g_hotkeys.centerCamera;
+                if (!hk.IsEmpty()) {
+                    bool ctrlMatch = ((hk.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == io.KeyCtrl;
+                    bool shiftMatch = ((hk.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == io.KeyShift;
+                    bool altMatch = ((hk.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == io.KeyAlt;
+                    if (ctrlMatch && shiftMatch && altMatch) {
+                        ImGuiKey igk = VirtualKeyToImGuiKey(hk.key);
+                        if (igk != ImGuiKey_None && ImGui::IsKeyPressed(igk)) triggerCenter = true;
+                    }
                 }
+                if (ImGui::IsKeyPressed(ImGuiKey_Home)) triggerCenter = true;
             }
-            if (ImGui::IsKeyPressed(ImGuiKey_Home)) triggerCenter = true;
 
-            const auto& hkFollow = MapRenderState::g_hotkeys.toggleFollowPlayer;
-            if (!hkFollow.IsEmpty()) {
-                bool ctrlMatch = ((hkFollow.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == io.KeyCtrl;
-                bool shiftMatch = ((hkFollow.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == io.KeyShift;
-                bool altMatch = ((hkFollow.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == io.KeyAlt;
-                if (ctrlMatch && shiftMatch && altMatch) {
-                    ImGuiKey igk = VirtualKeyToImGuiKey(hkFollow.key);
-                    if (igk != ImGuiKey_None && ImGui::IsKeyPressed(igk)) triggerToggleFollow = true;
+            if (ShouldUseLegacyHotkey(HotkeyAction::ToggleFollowPlayer) || MapRenderState::IsUIActive()) {
+                const auto& hkFollow = MapRenderState::g_hotkeys.toggleFollowPlayer;
+                if (!hkFollow.IsEmpty()) {
+                    bool ctrlMatch = ((hkFollow.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == io.KeyCtrl;
+                    bool shiftMatch = ((hkFollow.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == io.KeyShift;
+                    bool altMatch = ((hkFollow.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == io.KeyAlt;
+                    if (ctrlMatch && shiftMatch && altMatch) {
+                        ImGuiKey igk = VirtualKeyToImGuiKey(hkFollow.key);
+                        if (igk != ImGuiKey_None && ImGui::IsKeyPressed(igk)) triggerToggleFollow = true;
+                    }
                 }
             }
         }
@@ -11011,6 +11168,18 @@ namespace DX11Hook {
             // 快捷键提示条 (提示支持组合键)
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.65f, 0.75f, 0.85f, 1.0f), "%s", LanguageManager::GetText("HOTKEY_COMBO_HINT"));
+            if (::ChiyanMap::Input::AreNativeHotkeysEnabled()) {
+                ImGui::Spacing();
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextColored(ImVec4(0.45f, 0.80f, 0.95f, 1.0f), "%s", LanguageManager::GetText("HOTKEY_NATIVE_HINT"));
+                ImGui::PopTextWrapPos();
+                if (ImGui::Button(LanguageManager::GetText("HOTKEY_NATIVE_RESTORE_ALL"))) {
+                    ::ChiyanMap::Input::RestoreNativeKeyManagement();
+                    MapRenderState::g_listeningHotkey = nullptr;
+                    LanguageManager::SaveConfig();
+                    setStatus(LanguageManager::GetText("HOTKEY_STATUS_RESET"), ImVec4(0.4f, 0.9f, 0.5f, 1.0f));
+                }
+            }
             if (anyConflict) {
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "⚠ %s", LanguageManager::GetText("HOTKEY_CONFLICT_BANNER"));
@@ -14447,41 +14616,50 @@ namespace DX11Hook {
 
                 bool isTextInputActive = NativeIME::isTyping.load() || (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput);
                 const auto& holdHk = MapRenderState::g_hotkeys.holdEntities;
-                if (!isTextInputActive && !holdHk.IsEmpty() && MapRenderState::g_listeningHotkey == nullptr) {
-                    bool keyState = (ReadPhysicalKeyState(holdHk.key) & 0x8000) != 0;
-                    if (keyState) {
-                        bool ctrlDown = ((ReadPhysicalKeyState(VK_CONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LCONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RCONTROL) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyCtrl);
-                        bool shiftDown = ((ReadPhysicalKeyState(VK_SHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LSHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RSHIFT) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyShift);
-                        bool altDown = ((ReadPhysicalKeyState(VK_MENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LMENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RMENU) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyAlt);
-                        bool ctrlOk  = ((holdHk.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == ctrlDown;
-                        bool shiftOk = ((holdHk.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == shiftDown;
-                        bool altOk   = ((holdHk.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == altDown;
-                        g_tabHeld = (ctrlOk && shiftOk && altOk);
+                if (ShouldUseLegacyHotkey(HotkeyAction::HoldEntities)) {
+                    if (!isTextInputActive && !holdHk.IsEmpty() && MapRenderState::g_listeningHotkey == nullptr) {
+                        bool keyState = (ReadPhysicalKeyState(holdHk.key) & 0x8000) != 0;
+                        if (keyState) {
+                            bool ctrlDown = ((ReadPhysicalKeyState(VK_CONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LCONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RCONTROL) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyCtrl);
+                            bool shiftDown = ((ReadPhysicalKeyState(VK_SHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LSHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RSHIFT) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyShift);
+                            bool altDown = ((ReadPhysicalKeyState(VK_MENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LMENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RMENU) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyAlt);
+                            bool ctrlOk  = ((holdHk.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == ctrlDown;
+                            bool shiftOk = ((holdHk.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == shiftDown;
+                            bool altOk   = ((holdHk.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == altDown;
+                            g_tabHeld = (ctrlOk && shiftOk && altOk);
+                        } else {
+                            g_tabHeld = false;
+                        }
                     } else {
                         g_tabHeld = false;
                     }
-                } else {
+                } else if (isTextInputActive) {
+                    // 原生键位模式下由 KeyHandle 的 up 回调复位；打字态额外兜底，避免状态卡住。
                     g_tabHeld = false;
                 }
 
                 const auto& enlargeHk = MapRenderState::g_hotkeys.enlargeMinimap;
-                if (!isTextInputActive && !enlargeHk.IsEmpty() && MapRenderState::g_listeningHotkey == nullptr && !MapRenderState::enlargeMinimapToggle) {
-                    bool keyState = (ReadPhysicalKeyState(enlargeHk.key) & 0x8000) != 0;
-                    if (keyState) {
-                        bool ctrlDown = ((ReadPhysicalKeyState(VK_CONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LCONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RCONTROL) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyCtrl);
-                        bool shiftDown = ((ReadPhysicalKeyState(VK_SHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LSHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RSHIFT) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyShift);
-                        bool altDown = ((ReadPhysicalKeyState(VK_MENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LMENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RMENU) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyAlt);
-                        bool ctrlOk  = ((enlargeHk.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == ctrlDown;
-                        bool shiftOk = ((enlargeHk.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == shiftDown;
-                        bool altOk   = ((enlargeHk.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == altDown;
-                        MapRenderState::g_enlargeHeld.store(ctrlOk && shiftOk && altOk);
+                if (ShouldUseLegacyHotkey(HotkeyAction::EnlargeMinimap)) {
+                    if (!isTextInputActive && !enlargeHk.IsEmpty() && MapRenderState::g_listeningHotkey == nullptr && !MapRenderState::enlargeMinimapToggle) {
+                        bool keyState = (ReadPhysicalKeyState(enlargeHk.key) & 0x8000) != 0;
+                        if (keyState) {
+                            bool ctrlDown = ((ReadPhysicalKeyState(VK_CONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LCONTROL) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RCONTROL) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyCtrl);
+                            bool shiftDown = ((ReadPhysicalKeyState(VK_SHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LSHIFT) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RSHIFT) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyShift);
+                            bool altDown = ((ReadPhysicalKeyState(VK_MENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_LMENU) & 0x8000) != 0) || ((ReadPhysicalKeyState(VK_RMENU) & 0x8000) != 0) || (ImGui::GetCurrentContext() && ImGui::GetIO().KeyAlt);
+                            bool ctrlOk  = ((enlargeHk.modifiers & MapRenderState::Hotkey::HK_MOD_CTRL) != 0) == ctrlDown;
+                            bool shiftOk = ((enlargeHk.modifiers & MapRenderState::Hotkey::HK_MOD_SHIFT) != 0) == shiftDown;
+                            bool altOk   = ((enlargeHk.modifiers & MapRenderState::Hotkey::HK_MOD_ALT) != 0) == altDown;
+                            MapRenderState::g_enlargeHeld.store(ctrlOk && shiftOk && altOk);
+                        } else {
+                            MapRenderState::g_enlargeHeld.store(false);
+                        }
                     } else {
-                        MapRenderState::g_enlargeHeld.store(false);
+                        if (!MapRenderState::enlargeMinimapToggle) {
+                            MapRenderState::g_enlargeHeld.store(false);
+                        }
                     }
-                } else {
-                    if (!MapRenderState::enlargeMinimapToggle) {
-                        MapRenderState::g_enlargeHeld.store(false);
-                    }
+                } else if (isTextInputActive && !MapRenderState::enlargeMinimapToggle) {
+                    MapRenderState::g_enlargeHeld.store(false);
                 }
 
                 // 【硬件光标革新】完全禁用 ImGui 软件绘制光标，全面回归操作系统原生硬件光标驱动。

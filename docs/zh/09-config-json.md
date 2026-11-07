@@ -305,6 +305,7 @@
     // 15. 快捷键映射表 (Hotkeys)
     // 每个按键包含虚拟键码 key、修饰键掩码 modifiers 以及布尔标识
     // ==========================================
+    "useNativeKeyRegistry": true,       // 是否接入 LeviLamina 原生键位注册 (推荐 true，可在游戏「设置 → 控制 → 键盘和鼠标」里改键并统一去重；false 完全回退到自带热键系统，修改后需重启游戏)
     "hotkeys": {
         "openBigMap": { "key": 77, "modifiers": 0 },                 // M 键: 打开/关闭大地图
         "openWaypointMgr": { "key": 85, "modifiers": 0 },            // U 键: 打开路径点管理器

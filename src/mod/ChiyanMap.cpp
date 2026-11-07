@@ -11,6 +11,8 @@
 #include "state/DatabaseManager.h"
 #include "state/DrawingManager.h"
 #include "state/MultiworldManager.h"
+#include "input/NativeHotkeys.h"
+#include "input/KeyBindingViewer.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/utils/SystemUtils.h"
 #include "ll/api/io/FileUtils.h"
@@ -112,6 +114,14 @@ bool ChiyanMap::load() {
         return false;
     }
 
+    // 在 load 阶段注册 LeviLamina 原生键位：必须早于原版 RemappingLayout::assignDefaultMapping，
+    // 否则键位不会出现在「设置 -> 控制」中，也无法与其它 Mod 统一去重。
+    ::ChiyanMap::Input::RegisterChiyanMapKeys();
+
+    // [快捷键视图] 注册 /chiyanmap 命令，打开「赤岩地图 · 快捷键」表单，
+    // 以独立、标注归属的方式列出本模组全部自定义按键（原版设置界面无法注入独立分区）。
+    ::ChiyanMap::Input::RegisterKeybindingViewerCommand();
+
     registerAllHooks();
     MapCacheManager::Init();
     WaypointManager::Init(); // 初始化地标 JSON 引擎
@@ -147,6 +157,8 @@ bool ChiyanMap::enable() {
     // 确保 BetterRenderDragon 启动扫描其原始机器码序言顺利完成
     hookClientInstanceUpdate();
 
+    ::ChiyanMap::Input::SetChiyanMapKeysActive(true);
+
     g_mouseListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::input::MouseInputEvent>(
         [](ll::event::input::MouseInputEvent& ev) {
             if (MapRenderState::g_isShuttingDown.load()) return;
@@ -171,6 +183,7 @@ bool ChiyanMap::disable() {
 
     // (1) 立即冻结所有钩子入口：置位后每个 hook 都直接 pass-through 原函数，
     //     不再触碰 ImGui 上下文、D3D 资源与玩家数据。
+    ::ChiyanMap::Input::SetChiyanMapKeysActive(false);
     MapRenderState::g_isShuttingDown.store(true);
     ClipCursor(NULL);
     if (g_mouseListener) {
