@@ -23,6 +23,7 @@
 #include <chrono>
 #include <atomic>
 #include <vector>
+#include <MinHook.h>
 #include <string>
 #include <algorithm>
 
@@ -30,6 +31,111 @@
 namespace ChiyanMapMem {
 extern std::atomic<bool> g_skipDeleteOnShutdown;
 }
+
+namespace {
+
+// 纯 Win32 文件写入，避免退出期经过 CRT 堆 / MallocRedirect。
+void TraceShutdown(const char* step) {
+    HANDLE h = CreateFileA(
+        "ChiyanMap_Shutdown.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr
+    );
+    if (h == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(h, 0, nullptr, FILE_END);
+    DWORD written = 0;
+    WriteFile(h, step, static_cast<DWORD>(lstrlenA(step)), &written, nullptr);
+    WriteFile(h, "\r\n", 2, &written, nullptr);
+    CloseHandle(h);
+}
+
+std::atomic<bool> g_disableCompleted{false};
+std::atomic<bool> g_exitGuardInstalled{false};
+
+using ExitProcess_t = void(WINAPI*)(UINT);
+// RtlExitUserProcess 的真实参数是 NTSTATUS；x64 下调用约定与 32 位整数参数
+// 完全等价，这里统一用 UINT/WINAPI 以免依赖未随 windows.h 引入的 NTSTATUS 定义。
+using RtlExitUserProcess_t = void(WINAPI*)(UINT);
+ExitProcess_t g_originalExitProcess = nullptr;
+RtlExitUserProcess_t g_originalRtlExitUserProcess = nullptr;
+
+// [Arke 兼容性·退出崩溃] 崩溃栈确认 amdxc64.dll 的 0xC0000409 fastfail 发生在
+// LdrShutdownProcess 阶段：arke.dll 的静态析构释放 D3D12 对象时，AMD 驱动已进入
+// 半拆卸状态。该阶段只负责释放资源，对存档与用户数据没有任何贡献（所有模组的
+// disable() 与 CRT atexit 回调都已在 ExitProcess 之前执行完毕）。
+// 因此当 arke.dll 同时加载时，在这里直接终止进程，跳过整个 DLL detach 阶段。
+// 进程终止时操作系统会回收全部内存、句柄与 GPU 对象，不会留下残留状态。
+void WINAPI HookedExitProcess(UINT exitCode) {
+    HMODULE hArke = GetModuleHandleW(L"arke.dll");
+    TraceShutdown(hArke ? "ExitProcess: arke present, skipping LdrShutdownProcess"
+                        : "ExitProcess: normal shutdown");
+    if (hArke) {
+        TraceShutdown(g_disableCompleted.load(std::memory_order_acquire)
+                          ? "ExitProcess: ChiyanMap disable completed"
+                          : "ExitProcess: WARNING disable did not complete");
+        TerminateProcess(GetCurrentProcess(), exitCode);
+        // TerminateProcess 永不返回；若被外部干预，仍走原函数以免卡死。
+    }
+    if (g_originalExitProcess) {
+        g_originalExitProcess(exitCode);
+    } else {
+        TerminateProcess(GetCurrentProcess(), exitCode);
+    }
+}
+
+// 兜底路径：部分运行时直接调用 ntdll!RtlExitUserProcess 而不经过 kernel32!ExitProcess，
+// 它内部才会调用 LdrShutdownProcess，因此同样在这里截断。
+void WINAPI HookedRtlExitUserProcess(UINT status) {
+    if (GetModuleHandleW(L"arke.dll")) {
+        TraceShutdown("RtlExitUserProcess: arke present, skipping LdrShutdownProcess");
+        TerminateProcess(GetCurrentProcess(), status);
+    }
+    if (g_originalRtlExitUserProcess) {
+        g_originalRtlExitUserProcess(status);
+    }
+}
+
+void InstallExitProcessGuard() {
+    // 只有与 Arke 同时加载才需要；单独加载时保持原版优雅退出流程。
+    if (!GetModuleHandleW(L"arke.dll")) return;
+    // DX11Hook::init() 已初始化 MinHook；重复调用返回 ALREADY_INITIALIZED，无副作用。
+    MH_Initialize();
+    bool installed = false;
+
+    if (HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll")) {
+        if (void* target = reinterpret_cast<void*>(GetProcAddress(hKernel32, "ExitProcess"))) {
+            if (MH_CreateHook(target, reinterpret_cast<void*>(&HookedExitProcess),
+                              reinterpret_cast<void**>(&g_originalExitProcess)) == MH_OK) {
+                if (MH_EnableHook(target) == MH_OK) {
+                    installed = true;
+                } else {
+                    MH_RemoveHook(target);
+                }
+            }
+        }
+    }
+
+    if (HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll")) {
+        if (void* target = reinterpret_cast<void*>(GetProcAddress(hNtdll, "RtlExitUserProcess"))) {
+            if (MH_CreateHook(target, reinterpret_cast<void*>(&HookedRtlExitUserProcess),
+                              reinterpret_cast<void**>(&g_originalRtlExitUserProcess)) == MH_OK) {
+                if (MH_EnableHook(target) == MH_OK) {
+                    installed = true;
+                } else {
+                    MH_RemoveHook(target);
+                }
+            }
+        }
+    }
+
+    if (installed) {
+        g_exitGuardInstalled.store(true, std::memory_order_release);
+        TraceShutdown("enable: exit guard installed");
+    } else {
+        TraceShutdown("enable: WARNING exit guard install failed");
+    }
+}
+
+} // namespace
 
 ll::event::ListenerPtr g_mouseListener = nullptr;
 
@@ -164,10 +270,14 @@ bool ChiyanMap::enable() {
             }
         }
     );
+
+    // arke.dll 在 load 阶段就已加载，此处可稳定检测到共载场景。
+    InstallExitProcessGuard();
     return true;
 }
 
 bool ChiyanMap::disable() {
+    TraceShutdown("disable: enter");
     // [退出崩溃修复] 整个退出流程必须严格幂等：LeviLamina 在进程退出时可能多次触发，
     // 重复 join / 重复释放正是堆损坏与死锁的来源之一。
     // [退出崩溃修复·第二轮] 必须最先置位：此后本 DLL 所有堆释放（含 CRT 在
@@ -176,7 +286,10 @@ bool ChiyanMap::disable() {
     ChiyanMapMem::g_skipDeleteOnShutdown.store(true, std::memory_order_relaxed);
 
     static std::atomic<bool> s_disableStarted{false};
-    if (s_disableStarted.exchange(true)) return true;
+    if (s_disableStarted.exchange(true)) {
+        TraceShutdown("disable: duplicate call ignored");
+        return true;
+    }
 
     // (1) 立即冻结所有钩子入口：置位后每个 hook 都直接 pass-through 原函数，
     //     不再触碰 ImGui 上下文、D3D 资源与玩家数据。
@@ -202,23 +315,38 @@ bool ChiyanMap::disable() {
     DrawingManager::SaveDrawings();
     MultiworldManager::SaveConfig();
     SpecialGridManager::Shutdown();
+    TraceShutdown("disable: user data saved");
 
     // (4) 停止并 join 全部后台线程（种子 worker / 缓存写 worker / 磁盘 IO / PNG 导出）。
     //     线程入口代码位于本 DLL，绝不能在 DLL 卸载或 CRT 静态析构后继续运行。
     SeedMapManager::Shutdown();
     shutdownCacheWriteThread();
     MapCacheManager::Shutdown();
+    TraceShutdown("disable: background threads joined");
 
-    // (5) 关闭数据库，并冻结 DX11 渲染（等待在飞帧、恢复 WndProc、停止烘焙线程）。
+    // (5) 关闭数据库，并冻结 DX11 渲染（等待在飞帧、恢复 WndProc、停止烘焙线程、
+    //     按依赖顺序 Release 全部 D3D COM 对象）。
     DatabaseManager::Shutdown();
     shutdownDX11Hook();
+    TraceShutdown("disable: dx shutdown done");
 
-    // [退出崩溃修复·关键] 进程即将终止，此处刻意不再主动 delete / Release /
-    // DestroyContext / clear 大容器。此前在 LdrShutdownProcess 与 CRT 静态析构阶段
-    // 集中释放 ImGui 上下文、D3D COM 对象、数百个 RegionData 和 11MB 双缓冲，
-    // 会与 LeviLamina allocator、MallocRedirect 已半拆卸的堆交互，
-    // 使后续 _free_base -> RtlFreeHeap 读到损坏的堆块头而 0xC0000005。
-    // 这些内存由操作系统在进程终止时统一回收，代价仅为退出瞬间的“有意泄漏”。
+    // [退出崩溃修复·关键] 堆内存（ImGui 上下文对象、RegionData、双缓冲、STL 容器）
+    // 在此刻意泄漏：它们由 CRT 在 DLL_PROCESS_DETACH 阶段自动析构，而那时
+    // LeviLamina allocator / MallocRedirect 已半拆卸，_free_base -> RtlFreeHeap
+    // 会读到损坏的堆块头而 0xC0000005（详见 MemoryOperators.cpp）。
+    // D3D COM 对象走 IUnknown::Release、不经过该堆，已在上面完整释放。
+    // 但实测（16:21 / 16:26 / 18:59 三次崩溃栈逐帧一致）证明：仅靠提前释放
+    // 并不能阻止 arke.dll 在 LdrShutdownProcess 阶段的静态析构触发 AMD 驱动
+    // fastfail，因此 enable() 中额外安装了 ExitProcess 拦截来跳过该阶段。
+    g_disableCompleted.store(true, std::memory_order_release);
+    TraceShutdown("disable: complete");
+
+    // 兜底：若 ExitProcess 钩子因系统 DLL 前缀过短等原因安装失败，就在清理完成后
+    // 直接终止进程，仍然跳过必然崩溃的 LdrShutdownProcess 阶段。
+    if (!g_exitGuardInstalled.load(std::memory_order_acquire) && GetModuleHandleW(L"arke.dll")) {
+        TraceShutdown("disable: exit guard missing, fallback TerminateProcess");
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
     return true;
 }
 

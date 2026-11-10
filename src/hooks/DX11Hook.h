@@ -25,6 +25,8 @@
 #include <MinHook.h>
 #include <safetyhook.hpp>
 #include <atomic>
+#include <cstdint>
+#include <new>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -221,15 +223,58 @@ namespace DX11Hook {
     typedef HRESULT(__stdcall* ResizeBuffers_t)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
     typedef void(__stdcall* ExecuteCommandLists_t)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 
-    inline safetyhook::InlineHook g_hookPresent;
-    inline safetyhook::InlineHook g_hookPresent1;
-    inline safetyhook::InlineHook g_hookResizeBuffers;
-    inline safetyhook::InlineHook g_hookExecuteCommandLists;
+    struct PermanentHook {
+        alignas(safetyhook::InlineHook) uint8_t m_storage[sizeof(safetyhook::InlineHook)]{};
+        bool m_initialized = false;
+
+        PermanentHook() = default;
+        // 刻意空析构：退出时不调用 InlineHook::~InlineHook() / reset()，
+        // 避免在进程终止阶段回写机器码破坏已卸载代码页或链式 hook。
+        // 本 DLL 已被 GET_MODULE_HANDLE_EX_FLAG_PIN 钉在进程中，
+        // 跳板与钩子函数在退出全程均驻留内存并直通 (pass-through) 原函数。
+        ~PermanentHook() = default;
+
+        PermanentHook(const PermanentHook&) = delete;
+        PermanentHook& operator=(const PermanentHook&) = delete;
+
+        PermanentHook& operator=(safetyhook::InlineHook&& h) noexcept {
+            // 已安装的钩子永不重置：退出期 InlineHook::reset() 会把安装时读到的
+            // 原始机器码写回 D3D12Core / DXGI 代码页，抹掉后装的 arke / BRD 链式
+            // hook 序言。重复安装时让临时 hook 自行析构撤销它刚写入的字节即可。
+            if (m_initialized) {
+                return *this;
+            }
+            // create_inline 失败时返回无效 hook，不把它当成已安装的跳板。
+            if (!h) {
+                return *this;
+            }
+            new (m_storage) safetyhook::InlineHook(std::move(h));
+            m_initialized = true;
+            return *this;
+        }
+
+        template <typename RetType = void, typename... Args>
+        RetType call(Args... args) {
+            return reinterpret_cast<safetyhook::InlineHook*>(m_storage)->call<RetType>(args...);
+        }
+
+        explicit operator bool() const noexcept { return m_initialized; }
+    };
+
+    inline PermanentHook g_hookPresent;
+    inline PermanentHook g_hookPresent1;
+    inline PermanentHook g_hookResizeBuffers;
+    inline PermanentHook g_hookExecuteCommandLists;
 
     inline ID3D11Device* g_pd3dDevice = nullptr;
     inline ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
     inline ID3D11On12Device* g_d3d11On12Device = nullptr;
-    inline ID3D12CommandQueue* g_pGameCommandQueue = nullptr;
+    // 由任意渲染线程在 hkExecuteCommandLists 中写入、由主线程在 shutdown() 中取走并
+    // Release，必须原子化：重复 AddRef 会让退出期引用计数无法归零，使游戏 D3D12
+    // 命令队列在 arke.dll 静态析构时仍处于半绑定状态。
+    inline std::atomic<ID3D12CommandQueue*> g_pGameCommandQueue{nullptr};
+    inline ID3D11SamplerState* g_pPointSampler = nullptr;
+    inline ID3D11SamplerState* g_pLinearSampler = nullptr;
 
     inline HWND g_hWnd = nullptr;
     inline WNDPROC oWndProc = nullptr;
@@ -249,7 +294,7 @@ namespace DX11Hook {
     inline ID3D11RenderTargetView* g_cachedRTVs[8] = {};
     inline UINT g_cachedBufferCount = 0;
     inline void InvalidateCachedWrappedResources() {
-        for (UINT i = 0; i < g_cachedBufferCount && i < 8; ++i) {
+        for (UINT i = 0; i < 8; ++i) {
             if (g_cachedRTVs[i]) { g_cachedRTVs[i]->Release(); g_cachedRTVs[i] = nullptr; }
             if (g_cachedWrappedBuffers[i]) { g_cachedWrappedBuffers[i]->Release(); g_cachedWrappedBuffers[i] = nullptr; }
         }
@@ -590,20 +635,20 @@ namespace DX11Hook {
     inline std::atomic<bool> g_renderingFrame{false};
 
     inline void SafeDestroyImGuiContext() {
-        __try {
-            ImGui_ImplDX11_Shutdown();
-            ImGui_ImplWin32_Shutdown();
-            ImGui::DestroyContext();
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        // 三段彼此独立地保护：任何一个后端在拆卸期抛异常，也不能跳过
+        // 其余两步，否则 GImGui / WndProc 后端会残留半销毁状态。
+        __try { ImGui_ImplDX11_Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try { ImGui_ImplWin32_Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try { ImGui::DestroyContext(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     // [退出崩溃修复] 只负责停止并 join 持久化烘焙线程。
-    // 退出阶段刻意不释放 D3D11/D3D12/ImGui 资源、纹理贴图与全局容器：
-    // 这些对象混合由 LeviLamina allocator 与 CRT 堆分配，在 LdrShutdownProcess /
-    // CRT 静态析构阶段集中 delete / Release / DestroyContext，会破坏堆块链表，
-    // 使随后游戏全局对象析构时 _free_base -> RtlFreeHeap 读到失效的 LIST_ENTRY
-    // （崩溃现场：0xC0000005，mov rax,[r15]，r15 = 0xFFCC0000FFCC0000）。
-    // 进程终止时由操作系统统一回收，属于刻意的退出期「有意泄漏」。
+    // 堆内存（STL 容器、ImGui 上下文对象等）在退出阶段刻意泄漏：这些对象混合由
+    // LeviLamina allocator 与 CRT 堆分配，在 LdrShutdownProcess / CRT 静态析构阶段
+    // 集中 delete 会破坏堆块链表，使随后游戏全局对象析构时 _free_base ->
+    // RtlFreeHeap 读到失效的 LIST_ENTRY（历史崩溃 0xC0000005, mov rax,[r15]）。
+    // 注意：这只适用于堆内存。D3D COM 对象走 IUnknown::Release，不经过该堆，
+    // 反而必须在退出前完整释放（见下方 shutdown() 的 Arke 兼容性说明）。
     inline void StopBackgroundThreads() {
         if (g_bakingThread) {
             g_bakingExit.store(true);
@@ -619,11 +664,16 @@ namespace DX11Hook {
 
     // 【关闭期冻结】由 ChiyanMap::disable() 在其它后台线程全部停止之后调用。
     // 职责：(1) 精确等待仍在 RenderImGui 中的最后一帧退出；(2) 恢复游戏原始 WndProc；
-    // (3) 停止并 join 烘焙线程。
-    // MinHook / SafetyHook 跳板保持不卸载（主动回写机器码会破坏 LeviLamina 与
-    // BetterRenderDragon 的链式 hook）；ChiyanMap::enable() 已把本 DLL 钉在进程内，
-    // 保证跳板在整个退出流程中始终有效，配合 g_isShuttingDown 直接 pass-through。
+    // (3) 停止并 join 烘焙线程；(4) 完整、有序释放本模组持有的 D3D COM 资源。
+    // MinHook / SafetyHook 跳板保持不卸载（主动回写机器码会破坏 LeviLamina、
+    // BetterRenderDragon 与 arke 的链式 hook）；ChiyanMap::enable() 已把本 DLL 钉在
+    // 进程内，保证跳板在整个退出流程中始终有效，配合 g_isShuttingDown 直接 pass-through。
     inline void shutdown() {
+        // 退出流程可能被 LeviLamina 触发多次；重复 Release COM 对象会直接破坏
+        // D3D12 驱动内部引用计数。
+        static std::atomic<bool> s_shutdownDone{false};
+        if (s_shutdownDone.exchange(true)) return;
+
         // 等待在飞帧自然退出（最多 200ms），取代原先固定 Sleep(30) 的猜测式等待。
         for (int i = 0; i < 200 && g_renderingFrame.load(); ++i) {
             Sleep(1);
@@ -637,12 +687,93 @@ namespace DX11Hook {
         }
 
         StopBackgroundThreads();
+
+        // [退出与 Arke 等 D3D12 模组协同修复]
+        // 必须完整、有序地释放 D3D11On12、D3D11 上下文与关联的 DirectX 资源，解除对底层 D3D12 设备与
+        // 命令队列的绑定。此前因误判堆损坏根因而刻意泄漏 D3D 资源，导致进程退出阶段（LdrShutdownProcess）
+        // d3d11on12.dll 先于 arke.dll 被操作系统卸载，使 AMD 显卡驱动内部设备状态损坏，
+        // 最终使 arke.dll 析构释放其自身的 ID3D12Resource 时在 amdxc64.dll 触发 0xC0000005 -> 0xC0000409 崩溃。
+        InvalidateCachedWrappedResources();
+
+        for (auto& p : g_regionSRVs) {
+            if (p.second) {
+                p.second->Release();
+                p.second = nullptr;
+            }
+        }
+        for (auto& p : g_regionTextures) {
+            if (p.second) {
+                p.second->Release();
+                p.second = nullptr;
+            }
+        }
+        for (auto& p : g_branchSRVs) {
+            if (p.second) {
+                p.second->Release();
+                p.second = nullptr;
+            }
+        }
+        for (auto& p : g_branchTextures) {
+            if (p.second) {
+                p.second->Release();
+                p.second = nullptr;
+            }
+        }
+        EntityIconManager::ReleaseAll();
+
+        if (g_mapTextureView) {
+            g_mapTextureView->Release();
+            g_mapTextureView = nullptr;
+        }
+        if (g_mapTexture) {
+            g_mapTexture->Release();
+            g_mapTexture = nullptr;
+        }
+        if (g_pPointSampler) {
+            g_pPointSampler->Release();
+            g_pPointSampler = nullptr;
+        }
+        if (g_pLinearSampler) {
+            g_pLinearSampler->Release();
+            g_pLinearSampler = nullptr;
+        }
+
+        if (g_imguiInitialized) {
+            SafeDestroyImGuiContext();
+            g_imguiInitialized = false;
+        }
+
+        if (g_pd3dDeviceContext) {
+            ID3D11RenderTargetView* nullRTV = nullptr;
+            g_pd3dDeviceContext->OMSetRenderTargets(1, &nullRTV, NULL);
+            g_pd3dDeviceContext->ClearState();
+            g_pd3dDeviceContext->Flush();
+        }
+
+        if (g_d3d11On12Device) {
+            g_d3d11On12Device->Release();
+            g_d3d11On12Device = nullptr;
+        }
+
+        if (g_pd3dDeviceContext) {
+            g_pd3dDeviceContext->Release();
+            g_pd3dDeviceContext = nullptr;
+        }
+        if (g_pd3dDevice) {
+            g_pd3dDevice->Release();
+            g_pd3dDevice = nullptr;
+        }
+
+        // 一次性取走并释放游戏 DIRECT 队列引用：确保 AddRef/Release 严格配对，
+        // 且之后的 hkExecuteCommandLists 绝不会再看到一个半释放的队列指针。
+        if (auto* queue = g_pGameCommandQueue.exchange(nullptr, std::memory_order_acq_rel)) {
+            queue->Release();
+        }
     }
 
     inline HRESULT __stdcall hkResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
         if (MapRenderState::g_isShuttingDown.load()) {
             return g_hookResizeBuffers.call<HRESULT>(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
-            return S_OK;
         }
         // [性能] ResizeBuffers 会使所有后备缓冲失效，必须释放缓存的包装资源 + RTV，
         // 否则下一帧 GetBuffer 返回的新资源与缓存的旧包装资源不匹配 → 渲染到已释放的缓冲 → 崩溃。
@@ -662,13 +793,18 @@ namespace DX11Hook {
     inline void __stdcall hkExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists, ID3D12CommandList* const* ppCommandLists) {
         if (MapRenderState::g_isShuttingDown.load()) {
             return g_hookExecuteCommandLists.call<void>(pQueue, NumCommandLists, ppCommandLists);
-            return;
         }
-        if (!g_pGameCommandQueue) {
+        if (!g_pGameCommandQueue.load(std::memory_order_acquire) && pQueue) {
             D3D12_COMMAND_QUEUE_DESC desc = pQueue->GetDesc();
             if (desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
-                g_pGameCommandQueue = pQueue;
-                g_pGameCommandQueue->AddRef();
+                // 多个渲染线程可能同时首次提交命令。只允许一个线程持有队列引用，
+                // 否则重复 AddRef / 指针互相覆盖会留下无法在退出期归零的引用。
+                pQueue->AddRef();
+                ID3D12CommandQueue* expected = nullptr;
+                if (!g_pGameCommandQueue.compare_exchange_strong(
+                        expected, pQueue, std::memory_order_release, std::memory_order_relaxed)) {
+                    pQueue->Release();
+                }
             }
         }
         return g_hookExecuteCommandLists.call<void>(pQueue, NumCommandLists, ppCommandLists);
@@ -2275,8 +2411,7 @@ namespace DX11Hook {
 
     inline void PointSamplerCallback(const ImDrawList* parent_list, const ImDrawCmd* cmd) {
         if (!g_pd3dDeviceContext) return;
-        static ID3D11SamplerState* pPointSampler = nullptr;
-        if (!pPointSampler) {
+        if (!g_pPointSampler && g_pd3dDevice) {
             D3D11_SAMPLER_DESC desc;
             ZeroMemory(&desc, sizeof(desc));
             desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -2288,15 +2423,16 @@ namespace DX11Hook {
             desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
             desc.MinLOD = 0.0f;
             desc.MaxLOD = D3D11_FLOAT32_MAX;
-            g_pd3dDevice->CreateSamplerState(&desc, &pPointSampler);
+            g_pd3dDevice->CreateSamplerState(&desc, &g_pPointSampler);
         }
-        g_pd3dDeviceContext->PSSetSamplers(0, 1, &pPointSampler);
+        if (g_pPointSampler) {
+            g_pd3dDeviceContext->PSSetSamplers(0, 1, &g_pPointSampler);
+        }
     }
 
     inline void LinearSamplerCallback(const ImDrawList* parent_list, const ImDrawCmd* cmd) {
         if (!g_pd3dDeviceContext) return;
-        static ID3D11SamplerState* pLinearSampler = nullptr;
-        if (!pLinearSampler) {
+        if (!g_pLinearSampler && g_pd3dDevice) {
             D3D11_SAMPLER_DESC desc;
             ZeroMemory(&desc, sizeof(desc));
             desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -2308,9 +2444,11 @@ namespace DX11Hook {
             desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
             desc.MinLOD = 0.0f;
             desc.MaxLOD = D3D11_FLOAT32_MAX;
-            g_pd3dDevice->CreateSamplerState(&desc, &pLinearSampler);
+            g_pd3dDevice->CreateSamplerState(&desc, &g_pLinearSampler);
         }
-        g_pd3dDeviceContext->PSSetSamplers(0, 1, &pLinearSampler);
+        if (g_pLinearSampler) {
+            g_pd3dDeviceContext->PSSetSamplers(0, 1, &g_pLinearSampler);
+        }
     }
 
     // ==========================================
@@ -14524,11 +14662,12 @@ namespace DX11Hook {
                 initAttempted = true;
                 g_pd3dDevice->GetImmediateContext(&g_pd3dDeviceContext);
             } else {
-                if (!g_pGameCommandQueue) { return; }
+                ID3D12CommandQueue* pGameQueue = g_pGameCommandQueue.load(std::memory_order_acquire);
+                if (!pGameQueue) { return; }
                 initAttempted = true;
                 ID3D12Device* pD3D12Device = nullptr;
                 if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), (void**)&pD3D12Device))) {
-                    if (SUCCEEDED(D3D11On12CreateDevice(pD3D12Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, (IUnknown**)&g_pGameCommandQueue, 1, 0, &g_pd3dDevice, &g_pd3dDeviceContext, nullptr))) {
+                    if (SUCCEEDED(D3D11On12CreateDevice(pD3D12Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, (IUnknown**)&pGameQueue, 1, 0, &g_pd3dDevice, &g_pd3dDeviceContext, nullptr))) {
                         g_pd3dDevice->QueryInterface(__uuidof(ID3D11On12Device), (void**)&g_d3d11On12Device);
                     }
                     pD3D12Device->Release();
